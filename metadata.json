@@ -1,0 +1,6 @@
+{
+  "name": "ZIO CLOTHES — POS, Inventario & Créditos",
+  "description": "Sistema integral de punto de venta, inventario con tallas y colores, créditos, cuentas por cobrar, abonos, caja y reportes para ZIO CLOTHES.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

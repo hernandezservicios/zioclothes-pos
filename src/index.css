@@ -1,0 +1,88 @@
+@import "tailwindcss";
+
+@page {
+  size: 80mm auto;
+  margin: 0mm;
+}
+
+@media print {
+  html, body {
+    width: 80mm !important;
+    max-width: 80mm !important;
+    margin: 0 auto !important;
+    padding: 0 !important;
+    background: #ffffff !important;
+    color: #000000 !important;
+    font-family: Arial, Helvetica, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  /* Hide app navigation, sidebar, toasts, action buttons and anything with .no-print */
+  nav,
+  aside,
+  button,
+  .no-print,
+  #sidebar,
+  #navbar {
+    display: none !important;
+  }
+
+  /* Reset modal containers so only the ticket prints cleanly at 80mm */
+  .fixed.inset-0 {
+    position: static !important;
+    background: transparent !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+    padding: 0 !important;
+    margin: 0 auto !important;
+    display: block !important;
+    width: 80mm !important;
+    max-width: 80mm !important;
+    height: auto !important;
+    overflow: visible !important;
+    box-shadow: none !important;
+  }
+
+  .shadow-2xl,
+  .shadow-md,
+  .shadow-lg,
+  .shadow-xs {
+    box-shadow: none !important;
+  }
+
+  /* Ensure ticket renders with pure vector sharpness and high thermal print contrast */
+  .receipt-ticket,
+  #thermal-receipt-content,
+  #abono-thermal-voucher,
+  #thermal-shift-closure-voucher {
+    width: 80mm !important;
+    max-width: 80mm !important;
+    margin: 0 auto !important;
+    padding: 3mm 2.5mm !important;
+    background: #ffffff !important;
+    color: #000000 !important;
+    font-weight: 600 !important;
+    page-break-inside: avoid;
+    break-inside: avoid;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: geometricPrecision;
+  }
+
+  .receipt-ticket *,
+  #thermal-receipt-content *,
+  #abono-thermal-voucher *,
+  #thermal-shift-closure-voucher * {
+    color: #000000 !important;
+    opacity: 1 !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+    text-shadow: none !important;
+  }
+
+  .receipt-ticket--58mm {
+    width: 58mm !important;
+    max-width: 58mm !important;
+    padding: 2mm 2mm !important;
+  }
+}
