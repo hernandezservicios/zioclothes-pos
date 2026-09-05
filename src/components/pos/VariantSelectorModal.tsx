@@ -3,6 +3,7 @@ import { Product, ProductVariant } from '../../types';
 import { formatCurrency } from '../../utils/formatters';
 import { X, Check, ShoppingBag, AlertCircle } from 'lucide-react';
 import { sounds } from '../../utils/soundEffects';
+import { toDisplayableImageUrl } from '../../utils/imageUrl';
 
 interface VariantSelectorModalProps {
   product: Product | null;
@@ -74,7 +75,7 @@ export const VariantSelectorModal: React.FC<VariantSelectorModalProps> = ({
           <div className="flex gap-4 items-center bg-white p-3 rounded-2xl border border-[#E4DDD2]">
             {product.imagenUrl && (
               <img
-                src={product.imagenUrl}
+                src={toDisplayableImageUrl(product.imagenUrl)}
                 alt={product.nombre}
                 className="w-16 h-16 rounded-xl object-cover border border-[#E4DDD2]"
               />

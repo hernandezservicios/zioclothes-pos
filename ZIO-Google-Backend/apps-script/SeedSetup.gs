@@ -248,9 +248,29 @@ function seedInitialData() {
     DbHelper.insertRows('Configuracion', configs);
   }
 
+  // FASE FINAL (integración CONFIG -> almacenamiento de imágenes): una
+  // instalación "lista para usar" también debe dejar resuelta su carpeta
+  // de Drive para fotos de productos, sin depender de que alguien suba una
+  // fotografía primero. Se reutiliza tal cual la función administrativa ya
+  // centralizada en ProductsController.gs (PRODUCT_IMAGES_FOLDER_ID vía
+  // PropertiesService, getOrCreateProductImagesFolder) -- este archivo NO
+  // duplica ni reimplementa nada de Drive, solo llama a la función que ya
+  // existe. Se integra aquí (seedInitialData) y no en setupDatabase()
+  // porque seedInitialData es el único flujo que deja una instalación
+  // nueva realmente utilizable de principio a fin (hojas + roles +
+  // usuarios + configuración semilla) -- setupDatabase() por sí solo sigue
+  // siendo un paso puramente estructural (crear hojas/encabezados) que debe
+  // poder re-ejecutarse sobre una instalación ya existente (por ejemplo,
+  // para añadir una hoja nueva a un negocio ya en producción) sin
+  // necesidad de volver a tocar Drive cada vez. Es idempotente: si
+  // PRODUCT_IMAGES_FOLDER_ID ya está configurado y la carpeta sigue siendo
+  // accesible, no crea nada nuevo, solo la reutiliza.
+  const productImageStorage = ProductsController.initializeProductImageStorage();
+
   Logger.log('[SeedSetup] Datos iniciales sembrados con éxito.');
   return {
     success: true,
-    message: 'Base de datos inicializada con usuarios semilla (admin/admin123, cajero/cajero123, gerente/gerente123) y roles maestros.'
+    message: 'Base de datos inicializada con usuarios semilla (admin/admin123, cajero/cajero123, gerente/gerente123) y roles maestros.',
+    productImageStorage: productImageStorage
   };
 }

@@ -11,6 +11,7 @@ import {
 import { useAuth } from '../../context/AuthContext';
 import { useDataStore } from '../../context/DataStoreContext';
 import { formatCurrency } from '../../utils/formatters';
+import { toDisplayableImageUrl } from '../../utils/imageUrl';
 import {
   TrendingUp,
   DollarSign,
@@ -719,7 +720,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
                   </span>
                   {p.imagenUrl && (
                     <img
-                      src={p.imagenUrl}
+                      src={toDisplayableImageUrl(p.imagenUrl)}
                       alt={p.nombre}
                       className="w-10 h-10 rounded-xl object-cover border border-[#E4DDD2] shrink-0"
                     />

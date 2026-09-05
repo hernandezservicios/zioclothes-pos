@@ -3,6 +3,7 @@ import { Product, ProductVariant, Category, Size, Color } from '../../types';
 import { useToast } from '../../context/ToastContext';
 import { productsApi } from '../../services/productsApi';
 import { formatCurrency } from '../../utils/formatters';
+import { toDisplayableImageUrl } from '../../utils/imageUrl';
 import {
   X,
   Camera,
@@ -974,7 +975,7 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
               <div className="space-y-3">
                 <div className="relative w-full h-44 sm:h-52 rounded-2xl overflow-hidden border border-[#E4DDD2] bg-[#FAF8F4] group flex items-center justify-center">
                   <img
-                    src={imagenUrl}
+                    src={toDisplayableImageUrl(imagenUrl)}
                     alt="Previsualización de Prenda"
                     className="w-full h-full object-contain"
                   />

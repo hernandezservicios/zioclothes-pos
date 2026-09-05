@@ -135,6 +135,30 @@ const mockSpreadsheet = new MockSpreadsheet();
 const scriptProperties = { SPREADSHEET_ID: 'MOCK-SPREADSHEET-ID' };
 const cacheStore = new Map();
 
+/* ------------------------------------------------------------
+   MOCK: DriveApp (mínimo necesario para
+   ProductsController.getOrCreateProductImagesFolder /
+   initializeProductImageStorage, invocadas ahora por seedInitialData() en
+   el paso de seed compartido de abajo). NO simula subida real de blobs
+   (createFile/setSharing) porque ningún test invoca handleUploadImage
+   directamente -- solo la resolución/creación de la carpeta.
+   ------------------------------------------------------------ */
+let mockDriveIdCounter = 0;
+const driveFoldersById = new Map();
+const driveFoldersByName = new Map();
+
+class MockDriveFolder {
+  constructor(id, name) { this._id = id; this._name = name; }
+  getId() { return this._id; }
+  getName() { return this._name; }
+  getUrl() { return `https://drive.google.com/drive/folders/${this._id}`; }
+}
+
+function mockDriveFolderIterator(list) {
+  let idx = 0;
+  return { hasNext() { return idx < list.length; }, next() { return list[idx++]; } };
+}
+
 const sandbox = {
   console,
   JSON, Object, Array, String, Number, Math, Date, isNaN, parseInt, parseFloat, RegExp, Error, Map, Set,
@@ -173,6 +197,27 @@ const sandbox = {
   LockService: {
     getScriptLock() {
       return { tryLock() { return true; }, releaseLock() {} };
+    }
+  },
+
+  DriveApp: {
+    Access: { ANYONE_WITH_LINK: 'ANYONE_WITH_LINK' },
+    Permission: { VIEW: 'VIEW' },
+    getFoldersByName(name) {
+      return mockDriveFolderIterator(driveFoldersByName.get(name) || []);
+    },
+    getFolderById(id) {
+      const folder = driveFoldersById.get(id);
+      if (!folder) throw new Error(`Mock: no existe una carpeta de Drive con ID '${id}'`);
+      return folder;
+    },
+    createFolder(name) {
+      const folder = new MockDriveFolder(`MOCK-FOLDER-${++mockDriveIdCounter}`, name);
+      driveFoldersById.set(folder.getId(), folder);
+      const list = driveFoldersByName.get(name) || [];
+      list.push(folder);
+      driveFoldersByName.set(name, list);
+      return folder;
     }
   },
 

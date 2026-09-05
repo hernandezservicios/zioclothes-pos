@@ -7,6 +7,7 @@ import { useDataStore } from '../../context/DataStoreContext';
 import { useToast } from '../../context/ToastContext';
 import { formatCurrency } from '../../utils/formatters';
 import { sounds } from '../../utils/soundEffects';
+import { toDisplayableImageUrl } from '../../utils/imageUrl';
 import { VariantSelectorModal } from './VariantSelectorModal';
 import { PaymentModal } from './PaymentModal';
 import { ReceiptModal } from './ReceiptModal';
@@ -584,7 +585,7 @@ export const POSView: React.FC = () => {
                     <div className="relative aspect-4/3 rounded-xl overflow-hidden bg-[#F6F1E8] border border-[#E4DDD2]/60">
                       {prod.imagenUrl ? (
                         <img
-                          src={prod.imagenUrl}
+                          src={toDisplayableImageUrl(prod.imagenUrl)}
                           alt={prod.nombre}
                           className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
                         />

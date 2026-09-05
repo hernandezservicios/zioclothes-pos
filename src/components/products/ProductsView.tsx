@@ -6,6 +6,7 @@ import { useDataStore } from '../../context/DataStoreContext';
 import { useToast } from '../../context/ToastContext';
 import { formatCurrency } from '../../utils/formatters';
 import { exportToCSV } from '../../utils/exportUtils';
+import { toDisplayableImageUrl } from '../../utils/imageUrl';
 import { ProductFormModal } from './ProductFormModal';
 import {
   Search,
@@ -358,7 +359,7 @@ export const ProductsView: React.FC = () => {
                       <div className="flex items-center gap-3">
                         {prod.imagenUrl ? (
                           <img
-                            src={prod.imagenUrl}
+                            src={toDisplayableImageUrl(prod.imagenUrl)}
                             alt={prod.nombre}
                             className="w-10 h-10 rounded-xl object-cover border border-[#E4DDD2]"
                           />
