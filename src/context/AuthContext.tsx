@@ -363,6 +363,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       eslogan: newSettings.eslogan,
       mensajeFinalRecibo: newSettings.mensajeFinalRecibo,
       pieTecnicoRecibo: newSettings.pieTecnicoRecibo,
+      // FASE 5 (textos del recibo de abono): mismo nombre en
+      // frontend/backend -- '' significa "no mostrar esta línea".
+      mensajeReciboPie: newSettings.mensajeReciboPie,
+      mensajeFinalAbono: newSettings.mensajeFinalAbono,
+      pieTecnicoAbono: newSettings.pieTecnicoAbono,
     });
 
     if (res.success) {

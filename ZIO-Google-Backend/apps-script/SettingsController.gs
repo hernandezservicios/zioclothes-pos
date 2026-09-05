@@ -35,6 +35,20 @@ const SettingsController = {
       eslogan: 'Elegancia, Vanguardia y Estilo Contemporáneo',
       mensajeFinalRecibo: '¡Gracias por vestir ZIO CLOTHES!',
       pieTecnicoRecibo: 'Sistema POS ZIO • Comprobante Digital / Físico',
+      // FASE 5 (textos del recibo de ABONO -- auditoría): `mensajeReciboPie`
+      // ya existía en el tipo del frontend y ya se usaba en
+      // InstallmentReceiptTicket.tsx, pero -- igual que `eslogan` antes de
+      // la Fase 4 -- nunca tuvo un default ni una fila real en esta hoja.
+      // Se usa el mismo valor que ya mostraba el frontend
+      // (INITIAL_SETTINGS.mensajeReciboPie) para no cambiar el aspecto
+      // actual del recibo de abono. `mensajeFinalAbono`/`pieTecnicoAbono`
+      // reemplazan texto que antes estaba fijo dentro del propio
+      // componente del recibo de abono -- mismos valores exactos, ahora
+      // configurables, y deliberadamente separados de
+      // `mensajeFinalRecibo`/`pieTecnicoRecibo` (recibo de venta).
+      mensajeReciboPie: 'Comprobante válido de abono a su cuenta. Conserve este documento.',
+      mensajeFinalAbono: '¡GRACIAS POR SU ABONO!',
+      pieTecnicoAbono: 'Sistema POS',
       politicaDevolucion: 'Cambios permitidos dentro de los 15 días posteriores a la compra con recibo original.',
       permitirVentaSinStock: false,
       notificarStockBajo: true,

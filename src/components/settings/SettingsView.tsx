@@ -683,6 +683,53 @@ export const SettingsView: React.FC = () => {
                 />
                 <span className="text-[10px] text-[#756E65]">Última línea, más pequeña, al final del recibo. Vacío = no se muestra.</span>
               </div>
+
+              {/* FASE 5 (textos del recibo de ABONO -- auditoría): campos
+                  deliberadamente separados de los del recibo de venta de
+                  arriba -- InstallmentReceiptTicket.tsx (recibo de abono) es
+                  un componente distinto de ReceiptTicket.tsx (recibo de
+                  venta); cambiar el texto de uno nunca debe afectar al otro. */}
+              <div className="col-span-1 sm:col-span-2 pt-2 border-t border-[#E4DDD2]">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-[#756E65]">
+                  Recibo de Abono
+                </span>
+              </div>
+
+              <div className="col-span-1 sm:col-span-2">
+                <label className="block font-bold text-[#2F2A25] mb-1">Mensaje Principal de Abono:</label>
+                <input
+                  type="text"
+                  value={formSettings.mensajeFinalAbono || ''}
+                  onChange={(e) => setFormSettings({ ...formSettings, mensajeFinalAbono: e.target.value })}
+                  placeholder="Ej. ¡GRACIAS POR SU ABONO!"
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-[#E4DDD2] bg-white font-bold"
+                />
+                <span className="text-[10px] text-[#756E65]">Línea principal en negrita al pie del recibo de abono (cuando queda saldo pendiente). Vacío = no se muestra.</span>
+              </div>
+
+              <div className="col-span-1 sm:col-span-2">
+                <label className="block font-bold text-[#2F2A25] mb-1">Mensaje Adicional del Comprobante de Abono:</label>
+                <input
+                  type="text"
+                  value={formSettings.mensajeReciboPie || ''}
+                  onChange={(e) => setFormSettings({ ...formSettings, mensajeReciboPie: e.target.value })}
+                  placeholder="Ej. Comprobante válido de abono a su cuenta. Conserve este documento."
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-[#E4DDD2] bg-white"
+                />
+                <span className="text-[10px] text-[#756E65]">Segunda línea del pie del recibo de abono. Vacío = no se muestra.</span>
+              </div>
+
+              <div className="col-span-1 sm:col-span-2">
+                <label className="block font-bold text-[#2F2A25] mb-1">Pie Técnico del Recibo de Abono:</label>
+                <input
+                  type="text"
+                  value={formSettings.pieTecnicoAbono || ''}
+                  onChange={(e) => setFormSettings({ ...formSettings, pieTecnicoAbono: e.target.value })}
+                  placeholder="Ej. Sistema POS"
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-[#E4DDD2] bg-white"
+                />
+                <span className="text-[10px] text-[#756E65]">Aparece después del nombre del negocio, en la última línea del recibo de abono (ej. "{formSettings.nombreNegocio || 'ZIO CLOTHES'} • {formSettings.pieTecnicoAbono || '...'}"). Vacío = solo se muestra el nombre del negocio.</span>
+              </div>
             </fieldset>
 
             <div className="pt-4 border-t border-[#E4DDD2] flex justify-end">

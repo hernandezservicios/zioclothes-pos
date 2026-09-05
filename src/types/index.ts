@@ -561,6 +561,19 @@ export interface SystemSettings {
   // sin dejar espacio en blanco.
   mensajeFinalRecibo: string;
   pieTecnicoRecibo: string;
+  // FASE 5 (textos del recibo de ABONO -- auditoría): `mensajeReciboPie`
+  // (arriba) YA existía y ya se usaba en InstallmentReceiptTicket.tsx,
+  // pero -- igual que `eslogan` antes de la Fase 4 -- nunca viajaba
+  // hacia/desde el backend; se completa esa conexión sin cambiar su
+  // nombre ni su valor actual. `mensajeFinalAbono` reemplaza el texto que
+  // antes estaba fijo "¡GRACIAS POR SU ABONO!" (la variante "¡CUENTA
+  // SALDADA EN SU TOTALIDAD!" para saldo cero NO se tocó -- no fue pedida
+  // y es un mensaje de estado de la transacción, no de marca).
+  // `pieTecnicoAbono` reemplaza el sufijo "• Sistema POS" de la última
+  // línea del recibo de abono -- deliberadamente un campo DISTINTO de
+  // `pieTecnicoRecibo` (recibo de venta) para no acoplar ambos recibos.
+  mensajeFinalAbono: string;
+  pieTecnicoAbono: string;
   googleAppsScriptUrl?: string;
   modoConexion: 'LOCAL_HYBRID' | 'APPS_SCRIPT_DIRECT';
   impresionAutomatica: boolean;

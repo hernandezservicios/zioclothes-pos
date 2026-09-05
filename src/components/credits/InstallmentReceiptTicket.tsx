@@ -252,12 +252,41 @@ export const InstallmentReceiptTicket: React.FC<InstallmentReceiptTicketProps> =
           paddingTop: '4px',
         }}
       >
-        <div style={{ fontWeight: 800, textTransform: 'uppercase', marginBottom: '2px' }}>
-          {saldoRestante === 0 ? '¡CUENTA SALDADA EN SU TOTALIDAD!' : '¡GRACIAS POR SU ABONO!'}
-        </div>
-        <div style={{ fontSize: is58mm ? '9px' : '10px', color: '#000000' }}>
-          {settings.mensajeReciboPie || 'Conserve este comprobante como respaldo de su pago.'}
-        </div>
+        {/* FASE 5 (textos del recibo de abono -- auditoría): "¡CUENTA
+            SALDADA EN SU TOTALIDAD!" es un mensaje de ESTADO de la
+            transacción (saldo llegó a cero), no un texto de marca -- no se
+            tocó, no fue pedido. Solo la rama "¡GRACIAS POR SU ABONO!" pasa
+            a ser configurable (settings.mensajeFinalAbono). El `||`
+            adicional en la condición evita dejar un <div> vacío (con su
+            margen) cuando saldoRestante > 0 y mensajeFinalAbono está
+            vacío -- mismo resultado que el patrón `&&` de Fase 4, aplicado
+            a un texto que convive con una rama no configurable. */}
+        {(saldoRestante === 0 || settings.mensajeFinalAbono) && (
+          <div style={{ fontWeight: 800, textTransform: 'uppercase', marginBottom: '2px' }}>
+            {saldoRestante === 0 ? '¡CUENTA SALDADA EN SU TOTALIDAD!' : settings.mensajeFinalAbono}
+          </div>
+        )}
+        {/* FASE 5: antes `settings.mensajeReciboPie || 'Conserve este
+            comprobante como respaldo de su pago.'` -- ese `||` nunca
+            permitía ocultar la línea aunque el campo se guardara vacío a
+            propósito. Se corrige al mismo patrón `&&` ya usado en toda la
+            Fase 4 (eslogan/mensajeTicketPie/mensajeFinalRecibo/
+            pieTecnicoRecibo) -- el valor del campo no cambia, solo cómo se
+            decide si se muestra. */}
+        {settings.mensajeReciboPie && (
+          <div style={{ fontSize: is58mm ? '9px' : '10px', color: '#000000' }}>
+            {settings.mensajeReciboPie}
+          </div>
+        )}
+        {/* FASE 5: "ZIO CLOTHES" ya venía de settings.nombreNegocio (con
+            el mismo fallback defensivo `|| 'ZIO CLOTHES'` que ya existe en
+            el encabezado de este mismo componente y en ReceiptTicket.tsx
+            -- no es un texto de negocio hardcodeado, es una protección
+            para no dejar el recibo sin nombre si nombreNegocio llegara
+            vacío; se documenta aquí y se conserva sin cambios). El sufijo
+            fijo "• Sistema POS" pasa a ser configurable
+            (settings.pieTecnicoAbono) y desaparece por completo (sin
+            "•" huérfano) si se deja vacío. */}
         <div
           style={{
             marginTop: '6px',
@@ -265,7 +294,8 @@ export const InstallmentReceiptTicket: React.FC<InstallmentReceiptTicketProps> =
             letterSpacing: '0.3px',
           }}
         >
-          {settings.nombreNegocio || 'ZIO CLOTHES'} • Sistema POS
+          {settings.nombreNegocio || 'ZIO CLOTHES'}
+          {settings.pieTecnicoAbono && ` • ${settings.pieTecnicoAbono}`}
         </div>
       </footer>
     </div>

@@ -42,6 +42,14 @@
  * lados (no requería traducción, igual que `logoUrl`). `mensajeFinalRecibo`
  * y `pieTecnicoRecibo` son campos nuevos (antes texto fijo dentro del
  * propio componente del recibo) -- mismo nombre a ambos lados también.
+ *
+ * FASE 5 (textos del recibo de ABONO -- auditoría): `mensajeReciboPie`
+ * tenía exactamente el mismo problema que `eslogan` antes de la Fase 4 --
+ * ya existía y ya se usaba en InstallmentReceiptTicket.tsx, pero nunca
+ * viajaba hacia/desde el backend. Se completa aquí. `mensajeFinalAbono`/
+ * `pieTecnicoAbono` son campos nuevos, deliberadamente DISTINTOS de
+ * `mensajeFinalRecibo`/`pieTecnicoRecibo` (que son del recibo de VENTA)
+ * para que cambiar el texto de un recibo nunca afecte al otro.
  */
 import { SystemSettings } from '../types';
 import { storageService } from './storageService';
@@ -62,6 +70,10 @@ export interface BusinessSettingsFields {
   eslogan?: string;
   mensajeFinalRecibo?: string;
   pieTecnicoRecibo?: string;
+  // FASE 5 (textos del recibo de abono): mismo nombre a ambos lados.
+  mensajeReciboPie?: string;
+  mensajeFinalAbono?: string;
+  pieTecnicoAbono?: string;
 }
 
 /**
@@ -85,6 +97,9 @@ export function mapBackendSettingsToFrontend(raw: any): BusinessSettingsFields {
   if (raw.eslogan !== undefined) mapped.eslogan = raw.eslogan;
   if (raw.mensajeFinalRecibo !== undefined) mapped.mensajeFinalRecibo = raw.mensajeFinalRecibo;
   if (raw.pieTecnicoRecibo !== undefined) mapped.pieTecnicoRecibo = raw.pieTecnicoRecibo;
+  if (raw.mensajeReciboPie !== undefined) mapped.mensajeReciboPie = raw.mensajeReciboPie;
+  if (raw.mensajeFinalAbono !== undefined) mapped.mensajeFinalAbono = raw.mensajeFinalAbono;
+  if (raw.pieTecnicoAbono !== undefined) mapped.pieTecnicoAbono = raw.pieTecnicoAbono;
   return mapped;
 }
 
@@ -102,6 +117,9 @@ function mapFrontendFieldsToBackend(fields: BusinessSettingsFields): Record<stri
   if (fields.eslogan !== undefined) payload.eslogan = fields.eslogan;
   if (fields.mensajeFinalRecibo !== undefined) payload.mensajeFinalRecibo = fields.mensajeFinalRecibo;
   if (fields.pieTecnicoRecibo !== undefined) payload.pieTecnicoRecibo = fields.pieTecnicoRecibo;
+  if (fields.mensajeReciboPie !== undefined) payload.mensajeReciboPie = fields.mensajeReciboPie;
+  if (fields.mensajeFinalAbono !== undefined) payload.mensajeFinalAbono = fields.mensajeFinalAbono;
+  if (fields.pieTecnicoAbono !== undefined) payload.pieTecnicoAbono = fields.pieTecnicoAbono;
   return payload;
 }
 

@@ -2775,6 +2775,102 @@ test('SETTINGS_UPDATE_ONE_RECEIPT_TEXT_DOES_NOT_AFFECT_THE_OTHERS', () => {
   assertEqual(read.settings.pieTecnicoRecibo, 'Pie Tecnico Independiente Test', 'actualizar el eslogan no debe afectar pieTecnicoRecibo');
 });
 
+/* ================================================================
+   ABONO RECEIPT TEXTS -- FASE 5: textos del recibo de PAGO/ABONO
+   (mensajeFinalAbono, mensajeReciboPie, pieTecnicoAbono) como datos
+   configurables, deliberadamente separados de los del recibo de VENTA
+   (mensajeFinalRecibo/pieTecnicoRecibo, Fase 4) para que cambiar el texto
+   de un recibo nunca afecte al otro. Reutiliza el mismo mecanismo
+   genérico de handleUpdateSettings/handleGetSettings.
+
+   Nota de alcance (igual que en Fase 4): el renderizado condicional real
+   vive en InstallmentReceiptTicket.tsx (React), que este arnés no puede
+   montar -- lo que sí se prueba aquí es la parte real de backend: defaults
+   no vacíos, guardar/leer valores, vaciarlos, independencia entre ellos, e
+   independencia respecto a los campos homólogos del recibo de venta.
+   ================================================================ */
+
+test('SETTINGS_ABONO_RECEIPT_TEXTS_HAVE_NON_EMPTY_DEFAULTS_MATCHING_PREVIOUS_HARDCODED_VALUES', () => {
+  const res = doPostRaw('system.getSettings', {}, adminToken);
+  assert(res.success === true, JSON.stringify(res));
+  assert(typeof res.settings.mensajeReciboPie === 'string' && res.settings.mensajeReciboPie.length > 0, 'mensajeReciboPie debe tener un default no vacío');
+  assert(typeof res.settings.mensajeFinalAbono === 'string' && res.settings.mensajeFinalAbono.length > 0, 'mensajeFinalAbono debe tener un default no vacío');
+  assert(typeof res.settings.pieTecnicoAbono === 'string' && res.settings.pieTecnicoAbono.length > 0, 'pieTecnicoAbono debe tener un default no vacío');
+});
+
+test('SETTINGS_UPDATE_ABONO_RECEIPT_TEXTS_PERSISTS_AND_READS_BACK_CUSTOM_VALUES', () => {
+  const res = doPostRaw('system.updateSettings', {
+    mensajeFinalAbono: 'Gracias por su pago puntual.',
+    mensajeReciboPie: 'Guarde este comprobante para cualquier reclamo.',
+    pieTecnicoAbono: 'Comprobante autorizado',
+  }, adminToken);
+  assert(res.success === true, JSON.stringify(res));
+
+  const read = doPostRaw('system.getSettings', {}, adminToken);
+  assertEqual(read.settings.mensajeFinalAbono, 'Gracias por su pago puntual.');
+  assertEqual(read.settings.mensajeReciboPie, 'Guarde este comprobante para cualquier reclamo.');
+  assertEqual(read.settings.pieTecnicoAbono, 'Comprobante autorizado');
+});
+
+test('SETTINGS_UPDATE_ABONO_RECEIPT_TEXTS_CAN_BE_CLEARED_TO_EMPTY_STRING', () => {
+  doPostRaw('system.updateSettings', {
+    mensajeFinalAbono: 'Valor temporal antes de vaciar',
+    mensajeReciboPie: 'Valor temporal antes de vaciar',
+    pieTecnicoAbono: 'Valor temporal antes de vaciar',
+  }, adminToken);
+
+  const res = doPostRaw('system.updateSettings', {
+    mensajeFinalAbono: '',
+    mensajeReciboPie: '',
+    pieTecnicoAbono: '',
+  }, adminToken);
+  assert(res.success === true, JSON.stringify(res));
+
+  const read = doPostRaw('system.getSettings', {}, adminToken);
+  assertEqual(read.settings.mensajeFinalAbono, '', 'mensajeFinalAbono debe poder quedar vacío -- así el recibo de abono lo omite');
+  assertEqual(read.settings.mensajeReciboPie, '', 'mensajeReciboPie debe poder quedar vacío -- así el recibo de abono lo omite');
+  assertEqual(read.settings.pieTecnicoAbono, '', 'pieTecnicoAbono debe poder quedar vacío -- así el recibo de abono solo muestra el nombre del negocio');
+});
+
+test('SETTINGS_UPDATE_ONE_ABONO_RECEIPT_TEXT_DOES_NOT_AFFECT_THE_OTHERS', () => {
+  doPostRaw('system.updateSettings', {
+    mensajeFinalAbono: 'Abono Independiente Test',
+    mensajeReciboPie: 'Recibo Pie Independiente Test',
+    pieTecnicoAbono: 'Pie Tecnico Abono Independiente Test',
+  }, adminToken);
+
+  const res = doPostRaw('system.updateSettings', { mensajeFinalAbono: 'Solo Cambio El Mensaje Final De Abono' }, adminToken);
+  assert(res.success === true, JSON.stringify(res));
+
+  const read = doPostRaw('system.getSettings', {}, adminToken);
+  assertEqual(read.settings.mensajeFinalAbono, 'Solo Cambio El Mensaje Final De Abono');
+  assertEqual(read.settings.mensajeReciboPie, 'Recibo Pie Independiente Test', 'actualizar mensajeFinalAbono no debe afectar mensajeReciboPie');
+  assertEqual(read.settings.pieTecnicoAbono, 'Pie Tecnico Abono Independiente Test', 'actualizar mensajeFinalAbono no debe afectar pieTecnicoAbono');
+});
+
+test('SETTINGS_UPDATE_ABONO_RECEIPT_TEXTS_NEVER_AFFECT_SALES_RECEIPT_TEXTS', () => {
+  // Prueba de independencia crítica (motivo por el que se crearon campos
+  // NUEVOS en vez de reutilizar mensajeFinalRecibo/pieTecnicoRecibo del
+  // recibo de venta, Fase 4): cambiar los textos del recibo de ABONO
+  // nunca debe alterar los del recibo de VENTA, y viceversa.
+  doPostRaw('system.updateSettings', {
+    mensajeFinalRecibo: 'Mensaje De Venta Original',
+    pieTecnicoRecibo: 'Pie Tecnico De Venta Original',
+  }, adminToken);
+
+  const res = doPostRaw('system.updateSettings', {
+    mensajeFinalAbono: 'Mensaje De Abono Nuevo',
+    pieTecnicoAbono: 'Pie Tecnico De Abono Nuevo',
+  }, adminToken);
+  assert(res.success === true, JSON.stringify(res));
+
+  const read = doPostRaw('system.getSettings', {}, adminToken);
+  assertEqual(read.settings.mensajeFinalRecibo, 'Mensaje De Venta Original', 'cambiar los textos del recibo de abono no debe afectar el recibo de venta');
+  assertEqual(read.settings.pieTecnicoRecibo, 'Pie Tecnico De Venta Original', 'cambiar los textos del recibo de abono no debe afectar el recibo de venta');
+  assertEqual(read.settings.mensajeFinalAbono, 'Mensaje De Abono Nuevo');
+  assertEqual(read.settings.pieTecnicoAbono, 'Pie Tecnico De Abono Nuevo');
+});
+
 /* ------------------------------------------------------------
    REPORTE
    ------------------------------------------------------------ */

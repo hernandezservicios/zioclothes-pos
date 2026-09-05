@@ -39,6 +39,11 @@ export const INITIAL_SETTINGS: SystemSettings = {
   // cambios, ahora como datos configurables.
   mensajeFinalRecibo: '¡Gracias por vestir ZIO CLOTHES!',
   pieTecnicoRecibo: 'Sistema POS ZIO • Comprobante Digital / Físico',
+  // FASE 5: valores iniciales idénticos a los que antes estaban fijos en
+  // InstallmentReceiptTicket.tsx -- conservan el aspecto actual del
+  // recibo de abono sin cambios, ahora como datos configurables.
+  mensajeFinalAbono: '¡GRACIAS POR SU ABONO!',
+  pieTecnicoAbono: 'Sistema POS',
   googleAppsScriptUrl: '',
   modoConexion: 'LOCAL_HYBRID',
   impresionAutomatica: false,
