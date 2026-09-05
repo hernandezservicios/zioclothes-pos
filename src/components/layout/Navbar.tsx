@@ -1,6 +1,7 @@
 import React from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { formatCurrency } from '../../utils/formatters';
+import { toDisplayableImageUrl } from '../../utils/imageUrl';
 import {
   ShoppingBag,
   Wallet,
@@ -47,9 +48,21 @@ export const Navbar: React.FC<NavbarProps> = ({
           onClick={() => onNavigate('dashboard')}
           className="cursor-pointer flex items-center gap-2.5"
         >
-          <div className="w-9 h-9 rounded-2xl bg-[#2F2A25] flex items-center justify-center shadow-xs">
-            <span className="font-serif font-bold text-lg text-[#E8DCC8] tracking-tighter">Z</span>
-          </div>
+          {/* FASE 3 (logo de empresa): si hay logo personalizado configurado
+              (settings.logoUrl, hoja Configuracion vía system.getSettings),
+              se muestra en vez del emblema "Z" del sistema -- fallback
+              automático al emblema si no hay logo. */}
+          {settings.logoUrl ? (
+            <img
+              src={toDisplayableImageUrl(settings.logoUrl)}
+              alt={settings.nombreNegocio}
+              className="w-9 h-9 rounded-2xl object-cover shadow-xs"
+            />
+          ) : (
+            <div className="w-9 h-9 rounded-2xl bg-[#2F2A25] flex items-center justify-center shadow-xs">
+              <span className="font-serif font-bold text-lg text-[#E8DCC8] tracking-tighter">Z</span>
+            </div>
+          )}
           <div>
             <span className="font-serif font-bold text-base tracking-tight text-[#2F2A25] block leading-none">
               {settings.nombreNegocio}

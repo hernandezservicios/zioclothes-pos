@@ -145,6 +145,9 @@ function doPost(e) {
       case 'system.updateSettings':
         result = SettingsController.handleUpdateSettings(data, currentUser);
         break;
+      case 'settings.uploadLogo':
+        result = SettingsController.handleUploadLogo(data, currentUser);
+        break;
 
       // --- PRODUCTS & CATALOG ---
       case 'products.list':

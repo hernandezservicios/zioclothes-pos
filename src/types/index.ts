@@ -530,6 +530,12 @@ export interface AuditLog {
 export interface SystemSettings {
   nombreNegocio: string;
   eslogan: string;
+  // FASE 3 (logo de empresa -- Google Drive): URL de Drive del logo
+  // personalizado, o '' si la empresa todavía no configuró uno (en cuyo
+  // caso la interfaz debe mostrar el logo/ícono del sistema como
+  // fallback, nunca un espacio vacío). Nunca almacena Base64 -- ver
+  // src/utils/imageUrl.ts para la normalización de visualización.
+  logoUrl?: string;
   rnc: string;
   telefono: string;
   correo: string;

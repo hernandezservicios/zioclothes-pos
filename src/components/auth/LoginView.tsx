@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { sounds } from '../../utils/soundEffects';
+import { toDisplayableImageUrl } from '../../utils/imageUrl';
 import { Lock, User as UserIcon, Sparkles, ShieldCheck, ArrowRight } from 'lucide-react';
 
 export const LoginView: React.FC = () => {
@@ -56,9 +57,19 @@ export const LoginView: React.FC = () => {
       <div className="max-w-md w-full space-y-6">
         {/* Brand Header */}
         <div className="text-center space-y-2">
-          <div className="inline-flex items-center justify-center w-14 h-14 rounded-3xl bg-[#2F2A25] text-white shadow-lg mb-2">
-            <span className="font-serif font-bold text-2xl tracking-tighter text-[#E8DCC8]">Z</span>
-          </div>
+          {/* FASE 3 (logo de empresa): fallback automático al emblema "Z"
+              del sistema si la empresa no configuró un logo propio. */}
+          {settings.logoUrl ? (
+            <img
+              src={toDisplayableImageUrl(settings.logoUrl)}
+              alt={settings.nombreNegocio}
+              className="inline-block w-14 h-14 rounded-3xl object-cover shadow-lg mb-2"
+            />
+          ) : (
+            <div className="inline-flex items-center justify-center w-14 h-14 rounded-3xl bg-[#2F2A25] text-white shadow-lg mb-2">
+              <span className="font-serif font-bold text-2xl tracking-tighter text-[#E8DCC8]">Z</span>
+            </div>
+          )}
           <h1 className="text-3xl font-serif font-bold tracking-tight text-[#2F2A25]">
             {settings.nombreNegocio}
           </h1>

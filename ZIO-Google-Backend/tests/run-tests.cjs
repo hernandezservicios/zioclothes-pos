@@ -158,6 +158,16 @@ class MockDriveFolder {
   getId() { return this._id; }
   getName() { return this._name; }
   getUrl() { return `https://drive.google.com/drive/folders/${this._id}`; }
+  // FASE 3 (logo de empresa): necesario para ejercitar de extremo a
+  // extremo ProductsController.uploadImageToManagedFolder_ (handleUploadImage
+  // / SettingsController.handleUploadLogo) en los tests, no solo la
+  // resolución/creación de la carpeta.
+  createFile(blob) {
+    const id = `MOCK-FILE-${++mockDriveIdCounter}`;
+    const file = new MockDriveFile(id, [this._id]);
+    driveFilesById.set(id, file);
+    return file;
+  }
 }
 
 class MockDriveFile {
@@ -169,6 +179,7 @@ class MockDriveFile {
   getId() { return this._id; }
   isTrashed() { return this._trashed; }
   setTrashed(value) { this._trashed = !!value; return this; }
+  setSharing() { return this; }
   getParents() {
     const folders = this._parentFolderIds.map(pid => driveFoldersById.get(pid)).filter(Boolean);
     return mockDriveFolderIterator(folders);
@@ -211,6 +222,24 @@ const sandbox = {
       return Array.from(hash).map(b => (b > 127 ? b - 256 : b));
     },
     getUuid() { return crypto.randomUUID(); },
+    // FASE 3 (logo de empresa): necesarios para ejercitar de extremo a
+    // extremo ProductsController.uploadImageToManagedFolder_ en los tests
+    // (decodificar el Base64 real y envolverlo en un "Blob" simulado).
+    base64Decode(base64String) {
+      const buf = Buffer.from(base64String, 'base64');
+      const arr = [];
+      for (let i = 0; i < buf.length; i++) {
+        arr.push(buf[i] > 127 ? buf[i] - 256 : buf[i]);
+      }
+      return arr;
+    },
+    newBlob(bytes, contentType, name) {
+      return {
+        getBytes() { return bytes; },
+        getContentType() { return contentType; },
+        getName() { return name; }
+      };
+    },
     DigestAlgorithm: { SHA_256: 'SHA_256' },
     Charset: { UTF_8: 'UTF_8' }
   },
@@ -2378,6 +2407,284 @@ test('PRODUCT_SAVE_FAILURE_TRASHES_NEWLY_UPLOADED_ORPHAN_IMAGE', () => {
   assert(res.success === false, 'el guardado debe fallar -- el producto referenciado no existe');
   assert(String(res.error || '').indexOf('No se encontró el registro') !== -1, 'debe propagarse el error real de DbHelper.updateRowById, sin ocultarlo: ' + res.error);
   assert(runInContext(`__mockDrive.isTrashed('${orphanFileId}')`) === true, 'la imagen recién subida debe limpiarse cuando el guardado del producto falla (CASO B)');
+});
+
+/* ================================================================
+   COMPANY LOGO -- FASE 3: logo personalizado del negocio, reutilizando
+   íntegramente la infraestructura de Drive de FASE 2 (misma carpeta
+   administrada, mismo trashManagedImageIfSafe_, misma extracción de
+   fileId). Reutiliza managedFolderId/driveUrlUc/driveUrlThumb/adminToken
+   ya definidos arriba, en la sección PRODUCTS -- FASE 2.
+
+   Nota de alcance (ver reporte): esta aplicación es de UN solo negocio,
+   no multi-empresa -- los ítems del PASO 18 de la fase que asumen
+   múltiples "empresas" (crear empresa con/sin logo, logo usado por OTRA
+   empresa, empresas múltiples no interfieren) no tienen equivalente real
+   en esta arquitectura y NO se simulan aquí con datos inventados. Sí se
+   cubren todos los demás: fallback, upload, reemplazo, limpieza tras
+   éxito, upload fallido, save fallido (CASO B), limpieza fallida sin
+   afectar el guardado (CASO C), URL externa, Base64, archivo fuera de la
+   carpeta administrada, archivo usado por un producto, y edición sin
+   tocar el logo.
+   ================================================================ */
+
+test('SETTINGS_LOGO_DEFAULT_IS_EMPTY_STRING_FALLBACK_TO_SYSTEM_LOGO', () => {
+  // Ítem 1 del PASO 18: empresa sin logo -> fallback al logo del sistema.
+  // handleGetSettings() debe devolver siempre '' (nunca undefined) para
+  // que el frontend pueda decidir el fallback sin casos especiales.
+  const res = doPostRaw('system.getSettings', {}, adminToken);
+  assert(res.success === true, JSON.stringify(res));
+  assert(res.settings.logoUrl === '' || typeof res.settings.logoUrl === 'string', 'logoUrl debe ser siempre un string (nunca undefined), aunque no se haya configurado ninguno');
+});
+
+test('SETTINGS_UPLOAD_LOGO_UNAUTHORIZED_REJECTED', () => {
+  // PASO 20: la subida del logo debe exigir el mismo permiso real
+  // ('admin.configuracion') que ya protege el resto de esta
+  // configuración -- validado en backend, no solo en frontend.
+  const cajeroSession = login('cajero', 'cajero123');
+  const res = doPostRaw('settings.uploadLogo', { imageDataUrl: 'data:image/png;base64,AAAA' }, cajeroSession.sessionToken);
+  assert(res.success === false, 'CAJERO no debe poder subir el logo de la empresa (no tiene admin.configuracion)');
+  assert(String(res.error || '').indexOf('FORBIDDEN') === 0, 'debe rechazar con FORBIDDEN: ' + res.error);
+});
+
+test('SETTINGS_UPDATE_LOGO_UNAUTHORIZED_REJECTED', () => {
+  const cajeroSession = login('cajero', 'cajero123');
+  const res = doPostRaw('system.updateSettings', { logoUrl: driveUrlUc('FILE-LOGO-UNAUTH-01') }, cajeroSession.sessionToken);
+  assert(res.success === false, 'CAJERO no debe poder cambiar el logo vía system.updateSettings');
+  assert(String(res.error || '').indexOf('FORBIDDEN') === 0, 'debe rechazar con FORBIDDEN: ' + res.error);
+});
+
+test('SETTINGS_UPLOAD_LOGO_SUCCESS_RETURNS_URL_AND_FILEID', () => {
+  // Ítem 3 del PASO 18. Usa un Data URL Base64 real y mínimo (PNG 1x1
+  // transparente) -- ejercita la decodificación/validación real, no un
+  // mock de esa parte.
+  const tinyPngBase64 =
+    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+  const res = doPostRaw('settings.uploadLogo', { imageDataUrl: tinyPngBase64 }, adminToken);
+  assert(res.success === true, JSON.stringify(res));
+  assert(!!res.fileId, 'debe devolver un fileId real');
+  assert(res.imageUrl === driveUrlUc(res.fileId), 'debe devolver la URL en el mismo formato uc?export=view usado por fotos de productos');
+
+  // El archivo debe haberse creado dentro de la carpeta administrada.
+  const inFolder = runInContext(`ProductsController.isFileInManagedFolder_(${JSON.stringify(res.fileId)})`);
+  assert(inFolder === true, 'el logo subido debe quedar dentro de PRODUCT_IMAGES_FOLDER_ID, la misma carpeta que las fotos de productos');
+});
+
+test('SETTINGS_UPLOAD_LOGO_INVALID_BASE64_REJECTED_SETTINGS_UNCHANGED', () => {
+  // Ítem 6 del PASO 18: upload falla -> logo anterior intacto. Como
+  // uploadLogo nunca toca Configuracion (solo sube a Drive), basta con
+  // confirmar que la subida inválida falla y que el logoUrl actual no
+  // cambió como efecto secundario.
+  const before = doPostRaw('system.getSettings', {}, adminToken).settings.logoUrl;
+  const res = doPostRaw('settings.uploadLogo', { imageDataUrl: 'no-es-un-data-url' }, adminToken);
+  assert(res.success === false, 'un Base64 inválido debe rechazarse');
+  const after = doPostRaw('system.getSettings', {}, adminToken).settings.logoUrl;
+  assertEqual(after, before, 'un upload fallido nunca debe modificar la configuración guardada');
+});
+
+test('SETTINGS_UPDATE_SETTING_LOGO_FOR_FIRST_TIME_USES_CUSTOM_LOGO', () => {
+  // Ítem 2 del PASO 18: empresa con logo -> utiliza el logo personalizado.
+  const fileId = 'FILE-LOGO-FIRST-TIME-01';
+  runInContext(`__mockDrive.createFile('${fileId}', ${JSON.stringify(managedFolderId)})`);
+
+  const res = doPostRaw('system.updateSettings', { logoUrl: driveUrlUc(fileId) }, adminToken);
+  assert(res.success === true, JSON.stringify(res));
+
+  const read = doPostRaw('system.getSettings', {}, adminToken);
+  assertEqual(read.settings.logoUrl, driveUrlUc(fileId));
+});
+
+test('SETTINGS_UPDATE_REPLACING_LOGO_TRASHES_OLD_ONE_AFTER_SUCCESSFUL_SAVE', () => {
+  // Ítems 4 y 5 del PASO 18: reemplazo de logo + limpieza tras save exitoso.
+  const oldFileId = 'FILE-LOGO-REPLACE-OLD-01';
+  const newFileId = 'FILE-LOGO-REPLACE-NEW-01';
+  runInContext(`__mockDrive.createFile('${oldFileId}', ${JSON.stringify(managedFolderId)})`);
+  runInContext(`__mockDrive.createFile('${newFileId}', ${JSON.stringify(managedFolderId)})`);
+
+  const setRes = doPostRaw('system.updateSettings', { logoUrl: driveUrlUc(oldFileId) }, adminToken);
+  assert(setRes.success === true, JSON.stringify(setRes));
+
+  const replaceRes = doPostRaw('system.updateSettings', { logoUrl: driveUrlThumb(newFileId) }, adminToken);
+  assert(replaceRes.success === true, JSON.stringify(replaceRes));
+
+  assert(runInContext(`__mockDrive.isTrashed('${oldFileId}')`) === true, 'el logo anterior debe enviarse a la papelera tras un reemplazo exitoso');
+  assert(runInContext(`__mockDrive.isTrashed('${newFileId}')`) === false, 'el logo nuevo/activo nunca debe tocarse');
+
+  const read = doPostRaw('system.getSettings', {}, adminToken);
+  assertEqual(read.settings.logoUrl, driveUrlThumb(newFileId));
+});
+
+test('SETTINGS_UPDATE_WITHOUT_LOGO_KEY_NEVER_TOUCHES_LOGO_OR_DRIVE', () => {
+  // Ítem 16 del PASO 18: editar otros campos sin tocar el logo -> no debe
+  // subir, no debe crear, no debe limpiar nada. Se simula exactamente lo
+  // que el frontend hace cuando selectedLogoFile es null: el payload de
+  // system.updateSettings ni siquiera incluye la clave 'logoUrl'.
+  const fileId = 'FILE-LOGO-UNCHANGED-01';
+  runInContext(`__mockDrive.createFile('${fileId}', ${JSON.stringify(managedFolderId)})`);
+  doPostRaw('system.updateSettings', { logoUrl: driveUrlUc(fileId) }, adminToken);
+
+  const res = doPostRaw('system.updateSettings', { nombreNegocio: 'ZIO CLOTHES (editado sin tocar logo)' }, adminToken);
+  assert(res.success === true, JSON.stringify(res));
+
+  assert(runInContext(`__mockDrive.isTrashed('${fileId}')`) === false, 'editar otros campos sin incluir logoUrl nunca debe limpiar el logo activo');
+  const read = doPostRaw('system.getSettings', {}, adminToken);
+  assertEqual(read.settings.logoUrl, driveUrlUc(fileId), 'el logo activo debe permanecer intacto');
+});
+
+test('SETTINGS_UPDATE_REMOVING_LOGO_RETURNS_TO_SYSTEM_LOGO_AND_TRASHES_OLD_FILE', () => {
+  // Ítem 17 del PASO 18: "usar logo del sistema" -- logoUrl vacío.
+  const fileId = 'FILE-LOGO-REMOVED-01';
+  runInContext(`__mockDrive.createFile('${fileId}', ${JSON.stringify(managedFolderId)})`);
+  doPostRaw('system.updateSettings', { logoUrl: driveUrlUc(fileId) }, adminToken);
+
+  const res = doPostRaw('system.updateSettings', { logoUrl: '' }, adminToken);
+  assert(res.success === true, JSON.stringify(res));
+
+  assert(runInContext(`__mockDrive.isTrashed('${fileId}')`) === true, 'volver al logo del sistema debe limpiar el archivo administrado anterior si es seguro hacerlo');
+  const read = doPostRaw('system.getSettings', {}, adminToken);
+  assertEqual(read.settings.logoUrl, '', 'logoUrl debe quedar vacío -- el frontend debe volver a mostrar el logo del sistema');
+});
+
+test('SETTINGS_UPDATE_REPLACING_EXTERNAL_LOGO_URL_NEVER_TOUCHES_DRIVE', () => {
+  // Ítem 9 del PASO 18.
+  doPostRaw('system.updateSettings', { logoUrl: 'https://images.unsplash.com/logo-externo-01.jpg' }, adminToken);
+
+  const newFileId = 'FILE-LOGO-REPLACING-EXTERNAL-01';
+  runInContext(`__mockDrive.createFile('${newFileId}', ${JSON.stringify(managedFolderId)})`);
+  const res = doPostRaw('system.updateSettings', { logoUrl: driveUrlUc(newFileId) }, adminToken);
+  assert(res.success === true, JSON.stringify(res));
+  assert(runInContext(`__mockDrive.isTrashed('${newFileId}')`) === false, 'el logo nuevo activo nunca debe tocarse');
+});
+
+test('SETTINGS_UPDATE_REPLACING_HISTORIC_BASE64_LOGO_NEVER_TOUCHES_DRIVE', () => {
+  // Ítem 10 del PASO 18.
+  doPostRaw('system.updateSettings', { logoUrl: 'data:image/png;base64,AAAAB64HISTORICOLOGO==' }, adminToken);
+
+  const newFileId = 'FILE-LOGO-REPLACING-BASE64-01';
+  runInContext(`__mockDrive.createFile('${newFileId}', ${JSON.stringify(managedFolderId)})`);
+  const res = doPostRaw('system.updateSettings', { logoUrl: driveUrlThumb(newFileId) }, adminToken);
+  assert(res.success === true, JSON.stringify(res));
+  assert(runInContext(`__mockDrive.isTrashed('${newFileId}')`) === false, 'el logo nuevo activo nunca debe tocarse');
+});
+
+test('SETTINGS_UPDATE_REPLACING_LOGO_OUTSIDE_MANAGED_FOLDER_NEVER_TRASHED', () => {
+  // Ítem 11 del PASO 18: archivo de Drive con formato reconocible, pero
+  // que NO pertenece a PRODUCT_IMAGES_FOLDER_ID -- nunca debe borrarse.
+  const outsideFileId = 'FILE-LOGO-OUTSIDE-FOLDER-01';
+  runInContext(`__mockDrive.createFile('${outsideFileId}', 'SOME-UNRELATED-FOLDER-ID')`);
+  doPostRaw('system.updateSettings', { logoUrl: driveUrlUc(outsideFileId) }, adminToken);
+
+  const newFileId = 'FILE-LOGO-REPLACING-OUTSIDE-01';
+  runInContext(`__mockDrive.createFile('${newFileId}', ${JSON.stringify(managedFolderId)})`);
+  const res = doPostRaw('system.updateSettings', { logoUrl: driveUrlThumb(newFileId) }, adminToken);
+  assert(res.success === true, JSON.stringify(res));
+
+  assert(runInContext(`__mockDrive.isTrashed('${outsideFileId}')`) === false, 'un archivo fuera de la carpeta administrada nunca debe enviarse a la papelera, aunque el formato de URL sea reconocible');
+});
+
+test('SETTINGS_UPDATE_REPLACING_LOGO_STILL_USED_BY_A_PRODUCT_NEVER_TRASHED', () => {
+  // Ítem 13 del PASO 18 (protección cruzada logo <-> productos, PASO 9):
+  // si el logo anterior es el mismo archivo que un producto sigue usando
+  // como su foto, reemplazar el logo NUNCA debe borrar ese archivo.
+  const sharedFileId = 'FILE-LOGO-SHARED-WITH-PRODUCT-01';
+  runInContext(`__mockDrive.createFile('${sharedFileId}', ${JSON.stringify(managedFolderId)})`);
+  runInContext(`
+    DbHelper.insertRow('Productos', {
+      id: 'PRD-USES-LOGO-FILE', sku: 'SKU-USES-LOGO-FILE', codigo_barras: '', nombre: 'Producto Que Usa El Archivo Del Logo',
+      descripcion: '', categoria_id: 'CAT-T01', categoria_nombre: 'Categoria Test', marca: 'ZIO',
+      proveedor_id: '', costo: 100, precio: 200, precio_especial: '', impuesto: 18,
+      descuento_maximo: 0, stock_minimo: 2, estado: 'ACTIVO',
+      imagen_url: ${JSON.stringify(driveUrlUc(sharedFileId))}, creado_en: getNowFormatted()
+    });
+  `);
+
+  doPostRaw('system.updateSettings', { logoUrl: driveUrlUc(sharedFileId) }, adminToken);
+
+  const newFileId = 'FILE-LOGO-REPLACING-SHARED-01';
+  runInContext(`__mockDrive.createFile('${newFileId}', ${JSON.stringify(managedFolderId)})`);
+  const res = doPostRaw('system.updateSettings', { logoUrl: driveUrlThumb(newFileId) }, adminToken);
+  assert(res.success === true, JSON.stringify(res));
+
+  assert(runInContext(`__mockDrive.isTrashed('${sharedFileId}')`) === false, 'un archivo todavía usado por un producto nunca debe borrarse al reemplazar el logo');
+});
+
+test('PRODUCT_SAVE_REPLACING_IMAGE_NEVER_TRASHES_FILE_CURRENTLY_USED_AS_COMPANY_LOGO', () => {
+  // Protección simétrica (PASO 9, aplicada también en la otra dirección):
+  // si la foto anterior de un producto es el mismo archivo que la empresa
+  // usa hoy como logo, reemplazar la foto del producto NUNCA debe borrar
+  // ese archivo.
+  const sharedFileId = 'FILE-PRODUCT-SHARED-WITH-LOGO-01';
+  runInContext(`__mockDrive.createFile('${sharedFileId}', ${JSON.stringify(managedFolderId)})`);
+  doPostRaw('system.updateSettings', { logoUrl: driveUrlUc(sharedFileId) }, adminToken);
+
+  const createRes = doPostRaw('products.save', {
+    nombre: 'Producto Que Comparte Archivo Con El Logo', categoriaId: 'CAT-T01',
+    imagenUrl: driveUrlUc(sharedFileId),
+    variantes: [{ color: 'Negro', talla: 'M', stock: 1, precio: 300, costo: 150 }],
+  }, adminToken);
+  assert(createRes.success === true, JSON.stringify(createRes));
+
+  const newFileId = 'FILE-PRODUCT-REPLACING-SHARED-01';
+  runInContext(`__mockDrive.createFile('${newFileId}', ${JSON.stringify(managedFolderId)})`);
+  const updateRes = doPostRaw('products.save', {
+    id: createRes.productId, nombre: 'Producto Que Comparte Archivo Con El Logo', categoriaId: 'CAT-T01',
+    imagenUrl: driveUrlThumb(newFileId),
+    variantes: [{ color: 'Negro', talla: 'M', stock: 1, precio: 300, costo: 150 }],
+  }, adminToken);
+  assert(updateRes.success === true, JSON.stringify(updateRes));
+
+  assert(runInContext(`__mockDrive.isTrashed('${sharedFileId}')`) === false, 'un archivo usado actualmente como logo de la empresa nunca debe borrarse al reemplazar la foto de un producto');
+});
+
+test('SETTINGS_UPDATE_FAILURE_TRASHES_NEWLY_UPLOADED_ORPHAN_LOGO_CASO_B', () => {
+  // CASO B: el logo nuevo ya se subió a Drive con éxito, pero
+  // system.updateSettings falla justo después -- forzado aquí
+  // monkey-parcheando temporalmente updateSettingsTransaction_ (no existe
+  // una forma natural de hacer fallar el upsert genérico de Configuracion
+  // con un payload inválido, a diferencia de products.save con un id de
+  // producto inexistente). Se restaura la función real al terminar.
+  const orphanFileId = 'FILE-LOGO-ORPHAN-CASO-B-01';
+  runInContext(`__mockDrive.createFile('${orphanFileId}', ${JSON.stringify(managedFolderId)})`);
+
+  const outcome = runInContext(`
+    (function() {
+      const user = Security.validateSession(${JSON.stringify(adminToken)});
+      const original = SettingsController.updateSettingsTransaction_;
+      SettingsController.updateSettingsTransaction_ = function() {
+        throw new Error('SIMULATED_TRANSACTION_FAILURE_FOR_TEST');
+      };
+      let result;
+      try {
+        SettingsController.handleUpdateSettings({ logoUrl: ${JSON.stringify(driveUrlUc(orphanFileId))} }, user);
+        result = 'did-not-throw';
+      } catch (e) {
+        result = 'threw:' + e.message;
+      } finally {
+        SettingsController.updateSettingsTransaction_ = original;
+      }
+      return result;
+    })()
+  `);
+
+  assert(outcome.indexOf('SIMULATED_TRANSACTION_FAILURE_FOR_TEST') !== -1, 'debe relanzar el error original sin ocultarlo: ' + outcome);
+  assert(runInContext(`__mockDrive.isTrashed('${orphanFileId}')`) === true, 'el logo recién subido debe limpiarse si falla el guardado de la configuración (CASO B)');
+});
+
+test('SETTINGS_UPDATE_SUCCEEDS_EVEN_IF_OLD_LOGO_CLEANUP_CANNOT_VERIFY_FILE_CASO_C', () => {
+  // CASO C: la limpieza del logo anterior no se puede verificar (el
+  // fileId "anterior" ya no existe en Drive -- por ejemplo, alguien lo
+  // borró manualmente por fuera del sistema) -- eso nunca debe impedir
+  // que el guardado de la nueva configuración sea exitoso.
+  const setupRes = doPostRaw('system.updateSettings', { logoUrl: driveUrlUc('FILE-LOGO-DOES-NOT-EXIST-CASO-C-01') }, adminToken);
+  assert(setupRes.success === true, JSON.stringify(setupRes));
+
+  const newFileId = 'FILE-LOGO-CASO-C-NEW-01';
+  runInContext(`__mockDrive.createFile('${newFileId}', ${JSON.stringify(managedFolderId)})`);
+  const res = doPostRaw('system.updateSettings', { logoUrl: driveUrlThumb(newFileId) }, adminToken);
+  assert(res.success === true, 'el guardado debe ser exitoso aunque la limpieza del logo anterior no pueda verificarse: ' + JSON.stringify(res));
+
+  const read = doPostRaw('system.getSettings', {}, adminToken);
+  assertEqual(read.settings.logoUrl, driveUrlThumb(newFileId));
 });
 
 /* ------------------------------------------------------------

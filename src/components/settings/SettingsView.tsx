@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { storageService } from '../../services/storageService';
@@ -7,6 +7,7 @@ import { settingsApi } from '../../services/settingsApi';
 import { SystemSettings, UserRole, User } from '../../types';
 import { formatDateTime } from '../../utils/formatters';
 import { exportToCSV } from '../../utils/exportUtils';
+import { toDisplayableImageUrl } from '../../utils/imageUrl';
 import {
   Settings as SettingsIcon,
   Store,
@@ -43,6 +44,17 @@ export const SettingsView: React.FC = () => {
   const [settingsLoading, setSettingsLoading] = useState(true);
   const [settingsLoadError, setSettingsLoadError] = useState<string | null>(null);
   const [savingSettings, setSavingSettings] = useState(false);
+
+  // FASE 3 (logo de empresa -- reutiliza Google Drive de productos): mismo
+  // patrón que ProductFormModal con fotos de productos. `formSettings.logoUrl`
+  // hace doble función -- Base64 de previsualización mientras se elige un
+  // archivo nuevo, o la URL real ya guardada; `selectedLogoFile` solo se
+  // activa cuando el usuario elige/cambia un logo EN ESTA sesión del
+  // formulario, y es lo único que decide si hace falta subir un logo nuevo
+  // a Drive antes de guardar la configuración.
+  const [selectedLogoFile, setSelectedLogoFile] = useState<File | null>(null);
+  const [uploadingLogo, setUploadingLogo] = useState(false);
+  const logoFileInputRef = useRef<HTMLInputElement>(null);
 
   const fetchBusinessSettings = useCallback(async () => {
     setSettingsLoading(true);
@@ -172,11 +184,84 @@ export const SettingsView: React.FC = () => {
     }
 
     setSavingSettings(true);
-    await updateSettings({
+
+    // FASE 3 (logo de empresa -- reutiliza Drive de productos): si el
+    // usuario seleccionó un logo nuevo en esta sesión del formulario, se
+    // sube primero a Drive (mismo flujo que ProductFormModal con fotos de
+    // productos) y se sustituye el Base64 temporal por la URL real ANTES
+    // de guardar la configuración. Nunca se envía Base64 a
+    // system.updateSettings. Si el usuario no tocó el logo,
+    // `formSettings.logoUrl` ya contiene lo correcto tal cual (la URL real
+    // existente, o '' si nunca hubo/se eliminó) y se envía directamente.
+    let finalLogoUrl = (formSettings.logoUrl || '').trim();
+
+    if (selectedLogoFile) {
+      setUploadingLogo(true);
+      const uploadRes = await settingsApi.uploadLogo(finalLogoUrl);
+      setUploadingLogo(false);
+
+      if (!uploadRes.success || !uploadRes.data) {
+        showToast('Error al Subir Logo', uploadRes.message || 'No se pudo subir el logo a Google Drive.', 'error');
+        setSavingSettings(false);
+        return; // el formulario permanece abierto para reintentar -- no se guarda con Base64 ni con una URL inventada.
+      }
+
+      finalLogoUrl = uploadRes.data.imageUrl;
+    }
+
+    const success = await updateSettings({
       ...formSettings,
       impuestoPorcentaje: tax,
+      logoUrl: finalLogoUrl,
     });
+
+    if (success) {
+      setSelectedLogoFile(null);
+      setFormSettings((prev) => ({ ...prev, logoUrl: finalLogoUrl }));
+    }
     setSavingSettings(false);
+  };
+
+  // FASE 3 (logo de empresa): mismo mecanismo de selección/previsualización
+  // ya usado en ProductFormModal para fotos de productos.
+  const handleLogoFileSelected = (file: File) => {
+    if (!file.type.startsWith('image/')) {
+      showToast('Formato Inválido', 'El archivo seleccionado no es una imagen válida (formatos soportados: JPG, PNG, WEBP).', 'error');
+      return;
+    }
+
+    const MAX_SIZE_BYTES = 10 * 1024 * 1024;
+    if (file.size > MAX_SIZE_BYTES) {
+      showToast('Archivo Demasiado Grande', `El logo supera el tamaño máximo permitido de 10MB (${(file.size / (1024 * 1024)).toFixed(1)}MB).`, 'error');
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      if (event.target?.result) {
+        setFormSettings((prev) => ({ ...prev, logoUrl: event.target!.result as string }));
+        setSelectedLogoFile(file);
+      }
+    };
+    reader.onerror = () => {
+      showToast('Error de Carga', 'No se pudo leer la imagen seleccionada.', 'error');
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleLogoFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) handleLogoFileSelected(file);
+    e.target.value = '';
+  };
+
+  // "Usar logo del sistema": deja el campo vacío -- se confirma recién al
+  // pulsar "Guardar Cambios" (igual que el resto de este formulario), y es
+  // entonces cuando el backend intenta limpiar el logo anterior en Drive.
+  const handleRemoveLogo = () => {
+    setFormSettings((prev) => ({ ...prev, logoUrl: '' }));
+    setSelectedLogoFile(null);
+    if (logoFileInputRef.current) logoFileInputRef.current.value = '';
   };
 
   // FASE 3.7G: crea/edita un usuario real vía auth.saveUser
@@ -406,6 +491,63 @@ export const SettingsView: React.FC = () => {
             </div>
 
             <fieldset disabled={settingsLoading || savingSettings} className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs disabled:opacity-60">
+              {/* FASE 3 (logo de empresa -- Google Drive, misma carpeta
+                  administrada que las fotos de productos): reemplazo
+                  seguro con limpieza automática del logo anterior tras un
+                  guardado exitoso (ver SettingsController.handleUpdateSettings). */}
+              <div className="col-span-1 sm:col-span-2">
+                <label className="block font-bold text-[#2F2A25] mb-1">Logo de la Empresa:</label>
+                <input
+                  ref={logoFileInputRef}
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp,image/jpg"
+                  onChange={handleLogoFileInputChange}
+                  className="hidden"
+                  id="company-logo-input"
+                />
+                <div className="flex items-center gap-4 p-3 rounded-2xl border border-[#E4DDD2] bg-[#FAF8F4]">
+                  <div className="w-16 h-16 rounded-2xl overflow-hidden border border-[#E4DDD2] bg-white flex items-center justify-center shrink-0">
+                    {formSettings.logoUrl ? (
+                      <img
+                        src={toDisplayableImageUrl(formSettings.logoUrl)}
+                        alt="Logo actual de la empresa"
+                        className="w-full h-full object-contain"
+                      />
+                    ) : (
+                      <span className="font-serif font-bold text-xl text-[#2F2A25]">Z</span>
+                    )}
+                  </div>
+                  <div className="flex flex-col gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => logoFileInputRef.current?.click()}
+                        disabled={uploadingLogo}
+                        className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white border border-[#E4DDD2] text-[#2F2A25] font-bold text-[11px] hover:bg-[#F6F1E8] transition disabled:opacity-50"
+                      >
+                        <Upload className="w-3.5 h-3.5 text-[#756E65]" />
+                        <span>{formSettings.logoUrl ? 'Cambiar Logo' : 'Seleccionar Imagen'}</span>
+                      </button>
+                      {formSettings.logoUrl && (
+                        <button
+                          type="button"
+                          onClick={handleRemoveLogo}
+                          disabled={uploadingLogo}
+                          className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white border border-rose-200 text-rose-700 font-bold text-[11px] hover:bg-rose-50 transition disabled:opacity-50"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          <span>Usar Logo del Sistema</span>
+                        </button>
+                      )}
+                      {uploadingLogo && <span className="text-[11px] text-[#756E65] font-semibold">Subiendo logo a Drive...</span>}
+                    </div>
+                    <span className="text-[10px] text-[#756E65]">
+                      JPG, PNG o WEBP (máx. 10MB). Si no se configura, se muestra el emblema predeterminado del sistema. Los cambios se aplican al pulsar "Guardar Cambios".
+                    </span>
+                  </div>
+                </div>
+              </div>
+
               <div>
                 <label className="block font-bold text-[#2F2A25] mb-1">Nombre Comercial:</label>
                 <input

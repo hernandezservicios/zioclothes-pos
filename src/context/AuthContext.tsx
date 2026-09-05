@@ -355,6 +355,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       simboloMoneda: newSettings.simboloMoneda,
       impuestoPorcentaje: newSettings.impuestoPorcentaje,
       mensajeTicketPie: newSettings.mensajeTicketPie,
+      // FASE 3 (logo de empresa): mismo nombre en frontend/backend, se
+      // envía tal cual -- '' significa "usar el logo del sistema".
+      logoUrl: newSettings.logoUrl,
     });
 
     if (res.success) {

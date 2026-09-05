@@ -316,10 +316,63 @@ const ProductsController = {
       throw new Error('VALIDATION_ERROR: Debe proporcionar la imagen a subir.');
     }
 
+    // FASE 3 (logo de empresa -- reutiliza infraestructura de Drive): toda
+    // la mecánica de decodificar/validar el Base64, crear el Blob,
+    // resolver la carpeta administrada, crear el archivo, compartirlo y
+    // armar la URL vive ahora en uploadImageToManagedFolder_ -- compartida
+    // con SettingsController.handleUploadLogo (logo de la empresa), para
+    // no duplicar esa lógica entre ambos. El comportamiento externo de
+    // handleUploadImage (mensajes de error, permiso exigido, forma de la
+    // respuesta) permanece exactamente igual que antes de este cambio.
+    const uploaded = this.uploadImageToManagedFolder_(data.imageDataUrl, 'producto');
+
+    AuditController.log(
+      user,
+      'PRODUCT_IMAGE_UPLOADED',
+      'PRODUCTOS',
+      'ProductImage',
+      uploaded.fileId,
+      `Imagen de producto subida a Google Drive (${uploaded.fileName}, ${(uploaded.bytesLength / 1024).toFixed(0)}KB)`
+    );
+
+    return {
+      success: true,
+      message: 'Imagen subida exitosamente a Google Drive.',
+      imageUrl: uploaded.imageUrl,
+      fileId: uploaded.fileId
+    };
+  },
+
+  /**
+   * FASE 3 (logo de empresa -- reutiliza infraestructura de Drive de
+   * productos): lógica de subida genérica -- decodificación/validación de
+   * Base64, creación del Blob, resolución de la carpeta administrada
+   * (PRODUCT_IMAGES_FOLDER_ID / "POS - Imagenes de Productos"), creación
+   * del archivo, permisos de compartir y armado de la URL -- extraída de
+   * `handleUploadImage` para que también pueda usarla
+   * `SettingsController.handleUploadLogo` sin duplicar Base64→Blob,
+   * validación MIME, creación de archivo, permisos o generación de URL.
+   * Nunca se crea una carpeta nueva ni una cuenta de Drive nueva: reutiliza
+   * exactamente `getOrCreateProductImagesFolder()`, ya existente.
+   *
+   * Deliberadamente NO valida permisos ni registra auditoría -- cada
+   * llamador (fotos de productos, logo de empresa) mantiene su propio
+   * chequeo de permiso y su propia entrada de auditoría, porque son
+   * dominios distintos con permisos y trazabilidad distintos.
+   *
+   * @param {string} imageDataUrl - Data URL Base64 completo.
+   * @param {string} fileNamePrefix - Prefijo del nombre de archivo (ej. 'producto', 'empresa-logo') -- permite distinguir lógicamente el propósito del archivo dentro de la misma carpeta compartida.
+   * @returns {{imageUrl: string, fileId: string, fileName: string, bytesLength: number}}
+   */
+  uploadImageToManagedFolder_(imageDataUrl, fileNamePrefix) {
+    if (!imageDataUrl || typeof imageDataUrl !== 'string' || !imageDataUrl.trim()) {
+      throw new Error('VALIDATION_ERROR: Debe proporcionar la imagen a subir.');
+    }
+
     // Extrae MIME type real y contenido Base64 del Data URL. Se valida
     // explícitamente que el MIME sea de imagen -- nunca se confía
     // ciegamente en lo que el cliente afirme sin verificarlo aquí también.
-    const match = /^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/.exec(data.imageDataUrl.trim());
+    const match = /^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/.exec(imageDataUrl.trim());
     if (!match) {
       throw new Error('VALIDATION_ERROR: El archivo proporcionado no es una imagen Base64 válida.');
     }
@@ -353,15 +406,15 @@ const ProductsController = {
       'image/gif': 'gif'
     };
     const extension = extensionByMime[mimeType] || 'jpg';
-    const fileName = `producto_${Utilities.getUuid()}.${extension}`;
+    const fileName = `${fileNamePrefix}_${Utilities.getUuid()}.${extension}`;
 
     const blob = Utilities.newBlob(bytes, mimeType, fileName);
     const folder = this.getOrCreateProductImagesFolder();
     const file = folder.createFile(blob);
 
-    // La fotografía es contenido de catálogo (no información sensible) --
-    // se comparte como "cualquiera con el enlace puede ver" para que el
-    // POS/Catálogo puedan mostrarla en <img src> sin autenticación.
+    // El contenido no es información sensible -- se comparte como
+    // "cualquiera con el enlace puede ver" para que el POS/Catálogo/
+    // encabezado de la app puedan mostrarlo en <img src> sin autenticación.
     file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
 
     const fileId = file.getId();
@@ -370,21 +423,7 @@ const ProductsController = {
     // HTML, no la imagen cruda, y NO funciona dentro de un <img>.
     const imageUrl = `https://drive.google.com/uc?export=view&id=${fileId}`;
 
-    AuditController.log(
-      user,
-      'PRODUCT_IMAGE_UPLOADED',
-      'PRODUCTOS',
-      'ProductImage',
-      fileId,
-      `Imagen de producto subida a Google Drive (${fileName}, ${(bytes.length / 1024).toFixed(0)}KB)`
-    );
-
-    return {
-      success: true,
-      message: 'Imagen subida exitosamente a Google Drive.',
-      imageUrl: imageUrl,
-      fileId: fileId
-    };
+    return { imageUrl: imageUrl, fileId: fileId, fileName: fileName, bytesLength: bytes.length };
   },
 
   /**
@@ -510,7 +549,34 @@ const ProductsController = {
   },
 
   /**
-   * FASE 2: envía a la papelera (NUNCA borrado permanente -- `setTrashed`,
+   * FASE 3 (logo de empresa -- protección cruzada): la misma carpeta de
+   * Drive ahora se comparte entre fotos de productos y el logo de la
+   * empresa (hoja Configuracion, clave 'logoUrl'), así que antes de
+   * enviar CUALQUIER archivo a la papelera hay que confirmar también que
+   * no sea el logo actualmente configurado -- sin esta verificación,
+   * reemplazar la foto de un producto podría borrar por accidente el
+   * mismo archivo que la empresa usa hoy como logo (caso extremo, pero
+   * real, dado que ambos comparten carpeta). Ante cualquier error al
+   * consultar la configuración, se devuelve `true` (tratarlo como "en
+   * uso") -- la misma regla de "no se puede verificar -> no se borra" que
+   * ya rige `isFileInManagedFolder_`, aplicada aquí con la polaridad
+   * inversa porque esta función responde "¿está en uso?", no "¿es
+   * nuestro?".
+   * @returns {boolean}
+   */
+  isFileCurrentlyTheCompanyLogo_(fileId) {
+    try {
+      const settings = SettingsController.handleGetSettings().settings;
+      return this.extractManagedDriveFileId_(settings.logoUrl) === fileId;
+    } catch (e) {
+      Logger.log(`[ProductsController] No se pudo verificar si el archivo ${fileId} es el logo actual de la empresa: ${e.message}`);
+      return true;
+    }
+  },
+
+  /**
+   * FASE 2 (ampliada en FASE 3 para proteger también el logo de empresa):
+   * envía a la papelera (NUNCA borrado permanente -- `setTrashed`,
    * recuperable desde Drive) una imagen anterior, solo si pasa TODAS las
    * verificaciones de seguridad en orden:
    *   1. Es distinta de la URL que se conserva (si son iguales, no hay
@@ -522,11 +588,17 @@ const ProductsController = {
    *      (isFileInManagedFolder_) -- nunca se asume por el formato de URL.
    *   4. Ningún otro producto sigue referenciando el mismo fileId
    *      (isFileStillReferencedByAnotherProduct_).
+   *   5. El archivo no es el logo de la empresa actualmente configurado
+   *      (isFileCurrentlyTheCompanyLogo_) -- protege el logo cuando esta
+   *      función se llama desde la limpieza de fotos de productos, y
+   *      viceversa protege fotos de productos cuando se llama desde la
+   *      limpieza del logo (ver SettingsController.handleUpdateSettings).
    * Cualquier error, o cualquier verificación que no se pueda confirmar,
    * cancela la limpieza silenciosamente (solo se registra en el log) --
    * esta función NUNCA lanza un error hacia quien la llama, porque la
    * limpieza es siempre secundaria a la operación de guardado que la
-   * invoca (ver handleSaveProduct, CASO B y CASO C).
+   * invoca (ver handleSaveProduct y SettingsController.handleUpdateSettings,
+   * CASO B y CASO C en ambos).
    */
   trashManagedImageIfSafe_(urlToTrash, urlToKeep, excludeProductId) {
     try {
@@ -538,6 +610,8 @@ const ProductsController = {
       if (!this.isFileInManagedFolder_(fileId)) return;
 
       if (this.isFileStillReferencedByAnotherProduct_(fileId, excludeProductId)) return;
+
+      if (this.isFileCurrentlyTheCompanyLogo_(fileId)) return;
 
       DriveApp.getFileById(fileId).setTrashed(true);
       Logger.log(`[ProductsController] Imagen anterior enviada a la papelera (fileId=${fileId}).`);

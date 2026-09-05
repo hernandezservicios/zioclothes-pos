@@ -47,6 +47,9 @@ export interface BusinessSettingsFields {
   simboloMoneda?: string;
   impuestoPorcentaje?: number;
   mensajeTicketPie?: string;
+  // FASE 3 (logo de empresa): mismo nombre a ambos lados (backend y
+  // frontend) -- a diferencia de moneda/pieTicket, no necesita traducción.
+  logoUrl?: string;
 }
 
 /**
@@ -66,6 +69,7 @@ export function mapBackendSettingsToFrontend(raw: any): BusinessSettingsFields {
   if (raw.moneda !== undefined) mapped.simboloMoneda = raw.moneda;
   if (raw.impuestoPorcentaje !== undefined) mapped.impuestoPorcentaje = Number(raw.impuestoPorcentaje);
   if (raw.pieTicket !== undefined) mapped.mensajeTicketPie = raw.pieTicket;
+  if (raw.logoUrl !== undefined) mapped.logoUrl = raw.logoUrl;
   return mapped;
 }
 
@@ -79,6 +83,7 @@ function mapFrontendFieldsToBackend(fields: BusinessSettingsFields): Record<stri
   if (fields.simboloMoneda !== undefined) payload.moneda = fields.simboloMoneda;
   if (fields.impuestoPorcentaje !== undefined) payload.impuestoPorcentaje = fields.impuestoPorcentaje;
   if (fields.mensajeTicketPie !== undefined) payload.pieTicket = fields.mensajeTicketPie;
+  if (fields.logoUrl !== undefined) payload.logoUrl = fields.logoUrl;
   return payload;
 }
 
@@ -121,6 +126,48 @@ class SettingsApi {
     }
 
     return { success: true, message: res.message || 'Configuración actualizada exitosamente.', data: { message: res.message } };
+  }
+
+  /**
+   * FASE 3 (logo de empresa -- reutiliza infraestructura de Drive de
+   * productos): sube el logo real a Google Drive (`settings.uploadLogo`,
+   * ver SettingsController.handleUploadLogo) y devuelve la URL resultante.
+   * `imageDataUrl` es el Data URL Base64 completo tal como lo produce
+   * `FileReader.readAsDataURL()` -- viaja únicamente en el body de esta
+   * petición, nunca se guarda en Sheets. Mismo contrato que
+   * `productsApi.uploadImage()`; quien llama decide cuándo invocar esto
+   * (solo si el usuario seleccionó/cambió un logo) y cuándo llamar
+   * después a `save({ logoUrl })` con la URL resultante.
+   */
+  public async uploadLogo(imageDataUrl: string): Promise<ApiResponse<{ imageUrl: string }>> {
+    const token = storageService.getSessionToken();
+    if (!token) {
+      return {
+        success: false,
+        message: 'No hay una sesión activa. Inicie sesión nuevamente antes de subir el logo.',
+        errorCode: 'AUTH_REQUIRED',
+      };
+    }
+
+    const res = await apiService.syncWithGoogleAppsScript('settings.uploadLogo', { imageDataUrl }, token);
+    if (!res.success) {
+      return { success: false, message: res.message, errorCode: res.errorCode };
+    }
+
+    const raw = res.data || {};
+    if (!raw.imageUrl) {
+      return {
+        success: false,
+        message: 'El backend confirmó la subida pero no devolvió una URL de logo válida.',
+        errorCode: 'INVALID_BACKEND_RESPONSE',
+      };
+    }
+
+    return {
+      success: true,
+      message: res.message || 'Logo subido exitosamente.',
+      data: { imageUrl: raw.imageUrl },
+    };
   }
 }
 

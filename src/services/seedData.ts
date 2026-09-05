@@ -19,6 +19,7 @@ import {
 export const INITIAL_SETTINGS: SystemSettings = {
   nombreNegocio: 'ZIO CLOTHES',
   eslogan: 'Elegancia, Vanguardia y Estilo Contemporáneo',
+  logoUrl: '', // FASE 3: sin logo personalizado por defecto -- fallback al logo del sistema.
   rnc: '131-89456-2',
   telefono: '+1 (809) 555-8940',
   correo: 'contacto@zioclothes.com',

@@ -1,5 +1,6 @@
 import React from 'react';
 import { useAuth } from '../../context/AuthContext';
+import { toDisplayableImageUrl } from '../../utils/imageUrl';
 import {
   LayoutDashboard,
   ShoppingBag,
@@ -40,7 +41,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   activeView,
   onNavigate,
 }) => {
-  const { hasPermission } = useAuth();
+  const { hasPermission, settings } = useAuth();
 
   const sections: { title: string; items: MenuItem[] }[] = [
     {
@@ -109,9 +110,21 @@ export const Sidebar: React.FC<SidebarProps> = ({
         {/* Sidebar Header */}
         <div className="p-4 border-b border-[#E4DDD2] flex items-center justify-between">
           <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-xl bg-[#2F2A25] flex items-center justify-center">
-              <span className="font-serif font-bold text-sm text-[#E8DCC8]">Z</span>
-            </div>
+            {/* FASE 3 (logo de empresa): fallback automático al emblema "Z"
+                del sistema si la empresa no configuró un logo propio. El
+                texto "ZIO CLOTHES" de abajo permanece igual -- no se tocó
+                (no forma parte del alcance de esta fase). */}
+            {settings.logoUrl ? (
+              <img
+                src={toDisplayableImageUrl(settings.logoUrl)}
+                alt={settings.nombreNegocio}
+                className="w-8 h-8 rounded-xl object-cover"
+              />
+            ) : (
+              <div className="w-8 h-8 rounded-xl bg-[#2F2A25] flex items-center justify-center">
+                <span className="font-serif font-bold text-sm text-[#E8DCC8]">Z</span>
+              </div>
+            )}
             <div>
               <p className="font-serif font-bold text-sm text-[#2F2A25]">ZIO CLOTHES</p>
               <p className="text-[10px] text-[#756E65] font-semibold">Moda & Confección</p>
