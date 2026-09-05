@@ -146,12 +146,33 @@ const cacheStore = new Map();
 let mockDriveIdCounter = 0;
 const driveFoldersById = new Map();
 const driveFoldersByName = new Map();
+// FASE 2 (reemplazo seguro y limpieza de imágenes en Drive): archivos
+// mockeados, necesarios para probar
+// isFileInManagedFolder_/isFileStillReferencedByAnotherProduct_/
+// trashManagedImageIfSafe_ sin tocar Drive real -- ProductsController.gs
+// llama DriveApp.getFileById(fileId).getParents()/.setTrashed(true).
+const driveFilesById = new Map();
 
 class MockDriveFolder {
   constructor(id, name) { this._id = id; this._name = name; }
   getId() { return this._id; }
   getName() { return this._name; }
   getUrl() { return `https://drive.google.com/drive/folders/${this._id}`; }
+}
+
+class MockDriveFile {
+  constructor(id, parentFolderIds) {
+    this._id = id;
+    this._parentFolderIds = parentFolderIds || [];
+    this._trashed = false;
+  }
+  getId() { return this._id; }
+  isTrashed() { return this._trashed; }
+  setTrashed(value) { this._trashed = !!value; return this; }
+  getParents() {
+    const folders = this._parentFolderIds.map(pid => driveFoldersById.get(pid)).filter(Boolean);
+    return mockDriveFolderIterator(folders);
+  }
 }
 
 function mockDriveFolderIterator(list) {
@@ -218,6 +239,29 @@ const sandbox = {
       list.push(folder);
       driveFoldersByName.set(name, list);
       return folder;
+    },
+    getFileById(id) {
+      const file = driveFilesById.get(id);
+      if (!file) throw new Error(`Mock: no existe un archivo de Drive con ID '${id}'`);
+      return file;
+    }
+  },
+
+  // FASE 2: utilidad SOLO de este arnés de pruebas (no existe en ningún
+  // .gs real) para sembrar archivos de Drive falsos con un fileId y una
+  // carpeta padre conocidos, sin pasar por handleUploadImage/createFile
+  // real -- así los tests pueden construir exactamente el escenario que
+  // necesitan (archivo dentro de la carpeta administrada, fuera de ella,
+  // o un fileId que directamente no existe).
+  __mockDrive: {
+    createFile(fileId, parentFolderId) {
+      const file = new MockDriveFile(fileId, parentFolderId ? [parentFolderId] : []);
+      driveFilesById.set(fileId, file);
+      return file;
+    },
+    isTrashed(fileId) {
+      const file = driveFilesById.get(fileId);
+      return !!file && file.isTrashed();
     }
   },
 
@@ -2087,6 +2131,253 @@ test('SETTINGS_UPDATE_IS_AUDITED', () => {
   assert(res.success === true, JSON.stringify(res));
   const audit = runInContext("DbHelper.findRows('Auditoria', r => r.accion === 'SETTINGS_UPDATED')");
   assert(audit.length >= 1, 'debe existir al menos un registro de auditoría SETTINGS_UPDATED');
+});
+
+/* ================================================================
+   PRODUCTS -- FASE 2: reemplazo seguro y limpieza de imágenes de Drive
+   (extractManagedDriveFileId_ / isFileInManagedFolder_ /
+   isFileStillReferencedByAnotherProduct_ / trashManagedImageIfSafe_,
+   integradas en handleSaveProduct). Usa __mockDrive (arriba, solo de
+   este arnés) para sembrar archivos falsos sin tocar Drive real.
+   ================================================================ */
+
+const managedFolderId = runInContext("PropertiesService.getScriptProperties().getProperty('PRODUCT_IMAGES_FOLDER_ID')");
+if (!managedFolderId) {
+  console.error('FATAL: seedInitialData() debía haber configurado PRODUCT_IMAGES_FOLDER_ID. Abortando suite.');
+  process.exit(1);
+}
+
+function driveUrlUc(fileId) { return `https://drive.google.com/uc?export=view&id=${fileId}`; }
+function driveUrlThumb(fileId) { return `https://drive.google.com/thumbnail?id=${fileId}`; }
+
+test('PRODUCT_IMAGE_EXTRACT_FILEID_FROM_UC_EXPORT_VIEW_URL', () => {
+  const id = runInContext(`ProductsController.extractManagedDriveFileId_(${JSON.stringify(driveUrlUc('ABC123'))})`);
+  assertEqual(id, 'ABC123');
+});
+
+test('PRODUCT_IMAGE_EXTRACT_FILEID_FROM_THUMBNAIL_URL', () => {
+  const id = runInContext(`ProductsController.extractManagedDriveFileId_(${JSON.stringify(driveUrlThumb('ABC123'))})`);
+  assertEqual(id, 'ABC123');
+});
+
+test('PRODUCT_IMAGE_EXTERNAL_URL_NEVER_RECOGNIZED_AS_MANAGED', () => {
+  const id = runInContext(`ProductsController.extractManagedDriveFileId_(${JSON.stringify('https://images.unsplash.com/foto.jpg')})`);
+  assert(id === null, 'una URL externa nunca debe reconocerse como archivo administrado');
+});
+
+test('PRODUCT_IMAGE_BASE64_NEVER_RECOGNIZED_AS_MANAGED', () => {
+  const id = runInContext(`ProductsController.extractManagedDriveFileId_(${JSON.stringify('data:image/png;base64,AAAA')})`);
+  assert(id === null, 'un Data URL Base64 histórico nunca debe reconocerse como archivo administrado');
+});
+
+test('PRODUCT_IMAGE_EMPTY_URL_NEVER_RECOGNIZED_AS_MANAGED', () => {
+  const id = runInContext(`ProductsController.extractManagedDriveFileId_('')`);
+  assert(id === null, 'una URL vacía (foto eliminada) nunca debe reconocerse como archivo administrado');
+});
+
+test('PRODUCT_IMAGE_NONEXISTENT_FILEID_IS_NOT_MANAGED_FOLDER', () => {
+  const result = runInContext(`ProductsController.isFileInManagedFolder_('FILE-DOES-NOT-EXIST-01')`);
+  assert(result === false, 'un fileId inexistente nunca debe considerarse dentro de la carpeta administrada');
+});
+
+test('PRODUCT_IMAGE_FILE_OUTSIDE_MANAGED_FOLDER_NOT_TRUSTED', () => {
+  runInContext(`__mockDrive.createFile('FILE-OUTSIDE-01', 'SOME-OTHER-FOLDER-ID')`);
+  const result = runInContext(`ProductsController.isFileInManagedFolder_('FILE-OUTSIDE-01')`);
+  assert(result === false, 'un archivo que pertenece a otra carpeta de Drive nunca debe tratarse como administrado por nosotros');
+});
+
+test('PRODUCT_IMAGE_FILE_INSIDE_MANAGED_FOLDER_IS_TRUSTED', () => {
+  runInContext(`__mockDrive.createFile('FILE-INSIDE-01', ${JSON.stringify(managedFolderId)})`);
+  const result = runInContext(`ProductsController.isFileInManagedFolder_('FILE-INSIDE-01')`);
+  assert(result === true, 'un archivo que sí pertenece a PRODUCT_IMAGES_FOLDER_ID debe reconocerse como administrado');
+});
+
+test('PRODUCT_IMAGE_STILL_REFERENCED_BY_ANOTHER_PRODUCT_IS_DETECTED', () => {
+  runInContext(`__mockDrive.createFile('FILE-SHARED-01', ${JSON.stringify(managedFolderId)})`);
+  runInContext(`
+    DbHelper.insertRow('Productos', {
+      id: 'PRD-IMG-SHARED', sku: 'SKU-IMG-SHARED', codigo_barras: '', nombre: 'Producto Imagen Compartida',
+      descripcion: '', categoria_id: 'CAT-T01', categoria_nombre: 'Categoria Test', marca: 'ZIO',
+      proveedor_id: '', costo: 100, precio: 200, precio_especial: '', impuesto: 18,
+      descuento_maximo: 0, stock_minimo: 2, estado: 'ACTIVO',
+      imagen_url: ${JSON.stringify(driveUrlUc('FILE-SHARED-01'))}, creado_en: getNowFormatted()
+    });
+  `);
+
+  const stillUsedByOther = runInContext(`ProductsController.isFileStillReferencedByAnotherProduct_('FILE-SHARED-01', 'ALGUN-OTRO-PRODUCTO-ID')`);
+  assert(stillUsedByOther === true, 'debe detectar que otro producto sigue usando el mismo fileId');
+
+  const notUsedIfSelfExcluded = runInContext(`ProductsController.isFileStillReferencedByAnotherProduct_('FILE-SHARED-01', 'PRD-IMG-SHARED')`);
+  assert(notUsedIfSelfExcluded === false, 'el propio producto que se está actualizando nunca debe contar como "otro producto"');
+});
+
+test('PRODUCT_IMAGE_TRASH_SKIPPED_WHEN_STILL_REFERENCED_BY_ANOTHER_PRODUCT', () => {
+  // Reutiliza FILE-SHARED-01 -- sigue referenciado por PRD-IMG-SHARED (test anterior).
+  runInContext(`ProductsController.trashManagedImageIfSafe_(${JSON.stringify(driveUrlUc('FILE-SHARED-01'))}, '', null)`);
+  const trashed = runInContext(`__mockDrive.isTrashed('FILE-SHARED-01')`);
+  assert(trashed === false, 'no debe enviarse a la papelera una imagen que otro producto todavía utiliza');
+});
+
+test('PRODUCT_IMAGE_TRASH_NEVER_THROWS_FOR_EXTERNAL_URL', () => {
+  const outcome = runInContext(`(function(){ try { ProductsController.trashManagedImageIfSafe_(${JSON.stringify('https://images.unsplash.com/foto.jpg')}, '', null); return 'no-throw'; } catch(e) { return 'threw:' + e.message; } })()`);
+  assertEqual(outcome, 'no-throw', 'trashManagedImageIfSafe_ nunca debe lanzar un error, ni siquiera ante una URL no reconocida');
+});
+
+test('PRODUCT_IMAGE_TRASH_NEVER_THROWS_FOR_BASE64', () => {
+  const outcome = runInContext(`(function(){ try { ProductsController.trashManagedImageIfSafe_(${JSON.stringify('data:image/png;base64,AAAA')}, '', null); return 'no-throw'; } catch(e) { return 'threw:' + e.message; } })()`);
+  assertEqual(outcome, 'no-throw', 'trashManagedImageIfSafe_ nunca debe lanzar un error, ni siquiera ante un Base64 histórico');
+});
+
+test('PRODUCT_IMAGE_TRASH_SKIPPED_WHEN_SAME_AS_URL_TO_KEEP', () => {
+  runInContext(`__mockDrive.createFile('FILE-SAMEKEEP-01', ${JSON.stringify(managedFolderId)})`);
+  runInContext(`ProductsController.trashManagedImageIfSafe_(${JSON.stringify(driveUrlUc('FILE-SAMEKEEP-01'))}, ${JSON.stringify(driveUrlUc('FILE-SAMEKEEP-01'))}, null)`);
+  const trashed = runInContext(`__mockDrive.isTrashed('FILE-SAMEKEEP-01')`);
+  assert(trashed === false, 'si la URL a limpiar es idéntica a la que se conserva, no debe borrarse nada');
+});
+
+test('PRODUCT_SAVE_CREATE_WITH_IMAGE_NEVER_TRIGGERS_CLEANUP', () => {
+  const fileId = 'FILE-CREATE-01';
+  runInContext(`__mockDrive.createFile('${fileId}', ${JSON.stringify(managedFolderId)})`);
+
+  const createRes = doPostRaw('products.save', {
+    nombre: 'Producto Recien Creado Con Foto', categoriaId: 'CAT-T01',
+    imagenUrl: driveUrlUc(fileId),
+    variantes: [{ color: 'Negro', talla: 'M', stock: 3, precio: 500, costo: 250 }],
+  }, adminToken);
+  assert(createRes.success === true, JSON.stringify(createRes));
+
+  assert(runInContext(`__mockDrive.isTrashed('${fileId}')`) === false, 'crear un producto nunca debe disparar limpieza -- no existe imagen anterior');
+});
+
+test('PRODUCT_SAVE_REPLACING_MANAGED_IMAGE_TRASHES_OLD_ONE_AFTER_SUCCESSFUL_SAVE', () => {
+  const oldFileId = 'FILE-REPLACE-OLD-01';
+  const newFileId = 'FILE-REPLACE-NEW-01';
+  runInContext(`__mockDrive.createFile('${oldFileId}', ${JSON.stringify(managedFolderId)})`);
+  runInContext(`__mockDrive.createFile('${newFileId}', ${JSON.stringify(managedFolderId)})`);
+
+  const createRes = doPostRaw('products.save', {
+    nombre: 'Producto Reemplazo De Imagen', categoriaId: 'CAT-T01',
+    imagenUrl: driveUrlUc(oldFileId),
+    variantes: [{ color: 'Negro', talla: 'M', stock: 3, precio: 500, costo: 250 }],
+  }, adminToken);
+  assert(createRes.success === true, JSON.stringify(createRes));
+  const productId = createRes.productId;
+
+  const updateRes = doPostRaw('products.save', {
+    id: productId, nombre: 'Producto Reemplazo De Imagen', categoriaId: 'CAT-T01',
+    imagenUrl: driveUrlThumb(newFileId), // formato de visualización (thumbnail) -- también debe reconocerse
+    variantes: [{ color: 'Negro', talla: 'M', stock: 3, precio: 500, costo: 250 }],
+  }, adminToken);
+  assert(updateRes.success === true, JSON.stringify(updateRes));
+
+  assert(runInContext(`__mockDrive.isTrashed('${oldFileId}')`) === true, 'la imagen anterior debe enviarse a la papelera tras un reemplazo exitoso');
+  assert(runInContext(`__mockDrive.isTrashed('${newFileId}')`) === false, 'la imagen nueva/activa nunca debe tocarse');
+
+  const productRow = runInContext(`DbHelper.findById('Productos', '${productId}')`);
+  assertEqual(productRow.imagen_url, driveUrlThumb(newFileId));
+});
+
+test('PRODUCT_SAVE_WITHOUT_CHANGING_IMAGE_DOES_NOT_TRIGGER_CLEANUP', () => {
+  const fileId = 'FILE-UNCHANGED-01';
+  runInContext(`__mockDrive.createFile('${fileId}', ${JSON.stringify(managedFolderId)})`);
+
+  const createRes = doPostRaw('products.save', {
+    nombre: 'Producto Sin Cambiar Foto', categoriaId: 'CAT-T01',
+    imagenUrl: driveUrlUc(fileId),
+    variantes: [{ color: 'Azul', talla: 'S', stock: 2, precio: 400, costo: 200 }],
+  }, adminToken);
+  assert(createRes.success === true, JSON.stringify(createRes));
+
+  const updateRes = doPostRaw('products.save', {
+    id: createRes.productId, nombre: 'Producto Sin Cambiar Foto (editado)', categoriaId: 'CAT-T01',
+    imagenUrl: driveUrlUc(fileId), // misma URL -- el usuario no tocó la foto, solo editó el nombre
+    variantes: [{ color: 'Azul', talla: 'S', stock: 2, precio: 450, costo: 200 }],
+  }, adminToken);
+  assert(updateRes.success === true, JSON.stringify(updateRes));
+
+  assert(runInContext(`__mockDrive.isTrashed('${fileId}')`) === false, 'editar otros campos sin cambiar la foto nunca debe limpiar la imagen activa');
+});
+
+test('PRODUCT_SAVE_REMOVING_IMAGE_TRASHES_OLD_MANAGED_FILE', () => {
+  const fileId = 'FILE-REMOVED-01';
+  runInContext(`__mockDrive.createFile('${fileId}', ${JSON.stringify(managedFolderId)})`);
+
+  const createRes = doPostRaw('products.save', {
+    nombre: 'Producto Con Foto Eliminada Despues', categoriaId: 'CAT-T01',
+    imagenUrl: driveUrlUc(fileId),
+    variantes: [{ color: 'Verde', talla: 'L', stock: 1, precio: 300, costo: 150 }],
+  }, adminToken);
+  assert(createRes.success === true, JSON.stringify(createRes));
+
+  const updateRes = doPostRaw('products.save', {
+    id: createRes.productId, nombre: 'Producto Con Foto Eliminada Despues', categoriaId: 'CAT-T01',
+    imagenUrl: '', // el usuario eliminó explícitamente la foto
+    variantes: [{ color: 'Verde', talla: 'L', stock: 1, precio: 300, costo: 150 }],
+  }, adminToken);
+  assert(updateRes.success === true, JSON.stringify(updateRes));
+
+  assert(runInContext(`__mockDrive.isTrashed('${fileId}')`) === true, 'eliminar la foto de un producto debe limpiar el archivo administrado anterior si es seguro hacerlo');
+});
+
+test('PRODUCT_SAVE_REPLACING_EXTERNAL_URL_NEVER_THROWS_OR_TOUCHES_DRIVE', () => {
+  const createRes = doPostRaw('products.save', {
+    nombre: 'Producto Con URL Externa', categoriaId: 'CAT-T01',
+    imagenUrl: 'https://images.unsplash.com/foto-externa-01.jpg',
+    variantes: [{ color: 'Blanco', talla: 'M', stock: 1, precio: 300, costo: 150 }],
+  }, adminToken);
+  assert(createRes.success === true, JSON.stringify(createRes));
+
+  const newFileId = 'FILE-REPLACING-EXTERNAL-01';
+  runInContext(`__mockDrive.createFile('${newFileId}', ${JSON.stringify(managedFolderId)})`);
+  const updateRes = doPostRaw('products.save', {
+    id: createRes.productId, nombre: 'Producto Con URL Externa', categoriaId: 'CAT-T01',
+    imagenUrl: driveUrlUc(newFileId),
+    variantes: [{ color: 'Blanco', talla: 'M', stock: 1, precio: 300, costo: 150 }],
+  }, adminToken);
+  // El objetivo principal de este test: reemplazar una URL externa nunca
+  // debe hacer explotar products.save intentando un DriveApp.getFileById
+  // sobre algo que nunca fue un fileId real.
+  assert(updateRes.success === true, JSON.stringify(updateRes));
+  assert(runInContext(`__mockDrive.isTrashed('${newFileId}')`) === false, 'la imagen nueva activa nunca debe tocarse');
+});
+
+test('PRODUCT_SAVE_REPLACING_HISTORIC_BASE64_NEVER_THROWS_OR_TOUCHES_DRIVE', () => {
+  const createRes = doPostRaw('products.save', {
+    nombre: 'Producto Con Base64 Historico', categoriaId: 'CAT-T01',
+    imagenUrl: 'data:image/png;base64,AAAAB64HISTORICO==',
+    variantes: [{ color: 'Gris', talla: 'S', stock: 1, precio: 300, costo: 150 }],
+  }, adminToken);
+  assert(createRes.success === true, JSON.stringify(createRes));
+
+  const newFileId = 'FILE-REPLACING-BASE64-01';
+  runInContext(`__mockDrive.createFile('${newFileId}', ${JSON.stringify(managedFolderId)})`);
+  const updateRes = doPostRaw('products.save', {
+    id: createRes.productId, nombre: 'Producto Con Base64 Historico', categoriaId: 'CAT-T01',
+    imagenUrl: driveUrlThumb(newFileId),
+    variantes: [{ color: 'Gris', talla: 'S', stock: 1, precio: 300, costo: 150 }],
+  }, adminToken);
+  assert(updateRes.success === true, JSON.stringify(updateRes));
+  assert(runInContext(`__mockDrive.isTrashed('${newFileId}')`) === false, 'la imagen nueva activa nunca debe tocarse');
+});
+
+test('PRODUCT_SAVE_FAILURE_TRASHES_NEWLY_UPLOADED_ORPHAN_IMAGE', () => {
+  // CASO B (auditoría FASE 2): simula que handleUploadImage ya subió la
+  // imagen nueva a Drive con éxito, pero products.save falla justo
+  // después (aquí, forzado con un id de producto que no existe) -- la
+  // imagen recién subida quedaría huérfana y debe limpiarse.
+  const orphanFileId = 'FILE-ORPHAN-ON-SAVE-FAIL-01';
+  runInContext(`__mockDrive.createFile('${orphanFileId}', ${JSON.stringify(managedFolderId)})`);
+
+  const res = doPostRaw('products.save', {
+    id: 'PRD-DOES-NOT-EXIST-XYZ',
+    nombre: 'Producto Fantasma', categoriaId: 'CAT-T01',
+    imagenUrl: driveUrlUc(orphanFileId),
+    variantes: [{ color: 'Negro', talla: 'M', stock: 1, precio: 300, costo: 150 }],
+  }, adminToken);
+
+  assert(res.success === false, 'el guardado debe fallar -- el producto referenciado no existe');
+  assert(String(res.error || '').indexOf('No se encontró el registro') !== -1, 'debe propagarse el error real de DbHelper.updateRowById, sin ocultarlo: ' + res.error);
+  assert(runInContext(`__mockDrive.isTrashed('${orphanFileId}')`) === true, 'la imagen recién subida debe limpiarse cuando el guardado del producto falla (CASO B)');
 });
 
 /* ------------------------------------------------------------

@@ -100,6 +100,58 @@ const ProductsController = {
       throw new Error('VALIDATION_ERROR: Nombre de prenda y categoría son requeridos.');
     }
 
+    // FASE 2 (reemplazo seguro y limpieza de imágenes en Drive): se lee el
+    // valor de `imagen_url` que HOY tiene la fila en Sheets (fuente de
+    // verdad) ANTES de sobreescribirla -- así el backend conoce la
+    // "imagen anterior" sin que el frontend tenga que enviar un parámetro
+    // nuevo (`previousImagenUrl`) que podría llegar desactualizado o
+    // manipulado. En una creación (`data.id` vacío) no existe fila previa,
+    // así que `oldImagenUrl` queda vacío y nunca se dispara limpieza --
+    // exactamente el comportamiento pedido ("al crear no hay imagen
+    // anterior, no ejecutar ninguna limpieza").
+    const existingProduct = data.id ? DbHelper.findById('Productos', data.id) : null;
+    const oldImagenUrl = existingProduct ? (existingProduct.imagen_url || '') : '';
+
+    let result;
+    try {
+      result = this.saveProductTransaction_(data, user, oldImagenUrl);
+    } catch (err) {
+      // CASO B (subida nueva OK, products.save falla): si esta llamada
+      // traía una imagen distinta a la que ya estaba guardada (o no había
+      // ninguna, en una creación), esa imagen nueva ya se subió a Drive
+      // pero el producto nunca llegó a apuntarle -- es un huérfano recién
+      // nacido. Se intenta limpiar, pero un fallo en esa limpieza JAMÁS
+      // debe ocultar el error real del guardado (que es lo que se
+      // relanza siempre, sin modificar).
+      if (data.imagenUrl && data.imagenUrl !== oldImagenUrl) {
+        this.trashManagedImageIfSafe_(data.imagenUrl, oldImagenUrl, data.id || null);
+      }
+      throw err;
+    }
+
+    // CASO C (products.save funciona, limpieza de imagen antigua podría
+    // fallar): el producto YA quedó guardado correctamente (result ya
+    // está armado) -- esta limpieza ocurre FUERA del bloque anterior y
+    // deliberadamente FUERA de LockServiceHelper.runWithLock (ver
+    // saveProductTransaction_) para no retener el candado de escritura
+    // mientras se hacen llamadas de red a Drive (getFileById/getParents),
+    // que pueden tardar. `trashManagedImageIfSafe_` nunca lanza errores
+    // hacia afuera -- la limpieza es siempre secundaria al guardado, así
+    // que `result` (ya exitoso) se devuelve sin condicionarlo a esto.
+    if (oldImagenUrl && data.imagenUrl !== oldImagenUrl) {
+      this.trashManagedImageIfSafe_(oldImagenUrl, data.imagenUrl, result.productId);
+    }
+
+    return result;
+  },
+
+  /**
+   * Cuerpo transaccional original de handleSaveProduct (sin cambios de
+   * comportamiento respecto a antes de la FASE 2) -- extraído a un método
+   * aparte solo para poder envolver la llamada completa en el try/catch
+   * de arriba sin anidar aún más lógica dentro del propio candado.
+   */
+  saveProductTransaction_(data, user, oldImagenUrl) {
     return LockServiceHelper.runWithLock(CONFIG.LOCK_TIMEOUT_MS, () => {
       const isUpdate = !!data.id;
       let productId = data.id;
@@ -387,6 +439,112 @@ const ProductsController = {
 
     props.setProperty(PRODUCT_IMAGES_FOLDER_PROPERTY, folder.getId());
     return folder;
+  },
+
+  /**
+   * FASE 2 (reemplazo seguro y limpieza de imágenes en Drive): extrae el
+   * fileId de una URL de Drive reconocible como generada/mostrada por
+   * NUESTRO sistema -- soporta tanto el formato que handleUploadImage
+   * genera y guarda en Sheets (`uc?export=view&id=`) como el formato que
+   * el frontend usa para mostrarla (`thumbnail?id=`, ver
+   * src/utils/imageUrl.ts). Cualquier otra cosa (URL externa, Base64
+   * histórico, vacío, o cualquier formato de Drive no reconocido) NUNCA
+   * se asume nuestra -- devuelve null, lo que impide cualquier limpieza.
+   * @returns {string|null}
+   */
+  extractManagedDriveFileId_(url) {
+    if (!url || typeof url !== 'string') return null;
+    const trimmed = url.trim();
+    const patterns = [
+      /^https:\/\/drive\.google\.com\/uc\?export=view&id=([^&]+)$/,
+      /^https:\/\/drive\.google\.com\/thumbnail\?id=([^&]+)$/
+    ];
+    for (let i = 0; i < patterns.length; i++) {
+      const match = patterns[i].exec(trimmed);
+      if (match) return match[1];
+    }
+    return null;
+  },
+
+  /**
+   * FASE 2: confirma que un fileId realmente pertenece a la carpeta
+   * administrada (PRODUCT_IMAGES_FOLDER_ID) -- nunca se asume por el solo
+   * formato de la URL que un archivo es "nuestro". Si el archivo no
+   * existe, ya no es accesible, la propiedad todavía no está configurada,
+   * o ocurre cualquier error al verificarlo, devuelve false: "no se puede
+   * verificar" siempre significa "no tocar este archivo", nunca lo
+   * contrario.
+   * @returns {boolean}
+   */
+  isFileInManagedFolder_(fileId) {
+    try {
+      const folderId = PropertiesService.getScriptProperties().getProperty(PRODUCT_IMAGES_FOLDER_PROPERTY);
+      if (!folderId) return false;
+
+      const parents = DriveApp.getFileById(fileId).getParents();
+      while (parents.hasNext()) {
+        if (parents.next().getId() === folderId) return true;
+      }
+      return false;
+    } catch (e) {
+      Logger.log(`[ProductsController] No se pudo verificar la carpeta del archivo ${fileId}: ${e.message}`);
+      return false;
+    }
+  },
+
+  /**
+   * FASE 2: protección contra imágenes compartidas por accidente entre
+   * productos -- confirma si algún OTRO producto (distinto de
+   * excludeProductId) todavía referencia este mismo fileId en su
+   * `imagen_url` antes de permitir enviarlo a la papelera.
+   * @returns {boolean}
+   */
+  isFileStillReferencedByAnotherProduct_(fileId, excludeProductId) {
+    const rows = DbHelper.getAllRows('Productos');
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      if (excludeProductId && String(row.id) === String(excludeProductId)) continue;
+      if (this.extractManagedDriveFileId_(row.imagen_url) === fileId) return true;
+    }
+    return false;
+  },
+
+  /**
+   * FASE 2: envía a la papelera (NUNCA borrado permanente -- `setTrashed`,
+   * recuperable desde Drive) una imagen anterior, solo si pasa TODAS las
+   * verificaciones de seguridad en orden:
+   *   1. Es distinta de la URL que se conserva (si son iguales, no hay
+   *      nada que limpiar).
+   *   2. Es una URL de Drive reconocible como generada por nuestro
+   *      sistema (extractManagedDriveFileId_) -- una URL externa, un
+   *      Base64 histórico, o un formato de Drive ajeno nunca se tocan.
+   *   3. El archivo realmente pertenece a PRODUCT_IMAGES_FOLDER_ID
+   *      (isFileInManagedFolder_) -- nunca se asume por el formato de URL.
+   *   4. Ningún otro producto sigue referenciando el mismo fileId
+   *      (isFileStillReferencedByAnotherProduct_).
+   * Cualquier error, o cualquier verificación que no se pueda confirmar,
+   * cancela la limpieza silenciosamente (solo se registra en el log) --
+   * esta función NUNCA lanza un error hacia quien la llama, porque la
+   * limpieza es siempre secundaria a la operación de guardado que la
+   * invoca (ver handleSaveProduct, CASO B y CASO C).
+   */
+  trashManagedImageIfSafe_(urlToTrash, urlToKeep, excludeProductId) {
+    try {
+      if (!urlToTrash || urlToTrash === urlToKeep) return;
+
+      const fileId = this.extractManagedDriveFileId_(urlToTrash);
+      if (!fileId) return;
+
+      if (!this.isFileInManagedFolder_(fileId)) return;
+
+      if (this.isFileStillReferencedByAnotherProduct_(fileId, excludeProductId)) return;
+
+      DriveApp.getFileById(fileId).setTrashed(true);
+      Logger.log(`[ProductsController] Imagen anterior enviada a la papelera (fileId=${fileId}).`);
+    } catch (e) {
+      Logger.log(`[ProductsController] No se pudo limpiar una imagen anterior (${urlToTrash}): ${e.message}`);
+      // Nunca relanzar -- ver contrato del método en el comentario de arriba.
+    }
   },
 
   /**
