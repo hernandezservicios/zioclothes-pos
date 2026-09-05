@@ -23,6 +23,18 @@ const SettingsController = {
       moneda: 'RD$',
       impuestoPorcentaje: 18,
       pieTicket: '¡Gracias por elegir ZIO CLOTHES! Calidad y elegancia en cada prenda.',
+      // FASE 4 (textos del recibo -- auditoría): `eslogan` ya existía en el
+      // tipo SystemSettings del frontend y ya se usaba en el recibo
+      // (ReceiptTicket.tsx/InstallmentReceiptTicket.tsx), pero nunca tuvo
+      // un default ni una fila real en esta hoja -- se completa la
+      // conexión aquí, con el mismo valor que ya usaba el frontend
+      // (INITIAL_SETTINGS.eslogan) para no cambiar el aspecto actual del
+      // recibo. `mensajeFinalRecibo`/`pieTecnicoRecibo` reemplazan texto
+      // que antes estaba fijo dentro del propio componente del recibo --
+      // mismos valores exactos, ahora configurables.
+      eslogan: 'Elegancia, Vanguardia y Estilo Contemporáneo',
+      mensajeFinalRecibo: '¡Gracias por vestir ZIO CLOTHES!',
+      pieTecnicoRecibo: 'Sistema POS ZIO • Comprobante Digital / Físico',
       politicaDevolucion: 'Cambios permitidos dentro de los 15 días posteriores a la compra con recibo original.',
       permitirVentaSinStock: false,
       notificarStockBajo: true,

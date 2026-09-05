@@ -440,26 +440,39 @@ export const ReceiptTicket: React.FC<ReceiptTicketProps> = ({
             {settings.mensajeTicketPie}
           </div>
         )}
-        <div
-          style={{
-            fontWeight: 800,
-            fontSize: is58mm ? '10.5px' : '12px',
-            color: '#000000',
-            marginTop: '2px',
-          }}
-        >
-          ¡Gracias por vestir ZIO CLOTHES!
-        </div>
-        <div
-          style={{
-            fontSize: is58mm ? '8.5px' : '10px',
-            fontWeight: 700,
-            color: '#000000',
-            marginTop: '3px',
-          }}
-        >
-          Sistema POS ZIO • Comprobante Digital / Físico
-        </div>
+        {/* FASE 4 (textos del recibo -- auditoría): antes texto fijo
+            "¡Gracias por vestir ZIO CLOTHES!" -- ahora viene de
+            settings.mensajeFinalRecibo, con el mismo valor inicial. Mismo
+            patrón `&&` que el resto del recibo (eslogan/mensajeTicketPie):
+            si está vacío, el <div> completo no se renderiza -- ni el texto
+            ni el estilo, sin dejar espacio en blanco. */}
+        {settings.mensajeFinalRecibo && (
+          <div
+            style={{
+              fontWeight: 800,
+              fontSize: is58mm ? '10.5px' : '12px',
+              color: '#000000',
+              marginTop: '2px',
+            }}
+          >
+            {settings.mensajeFinalRecibo}
+          </div>
+        )}
+        {/* FASE 4: antes texto fijo "Sistema POS ZIO • Comprobante Digital
+            / Físico" -- ahora viene de settings.pieTecnicoRecibo, mismo
+            valor inicial, mismo patrón de renderizado condicional. */}
+        {settings.pieTecnicoRecibo && (
+          <div
+            style={{
+              fontSize: is58mm ? '8.5px' : '10px',
+              fontWeight: 700,
+              color: '#000000',
+              marginTop: '3px',
+            }}
+          >
+            {settings.pieTecnicoRecibo}
+          </div>
+        )}
       </footer>
     </div>
   );

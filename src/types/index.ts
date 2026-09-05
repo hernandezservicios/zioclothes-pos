@@ -550,6 +550,17 @@ export interface SystemSettings {
   descuentoMaximoCajero: number; // e.g. 10
   mensajeTicketPie: string;
   mensajeReciboPie: string;
+  // FASE 4 (textos del recibo -- auditoría): antes hardcodeados en
+  // ReceiptTicket.tsx. `eslogan` y `mensajeTicketPie` (arriba) YA existían
+  // y ya se usaban correctamente en el recibo -- solo faltaba terminar de
+  // conectar `eslogan` con el backend (ver settingsApi.ts/SettingsController.gs).
+  // `mensajeFinalRecibo`: línea final de agradecimiento en negrita (antes
+  // fija: "¡Gracias por vestir ZIO CLOTHES!"). `pieTecnicoRecibo`: línea
+  // técnica final del ticket (antes fija: "Sistema POS ZIO • Comprobante
+  // Digital / Físico"). Vacío -> el recibo omite la línea por completo,
+  // sin dejar espacio en blanco.
+  mensajeFinalRecibo: string;
+  pieTecnicoRecibo: string;
   googleAppsScriptUrl?: string;
   modoConexion: 'LOCAL_HYBRID' | 'APPS_SCRIPT_DIRECT';
   impresionAutomatica: boolean;

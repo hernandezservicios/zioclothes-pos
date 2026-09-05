@@ -2687,6 +2687,94 @@ test('SETTINGS_UPDATE_SUCCEEDS_EVEN_IF_OLD_LOGO_CLEANUP_CANNOT_VERIFY_FILE_CASO_
   assertEqual(read.settings.logoUrl, driveUrlThumb(newFileId));
 });
 
+/* ================================================================
+   RECEIPT TEXTS -- FASE 4: textos del recibo (eslogan, mensajeFinalRecibo,
+   pieTecnicoRecibo) como datos configurables en Configuracion, en vez de
+   texto fijo dentro de ReceiptTicket.tsx. Reutiliza el mismo mecanismo
+   genérico de handleUpdateSettings/handleGetSettings -- sin lógica nueva
+   de backend más allá de los 3 valores por defecto agregados.
+
+   Nota de alcance (ver reporte): el renderizado condicional real
+   (`{settings.x && <div>...}`) vive en un componente React
+   (ReceiptTicket.tsx) que este arnés de pruebas en Node no puede montar
+   ni renderizar (no hay DOM/React aquí, solo el backend de Apps Script
+   simulado) -- los ítems 1-8, 15 y 16 del PASO 19 (aparece/desaparece
+   visualmente, espaciado, negrita) quedan como prueba manual pendiente,
+   documentada en el reporte. Lo que SÍ se prueba aquí es la parte real de
+   backend: que estos 3 valores tengan defaults no vacíos, que se puedan
+   guardar y leer de vuelta (incluyendo dejarlos vacíos deliberadamente,
+   que es la precondición para que la lógica `&&` ya existente en el
+   frontend los oculte), y que sean independientes entre sí.
+   ================================================================ */
+
+test('SETTINGS_RECEIPT_TEXTS_HAVE_NON_EMPTY_DEFAULTS_MATCHING_PREVIOUS_HARDCODED_VALUES', () => {
+  // PASO 4/15: una instalación que nunca guardó estas claves debe recibir
+  // el mismo texto que antes estaba fijo en el componente -- nunca
+  // undefined -- para no producir una regresión visual.
+  const res = doPostRaw('system.getSettings', {}, adminToken);
+  assert(res.success === true, JSON.stringify(res));
+  assert(typeof res.settings.eslogan === 'string' && res.settings.eslogan.length > 0, 'eslogan debe tener un default no vacío');
+  assert(typeof res.settings.mensajeFinalRecibo === 'string' && res.settings.mensajeFinalRecibo.length > 0, 'mensajeFinalRecibo debe tener un default no vacío');
+  assert(typeof res.settings.pieTecnicoRecibo === 'string' && res.settings.pieTecnicoRecibo.length > 0, 'pieTecnicoRecibo debe tener un default no vacío');
+});
+
+test('SETTINGS_UPDATE_RECEIPT_TEXTS_PERSISTS_AND_READS_BACK_CUSTOM_VALUES', () => {
+  // Ítem 14 del PASO 19: modificar la configuración se refleja al leerla
+  // de nuevo -- lo mismo que luego el recibo consumiría vía `settings`.
+  const res = doPostRaw('system.updateSettings', {
+    eslogan: 'Mi tienda de ropa',
+    mensajeFinalRecibo: 'Gracias por su compra.',
+    pieTecnicoRecibo: 'Comprobante autorizado',
+  }, adminToken);
+  assert(res.success === true, JSON.stringify(res));
+
+  const read = doPostRaw('system.getSettings', {}, adminToken);
+  assertEqual(read.settings.eslogan, 'Mi tienda de ropa');
+  assertEqual(read.settings.mensajeFinalRecibo, 'Gracias por su compra.');
+  assertEqual(read.settings.pieTecnicoRecibo, 'Comprobante autorizado');
+});
+
+test('SETTINGS_UPDATE_RECEIPT_TEXTS_CAN_BE_CLEARED_TO_EMPTY_STRING', () => {
+  // Precondición real de los ítems 2/4/6/8 del PASO 19 ("vacío -> no
+  // aparece"): el backend debe permitir que estos campos queden
+  // literalmente '' (nunca conservar el valor anterior ni caer a un
+  // default) -- la lógica `&&` que ya existe en ReceiptTicket.tsx depende
+  // de esto exactamente.
+  doPostRaw('system.updateSettings', {
+    eslogan: 'Valor temporal antes de vaciar',
+    mensajeFinalRecibo: 'Valor temporal antes de vaciar',
+    pieTecnicoRecibo: 'Valor temporal antes de vaciar',
+  }, adminToken);
+
+  const res = doPostRaw('system.updateSettings', {
+    eslogan: '',
+    mensajeFinalRecibo: '',
+    pieTecnicoRecibo: '',
+  }, adminToken);
+  assert(res.success === true, JSON.stringify(res));
+
+  const read = doPostRaw('system.getSettings', {}, adminToken);
+  assertEqual(read.settings.eslogan, '', 'eslogan debe poder quedar vacío -- así el recibo lo omite');
+  assertEqual(read.settings.mensajeFinalRecibo, '', 'mensajeFinalRecibo debe poder quedar vacío -- así el recibo lo omite');
+  assertEqual(read.settings.pieTecnicoRecibo, '', 'pieTecnicoRecibo debe poder quedar vacío -- así el recibo lo omite');
+});
+
+test('SETTINGS_UPDATE_ONE_RECEIPT_TEXT_DOES_NOT_AFFECT_THE_OTHERS', () => {
+  doPostRaw('system.updateSettings', {
+    eslogan: 'Eslogan Independiente Test',
+    mensajeFinalRecibo: 'Mensaje Final Independiente Test',
+    pieTecnicoRecibo: 'Pie Tecnico Independiente Test',
+  }, adminToken);
+
+  const res = doPostRaw('system.updateSettings', { eslogan: 'Solo Cambio El Eslogan' }, adminToken);
+  assert(res.success === true, JSON.stringify(res));
+
+  const read = doPostRaw('system.getSettings', {}, adminToken);
+  assertEqual(read.settings.eslogan, 'Solo Cambio El Eslogan');
+  assertEqual(read.settings.mensajeFinalRecibo, 'Mensaje Final Independiente Test', 'actualizar el eslogan no debe afectar mensajeFinalRecibo');
+  assertEqual(read.settings.pieTecnicoRecibo, 'Pie Tecnico Independiente Test', 'actualizar el eslogan no debe afectar pieTecnicoRecibo');
+});
+
 /* ------------------------------------------------------------
    REPORTE
    ------------------------------------------------------------ */

@@ -636,6 +636,53 @@ export const SettingsView: React.FC = () => {
                   className="w-full px-3.5 py-2.5 rounded-xl border border-[#E4DDD2] bg-white"
                 />
               </div>
+
+              {/* FASE 4 (textos del recibo -- auditoría): estos 3 campos
+                  reemplazan texto que antes estaba fijo dentro del propio
+                  componente del recibo (ReceiptTicket.tsx). Un campo vacío
+                  hace que el recibo omita esa línea por completo -- no
+                  muestra "undefined"/"null" ni deja un espacio en blanco. */}
+              <div className="col-span-1 sm:col-span-2 pt-2 border-t border-[#E4DDD2]">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-[#756E65]">
+                  Textos del Recibo / Comprobante
+                </span>
+              </div>
+
+              <div className="col-span-1 sm:col-span-2">
+                <label className="block font-bold text-[#2F2A25] mb-1">Eslogan del Negocio:</label>
+                <input
+                  type="text"
+                  value={formSettings.eslogan || ''}
+                  onChange={(e) => setFormSettings({ ...formSettings, eslogan: e.target.value })}
+                  placeholder="Ej. Elegancia, Vanguardia y Estilo Contemporáneo"
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-[#E4DDD2] bg-white"
+                />
+                <span className="text-[10px] text-[#756E65]">Aparece bajo el nombre del negocio, en el encabezado del recibo. Vacío = no se muestra.</span>
+              </div>
+
+              <div className="col-span-1 sm:col-span-2">
+                <label className="block font-bold text-[#2F2A25] mb-1">Mensaje Final del Recibo:</label>
+                <input
+                  type="text"
+                  value={formSettings.mensajeFinalRecibo || ''}
+                  onChange={(e) => setFormSettings({ ...formSettings, mensajeFinalRecibo: e.target.value })}
+                  placeholder="Ej. ¡Gracias por vestir ZIO CLOTHES!"
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-[#E4DDD2] bg-white font-bold"
+                />
+                <span className="text-[10px] text-[#756E65]">Línea final de agradecimiento, en negrita, al pie del recibo. Vacío = no se muestra.</span>
+              </div>
+
+              <div className="col-span-1 sm:col-span-2">
+                <label className="block font-bold text-[#2F2A25] mb-1">Pie Técnico del Recibo:</label>
+                <input
+                  type="text"
+                  value={formSettings.pieTecnicoRecibo || ''}
+                  onChange={(e) => setFormSettings({ ...formSettings, pieTecnicoRecibo: e.target.value })}
+                  placeholder="Ej. Sistema POS ZIO • Comprobante Digital / Físico"
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-[#E4DDD2] bg-white"
+                />
+                <span className="text-[10px] text-[#756E65]">Última línea, más pequeña, al final del recibo. Vacío = no se muestra.</span>
+              </div>
             </fieldset>
 
             <div className="pt-4 border-t border-[#E4DDD2] flex justify-end">

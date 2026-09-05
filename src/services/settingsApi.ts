@@ -29,11 +29,19 @@
  *   backend `pieTicket`   <-> frontend `mensajeTicketPie` (mensaje al pie)
  * Este archivo traduce explícitamente entre ambos nombres en las dos
  * direcciones, para no duplicar la configuración bajo dos claves
- * distintas en la misma hoja de Sheets. Solo se gestionan los 7 campos
- * que SettingsView realmente edita hoy -- el resto de los campos que
+ * distintas en la misma hoja de Sheets. El resto de los campos que
  * backend/frontend puedan tener (`politicaDevolucion`,
- * `permitirVentaSinStock`, `eslogan`, `modoConexion`, etc.) no se tocan
- * ni se inventan aquí.
+ * `permitirVentaSinStock`, `modoConexion`, etc.) no se tocan ni se
+ * inventan aquí.
+ *
+ * FASE 4 (textos del recibo -- auditoría): `eslogan` ya existía en
+ * `SystemSettings` y ya se usaba correctamente en ReceiptTicket.tsx/
+ * InstallmentReceiptTicket.tsx (`{settings.eslogan && ...}`), pero nunca
+ * viajaba hacia/desde el backend -- en la práctica se comportaba como una
+ * constante fija del frontend. Se agrega aquí con el MISMO nombre a ambos
+ * lados (no requería traducción, igual que `logoUrl`). `mensajeFinalRecibo`
+ * y `pieTecnicoRecibo` son campos nuevos (antes texto fijo dentro del
+ * propio componente del recibo) -- mismo nombre a ambos lados también.
  */
 import { SystemSettings } from '../types';
 import { storageService } from './storageService';
@@ -50,6 +58,10 @@ export interface BusinessSettingsFields {
   // FASE 3 (logo de empresa): mismo nombre a ambos lados (backend y
   // frontend) -- a diferencia de moneda/pieTicket, no necesita traducción.
   logoUrl?: string;
+  // FASE 4 (textos del recibo): mismo nombre a ambos lados, sin traducción.
+  eslogan?: string;
+  mensajeFinalRecibo?: string;
+  pieTecnicoRecibo?: string;
 }
 
 /**
@@ -70,6 +82,9 @@ export function mapBackendSettingsToFrontend(raw: any): BusinessSettingsFields {
   if (raw.impuestoPorcentaje !== undefined) mapped.impuestoPorcentaje = Number(raw.impuestoPorcentaje);
   if (raw.pieTicket !== undefined) mapped.mensajeTicketPie = raw.pieTicket;
   if (raw.logoUrl !== undefined) mapped.logoUrl = raw.logoUrl;
+  if (raw.eslogan !== undefined) mapped.eslogan = raw.eslogan;
+  if (raw.mensajeFinalRecibo !== undefined) mapped.mensajeFinalRecibo = raw.mensajeFinalRecibo;
+  if (raw.pieTecnicoRecibo !== undefined) mapped.pieTecnicoRecibo = raw.pieTecnicoRecibo;
   return mapped;
 }
 
@@ -84,6 +99,9 @@ function mapFrontendFieldsToBackend(fields: BusinessSettingsFields): Record<stri
   if (fields.impuestoPorcentaje !== undefined) payload.impuestoPorcentaje = fields.impuestoPorcentaje;
   if (fields.mensajeTicketPie !== undefined) payload.pieTicket = fields.mensajeTicketPie;
   if (fields.logoUrl !== undefined) payload.logoUrl = fields.logoUrl;
+  if (fields.eslogan !== undefined) payload.eslogan = fields.eslogan;
+  if (fields.mensajeFinalRecibo !== undefined) payload.mensajeFinalRecibo = fields.mensajeFinalRecibo;
+  if (fields.pieTecnicoRecibo !== undefined) payload.pieTecnicoRecibo = fields.pieTecnicoRecibo;
   return payload;
 }
 

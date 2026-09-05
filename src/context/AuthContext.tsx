@@ -358,6 +358,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       // FASE 3 (logo de empresa): mismo nombre en frontend/backend, se
       // envía tal cual -- '' significa "usar el logo del sistema".
       logoUrl: newSettings.logoUrl,
+      // FASE 4 (textos del recibo): mismo nombre en frontend/backend --
+      // '' significa "no mostrar esta línea en el recibo".
+      eslogan: newSettings.eslogan,
+      mensajeFinalRecibo: newSettings.mensajeFinalRecibo,
+      pieTecnicoRecibo: newSettings.pieTecnicoRecibo,
     });
 
     if (res.success) {

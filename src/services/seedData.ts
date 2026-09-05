@@ -34,6 +34,11 @@ export const INITIAL_SETTINGS: SystemSettings = {
   descuentoMaximoCajero: 10,
   mensajeTicketPie: '¡Gracias por vestir ZIO CLOTHES! Cambios dentro de 15 días con su factura.',
   mensajeReciboPie: 'Comprobante válido de abono a su cuenta. Conserve este documento.',
+  // FASE 4: valores iniciales idénticos a los que antes estaban fijos en
+  // ReceiptTicket.tsx -- conservan el aspecto actual del recibo sin
+  // cambios, ahora como datos configurables.
+  mensajeFinalRecibo: '¡Gracias por vestir ZIO CLOTHES!',
+  pieTecnicoRecibo: 'Sistema POS ZIO • Comprobante Digital / Físico',
   googleAppsScriptUrl: '',
   modoConexion: 'LOCAL_HYBRID',
   impresionAutomatica: false,
