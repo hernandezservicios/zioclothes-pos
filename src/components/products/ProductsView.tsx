@@ -1,7 +1,8 @@
-import React, { useState, useMemo } from 'react';
-import { Product, Category } from '../../types';
-import { storageService } from '../../services/storageService';
+import React, { useState, useMemo, useEffect } from 'react';
+import { Product } from '../../types';
+import { productsApi } from '../../services/productsApi';
 import { useAuth } from '../../context/AuthContext';
+import { useDataStore } from '../../context/DataStoreContext';
 import { useToast } from '../../context/ToastContext';
 import { formatCurrency } from '../../utils/formatters';
 import { exportToCSV } from '../../utils/exportUtils';
@@ -16,14 +17,46 @@ import {
   Filter,
   Download,
   ShoppingBag,
+  RefreshCw,
+  AlertTriangle,
 } from 'lucide-react';
 
+/**
+ * FASE 3.6B (corrección de fuente de datos): Productos, sus variantes y
+ * las categorías/tallas/colores/proveedores auxiliares vienen
+ * EXCLUSIVAMENTE de productsApi (backend real, ver ProductsController.gs).
+ * No hay ningún array hardcodeado ni fallback a storageService/demo aquí
+ * -- si el backend devuelve vacío, se muestra vacío; si falla, se muestra
+ * error con Retry.
+ */
 export const ProductsView: React.FC = () => {
   const { settings, hasPermission } = useAuth();
   const { showToast } = useToast();
 
-  const [products, setProducts] = useState<Product[]>(() => storageService.getProducts() || []);
-  const categories = storageService.getCategories() || [];
+  // CORREGIR AUDITORÍA: productos/categorías/tallas/colores/proveedores ya
+  // no viven en un estado local propio de esta vista -- se leen del
+  // DataStore central, la MISMA colección que ahora también consumen
+  // POSView, InventoryView y PurchasesView. Guardar/editar/eliminar aquí
+  // invalida el DataStore (refreshProducts({force:true})) en vez de
+  // recargar solo esta vista, así que el POS y las demás vistas reciben el
+  // cambio de inmediato, sin logout/login ni F5.
+  const {
+    products,
+    categories,
+    sizes,
+    colors,
+    suppliers,
+    productsLoading: loading,
+    productsError: error,
+    productsStale,
+    refreshProducts,
+  } = useDataStore();
+
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    refreshProducts();
+  }, [refreshProducts]);
 
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('TODOS');
@@ -70,7 +103,14 @@ export const ProductsView: React.FC = () => {
     setModalOpen(true);
   };
 
-  const handleSaveProductData = (productData: {
+  // FASE 3.6B: crea/actualiza vía products.save real (ProductsController.gs
+  // -- LockService, genera SKU/barcode reales si faltan, persiste en
+  // Productos/Variantes). El modal permanece abierto si falla, y se
+  // recarga la lista completa desde el backend tras un éxito (en vez de
+  // fusionar localmente) para reflejar exactamente lo que el backend
+  // aceptó -- incluye la Prueba C/D pedida (crear -> aparece en Sheets ->
+  // recargar trae lo mismo de vuelta).
+  const handleSaveProductData = async (productData: {
     nombre: string;
     descripcion: string;
     categoriaId: string;
@@ -82,75 +122,71 @@ export const ProductsView: React.FC = () => {
     codigoBarras?: string;
     variantes: any[];
   }) => {
-    const cat = (categories || []).find((c) => c.id === productData.categoriaId);
-    const catNombre = cat ? cat.nombre : 'General';
+    setSaving(true);
+    const res = await productsApi.save({
+      id: editingProduct ? editingProduct.id : undefined,
+      nombre: productData.nombre,
+      categoriaId: productData.categoriaId,
+      descripcion: productData.descripcion,
+      marca: productData.marca,
+      codigoBarras: productData.codigoBarras,
+      precio: productData.precio,
+      costo: productData.costo,
+      imagenUrl: productData.imagenUrl,
+      stockMinimo: productData.stockMinimo,
+      variantes: productData.variantes.map((v) => ({
+        // Solo se envía el id si tiene el formato real emitido por el
+        // backend (VAR-000001, ver Sequences.gs). Los ids temporales que
+        // genera ProductFormModal al armar la matriz talla×color
+        // (VAR-<timestamp>-<random>) se envían como undefined para que
+        // products.save los cree como variantes NUEVAS -- si se enviaran
+        // tal cual, ProductsController los trataría como un id de
+        // variante real inexistente.
+        id: /^VAR-\d+$/.test(String(v.id)) ? v.id : undefined,
+        sku: v.sku,
+        codigoBarras: v.codigoBarras,
+        color: v.color,
+        talla: v.talla,
+        costo: v.costo,
+        precio: v.precio,
+        stock: v.stock,
+        estado: v.estado,
+      })),
+    });
+    setSaving(false);
 
-    if (editingProduct) {
-      // Update
-      const updated = (products || []).map((p) => {
-        if (p.id === editingProduct.id) {
-          return {
-            ...p,
-            nombre: productData.nombre,
-            codigoBarras: productData.codigoBarras || p.codigoBarras,
-            descripcion: productData.descripcion,
-            categoriaId: productData.categoriaId,
-            categoriaNombre: catNombre,
-            marca: productData.marca,
-            precio: productData.precio,
-            costo: productData.costo,
-            imagenUrl: productData.imagenUrl,
-            stockMinimo: productData.stockMinimo,
-            variantes: productData.variantes.map((v) => ({
-              ...v,
-              productoId: editingProduct.id,
-            })),
-          };
-        }
-        return p;
-      });
-      storageService.saveProducts(updated);
-      setProducts(updated);
-      showToast('Prenda Actualizada', `Se guardaron los cambios de ${productData.nombre}`, 'exito');
-    } else {
-      // Create new
-      const cleanName = productData.nombre.replace(/[^a-zA-Z0-9]/g, '').substring(0, 3).toUpperCase() || 'PRE';
-      const newSku = `ZIO-${cleanName}-${Math.floor(100 + Math.random() * 900)}`;
-      const prodId = storageService.getNextSequence('PRD');
-      const newProd: Product = {
-        id: prodId,
-        nombre: productData.nombre,
-        descripcion: productData.descripcion,
-        categoriaId: productData.categoriaId,
-        categoriaNombre: catNombre,
-        marca: productData.marca,
-        sku: newSku,
-        codigoBarras: productData.codigoBarras || `7460000${Math.floor(10000 + Math.random() * 90000)}`,
-        precio: productData.precio,
-        costo: productData.costo,
-        impuesto: 18,
-        stockMinimo: productData.stockMinimo,
-        imagenUrl: productData.imagenUrl,
-        variantes: productData.variantes.map((v) => ({ ...v, productoId: prodId })),
-        estado: 'ACTIVO',
-        fechaCreacion: new Date().toISOString().replace('T', ' ').substring(0, 19),
-      };
-
-      const updated = [newProd, ...(products || [])];
-      storageService.saveProducts(updated);
-      setProducts(updated);
-      showToast('Prenda Registrada', `${newProd.nombre} agregada al catálogo exitosamente`, 'exito');
+    if (!res.success) {
+      showToast('Error al Guardar', res.message || 'No se pudo guardar la prenda en el backend.', 'error');
+      return; // El modal permanece abierto para reintentar.
     }
 
+    showToast(
+      editingProduct ? 'Prenda Actualizada' : 'Prenda Registrada',
+      res.message || `${productData.nombre} guardada exitosamente en Google Sheets.`,
+      'exito'
+    );
     setModalOpen(false);
+    // CORREGIR AUDITORÍA: invalida el DataStore central -- POS, Inventario
+    // y Compras ven la prenda nueva/editada sin recargar sesión ni F5.
+    await refreshProducts({ force: true });
   };
 
-  const handleDeleteProduct = (prod: Product) => {
+  // FASE 3.6B: contra products.delete real (soft-delete -> estado
+  // INACTIVO en Productos/Variantes, ver ProductsController.gs). La UI se
+  // actualiza recargando desde el backend, no marcando localmente.
+  const handleDeleteProduct = async (prod: Product) => {
     if (!window.confirm(`¿Seguro que desea desactivar ${prod.nombre}?`)) return;
-    const updated = (products || []).map((p) => (p.id === prod.id ? { ...p, estado: 'INACTIVO' as const } : p));
-    storageService.saveProducts(updated);
-    setProducts(updated);
-    showToast('Prenda Desactivada', `${prod.nombre} ha sido retirada del catálogo activo`, 'informacion');
+
+    const res = await productsApi.remove(prod.id);
+    if (!res.success) {
+      showToast('Error al Desactivar', res.message || 'No se pudo desactivar la prenda en el backend.', 'error');
+      return;
+    }
+
+    showToast('Prenda Desactivada', res.message || `${prod.nombre} ha sido retirada del catálogo activo`, 'informacion');
+    // CORREGIR AUDITORÍA: idem -- el resto de vistas deja de ver la prenda
+    // desactivada de inmediato, sin logout/login ni F5.
+    await refreshProducts({ force: true });
   };
 
   const handleExportCSV = () => {
@@ -193,6 +229,16 @@ export const ProductsView: React.FC = () => {
         <div className="flex items-center gap-2.5">
           <button
             type="button"
+            onClick={() => refreshProducts({ force: true })}
+            disabled={loading}
+            className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-white border border-[#E4DDD2] text-xs font-semibold text-[#2F2A25] hover:bg-[#F6F1E8] transition shadow-2xs disabled:opacity-50"
+          >
+            <RefreshCw className={`w-4 h-4 text-[#756E65] ${loading ? 'animate-spin' : ''}`} />
+            <span>{loading ? 'Cargando...' : 'Recargar'}</span>
+          </button>
+
+          <button
+            type="button"
             onClick={handleExportCSV}
             className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-white border border-[#E4DDD2] text-xs font-semibold text-[#2F2A25] hover:bg-[#F6F1E8] transition shadow-2xs"
           >
@@ -212,6 +258,37 @@ export const ProductsView: React.FC = () => {
           )}
         </div>
       </div>
+
+      {/* FASE 3.6B / CORREGIR AUDITORÍA: estado de error explícito con
+          Retry -- nunca cae a datos demo/locales. Si `productsStale` es
+          true, la tabla de abajo SÍ sigue mostrando productos, pero son de
+          una carga anterior -- se aclara explícitamente para no dar a
+          entender que están confirmados como actuales (hallazgo #6 de la
+          auditoría). */}
+      {error && (
+        <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5 text-rose-800">
+            <AlertTriangle className="w-5 h-5 shrink-0" />
+            <div>
+              <p className="font-bold text-xs">No se pudo cargar el catálogo desde el backend</p>
+              <p className="text-[11px]">{error}</p>
+              {productsStale && (
+                <p className="text-[11px] mt-1 font-semibold text-rose-900">
+                  La tabla de abajo muestra la última información disponible ({products.length} prenda
+                  {products.length === 1 ? '' : 's'}) -- no se pudo confirmar si sigue siendo la actual.
+                </p>
+              )}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => refreshProducts({ force: true })}
+            className="px-3.5 py-2 rounded-xl bg-rose-700 hover:bg-rose-800 text-white text-xs font-bold shrink-0"
+          >
+            Reintentar
+          </button>
+        </div>
+      )}
 
       {/* Filters */}
       <div className="p-4 rounded-2xl bg-white border border-[#E4DDD2] flex flex-col sm:flex-row gap-3 items-stretch sm:items-center justify-between shadow-2xs">
@@ -386,10 +463,24 @@ export const ProductsView: React.FC = () => {
             </tbody>
           </table>
 
-          {(filteredProducts || []).length === 0 && (
+          {loading && products.length === 0 && (
+            <div className="text-center py-12 text-[#756E65] space-y-2">
+              <RefreshCw className="w-8 h-8 opacity-40 mx-auto animate-spin" />
+              <p className="font-semibold text-xs text-[#2F2A25]">Cargando catálogo desde Google Sheets...</p>
+            </div>
+          )}
+
+          {/* FASE 3.6B: estado vacío honesto -- si el backend devuelve []
+              (o el filtro no encuentra nada), se muestra vacío. Nunca se
+              rellena con datos demo. */}
+          {!loading && !error && (filteredProducts || []).length === 0 && (
             <div className="text-center py-12 text-[#756E65] space-y-2">
               <Package className="w-8 h-8 opacity-40 mx-auto" />
-              <p className="font-semibold text-xs text-[#2F2A25]">No se encontraron prendas en el catálogo</p>
+              <p className="font-semibold text-xs text-[#2F2A25]">
+                {products.length === 0
+                  ? 'El catálogo está vacío en Google Sheets'
+                  : 'No se encontraron prendas con ese filtro'}
+              </p>
             </div>
           )}
         </div>
@@ -401,7 +492,10 @@ export const ProductsView: React.FC = () => {
         onClose={() => setModalOpen(false)}
         editingProduct={editingProduct}
         categories={categories}
+        initialSizes={sizes}
+        initialColors={colors}
         currencySymbol={settings.simboloMoneda}
+        saving={saving}
         onSave={handleSaveProductData}
       />
     </div>

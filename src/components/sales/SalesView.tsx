@@ -1,8 +1,8 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { Sale } from '../../types';
-import { storageService } from '../../services/storageService';
-import { apiService } from '../../services/apiService';
+import { salesApi } from '../../services/salesApi';
 import { useAuth } from '../../context/AuthContext';
+import { useDataStore } from '../../context/DataStoreContext';
 import { useToast } from '../../context/ToastContext';
 import { formatCurrency, formatDateTime } from '../../utils/formatters';
 import { exportToCSV } from '../../utils/exportUtils';
@@ -19,13 +19,29 @@ import {
   AlertCircle,
   X,
   CheckCircle2,
+  RefreshCcw,
 } from 'lucide-react';
 
 export const SalesView: React.FC = () => {
   const { settings, hasPermission } = useAuth();
   const { showToast } = useToast();
 
-  const [sales, setSales] = useState<Sale[]>(() => storageService.getSales());
+  // FASE 3.7A / CORREGIR AUDITORÍA: el historial de ventas viene
+  // EXCLUSIVAMENTE de sales.list (SalesController.handleListSales ->
+  // Google Sheets real) -- ahora leído del DataStore central, la MISMA
+  // colección que también consumen ReturnsView, DashboardView y
+  // ReportsView (antes cada una lo pedía por su cuenta, 4 llamadas
+  // independientes a sales.list, ver informe de auditoría).
+  const {
+    sales,
+    salesLoading: loading,
+    salesError: loadError,
+    salesStale,
+    refreshSales,
+    refreshProducts,
+    refreshCredits,
+    refreshCustomers,
+  } = useDataStore();
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'TODOS' | 'COMPLETADA' | 'ANULADA'>('TODOS');
   const [paymentFilter, setPaymentFilter] = useState<string>('TODOS');
@@ -36,6 +52,10 @@ export const SalesView: React.FC = () => {
   const [voidModalSale, setVoidModalSale] = useState<Sale | null>(null);
   const [voidReason, setVoidReason] = useState('');
   const [loadingVoid, setLoadingVoid] = useState(false);
+
+  useEffect(() => {
+    refreshSales();
+  }, [refreshSales]);
 
   const filteredSales = useMemo(() => {
     return (sales || []).filter((s) => {
@@ -80,17 +100,31 @@ export const SalesView: React.FC = () => {
     }
 
     setLoadingVoid(true);
-    const res = await apiService.voidSale(voidModalSale.id, voidReason.trim());
+    // FASE 3.7A: sales.void real (SalesController.handleVoidSale). El
+    // backend valida el permiso ventas.anular, restaura stock, cancela el
+    // crédito asociado y marca la venta ANULADA (nunca la borra) -- si
+    // rechaza, se muestra el error real y NO se toca el estado local.
+    const res = await salesApi.void(voidModalSale.id, voidReason.trim());
     setLoadingVoid(false);
 
     if (res.success) {
       showToast('Venta Anulada', res.message, 'exito');
-      setSales(storageService.getSales());
       setVoidModalSale(null);
       setVoidReason('');
       if (selectedSaleDetail?.id === voidModalSale.id) {
         setSelectedSaleDetail(null);
       }
+      // CORREGIR AUDITORÍA (§5 "Anulación de venta"): invalida el
+      // DataStore central de ventas, productos (el stock se restauró) y
+      // créditos (si la venta tenía una cuenta por cobrar asociada, el
+      // backend ya la anuló) -- Dashboard/Reportes/Inventario/POS/Créditos
+      // reflejan el resultado de inmediato, sin logout/login ni F5.
+      await Promise.all([
+        refreshSales({ force: true }),
+        refreshProducts({ force: true }),
+        refreshCredits({ force: true }),
+        refreshCustomers({ force: true }),
+      ]);
     } else {
       showToast('Error', res.message, 'error');
     }
@@ -112,14 +146,45 @@ export const SalesView: React.FC = () => {
         <div className="flex items-center gap-2.5">
           <button
             type="button"
+            onClick={() => refreshSales({ force: true })}
+            disabled={loading}
+            className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-white border border-[#E4DDD2] text-xs font-semibold text-[#2F2A25] hover:bg-[#F6F1E8] transition shadow-2xs disabled:opacity-50"
+            title="Volver a consultar el backend real"
+          >
+            <RefreshCcw className={`w-4 h-4 text-[#756E65] ${loading ? 'animate-spin' : ''}`} />
+            <span>{loading ? 'Actualizando...' : 'Actualizar'}</span>
+          </button>
+          <button
+            type="button"
             onClick={handleExportCSV}
-            className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-white border border-[#E4DDD2] text-xs font-semibold text-[#2F2A25] hover:bg-[#F6F1E8] transition shadow-2xs"
+            disabled={sales.length === 0}
+            className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-white border border-[#E4DDD2] text-xs font-semibold text-[#2F2A25] hover:bg-[#F6F1E8] transition shadow-2xs disabled:opacity-50"
           >
             <Download className="w-4 h-4 text-[#756E65]" />
             <span>Exportar CSV</span>
           </button>
         </div>
       </div>
+
+      {/* Backend error state -- nunca se sustituye por datos demo/locales */}
+      {loadError && (
+        <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0" />
+            <span>
+              No se pudo cargar el historial de ventas desde el backend: {loadError}
+              {salesStale && ' (se muestra la última información disponible, puede no estar actualizada)'}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => refreshSales({ force: true })}
+            className="px-3 py-1.5 rounded-lg bg-rose-700 text-white font-bold text-[11px] shrink-0"
+          >
+            Reintentar
+          </button>
+        </div>
+      )}
 
       {/* Filters Bar */}
       <div className="p-4 rounded-2xl bg-white border border-[#E4DDD2] flex flex-col sm:flex-row gap-3 items-stretch sm:items-center justify-between shadow-2xs">
@@ -162,6 +227,20 @@ export const SalesView: React.FC = () => {
 
       {/* Sales Table */}
       <div className="bg-white rounded-3xl border border-[#E4DDD2] overflow-hidden shadow-xs">
+        {loading && sales.length === 0 ? (
+          <div className="text-center py-14 space-y-2 text-[#756E65]">
+            <RefreshCcw className="w-7 h-7 opacity-40 mx-auto animate-spin" />
+            <p className="font-semibold text-xs">Consultando ventas reales en el backend...</p>
+          </div>
+        ) : !loading && !loadError && sales.length === 0 ? (
+          <div className="text-center py-14 space-y-2 text-[#756E65]">
+            <Receipt className="w-8 h-8 opacity-40 mx-auto" />
+            <p className="font-semibold text-xs text-[#2F2A25]">
+              Todavía no hay ventas registradas en Google Sheets.
+            </p>
+            <p className="text-[11px]">Las ventas realizadas desde el POS aparecerán aquí automáticamente.</p>
+          </div>
+        ) : (
         <div className="overflow-x-auto">
           <table className="w-full text-xs text-left">
             <thead className="bg-[#F6F1E8] text-[#2F2A25] border-b border-[#E4DDD2] uppercase text-[10px] tracking-wider font-bold">
@@ -249,13 +328,14 @@ export const SalesView: React.FC = () => {
             </tbody>
           </table>
 
-          {(filteredSales || []).length === 0 && (
+          {sales.length > 0 && (filteredSales || []).length === 0 && (
             <div className="text-center py-12 space-y-2 text-[#756E65]">
               <Receipt className="w-8 h-8 opacity-40 mx-auto" />
-              <p className="font-semibold text-xs text-[#2F2A25]">No se encontraron ventas registradas</p>
+              <p className="font-semibold text-xs text-[#2F2A25]">Ningún resultado coincide con los filtros aplicados</p>
             </div>
           )}
         </div>
+        )}
       </div>
 
       {/* Sale Detail Drawer / Modal */}

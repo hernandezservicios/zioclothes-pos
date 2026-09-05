@@ -1,7 +1,9 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { Product, ProductVariant, Customer, SaleItem, Sale } from '../../types';
 import { storageService } from '../../services/storageService';
+import { customersApi } from '../../services/customersApi';
 import { useAuth } from '../../context/AuthContext';
+import { useDataStore } from '../../context/DataStoreContext';
 import { useToast } from '../../context/ToastContext';
 import { formatCurrency } from '../../utils/formatters';
 import { sounds } from '../../utils/soundEffects';
@@ -29,22 +31,70 @@ export const POSView: React.FC = () => {
   const { settings, currentUser } = useAuth();
   const { showToast } = useToast();
 
-  const products = storageService.getProducts();
-  const categories = storageService.getCategories();
-  const customers = storageService.getCustomers();
+  // CORREGIR AUDITORÍA (requisito crítico): el POS ya NO lee
+  // storageService.getProducts()/getCustomers() como fuente viva -- ese
+  // caché de localStorage solo se llenaba en login/"Sincronizar Ahora" y
+  // quedaba completamente desconectado de lo que Catálogo/Inventario/
+  // Compras mostraban en memoria (ver informe de auditoría). Ahora el POS
+  // lee el mismo DataStore central que esas vistas, así que un producto
+  // creado/editado/desactivado en Catálogo aparece aquí de inmediato, sin
+  // logout/login ni F5. `storageService` sigue existiendo (ver
+  // DataStoreContext) solo como persistencia para la hidratación inicial.
+  const {
+    products,
+    categories,
+    customers,
+    refreshProducts,
+    refreshCustomers,
+    refreshSales,
+    refreshCredits,
+    getCustomers,
+  } = useDataStore();
+
+  // Verifica que el catálogo/clientes estén vigentes al entrar al POS
+  // (respeta el TTL/deduplicación del DataStore -- si otra vista ya los
+  // refrescó hace poco, esto no dispara ninguna llamada de red nueva).
+  useEffect(() => {
+    refreshProducts();
+    refreshCustomers();
+  }, [refreshProducts, refreshCustomers]);
 
   // Unified Search & Barcode Scanner State
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('TODOS');
 
   // Cart State
-  const [cartItems, setCartItems] = useState<SaleItem[]>([]);
-  const [selectedCustomer, setSelectedCustomer] = useState<Customer>(
-    (customers || []).find((c) => c.id === 'CLI-005') || (customers || [])[0]
+  // PARTE 5 (Hydration-First / F5): se hidrata SINCRÓNICAMENTE desde
+  // storageService en la inicialización del estado (no en un useEffect
+  // posterior), para que el primer render ya muestre el carrito
+  // persistido en vez de mostrar vacío por un instante y luego "saltar".
+  // Es solo estado de trabajo/UX -- nunca fuente de verdad de stock/venta.
+  const persistedPosState = useMemo(() => storageService.getPosWorkingState(), []);
+
+  const [cartItems, setCartItems] = useState<SaleItem[]>(() => persistedPosState?.cartItems || []);
+  // FASE 3.6C (corrección de crash con catálogo vacío): "sin cliente
+  // seleccionado" es un estado VÁLIDO (Consumidor Final), no un bug a
+  // enmascarar. Antes se intentaba adivinar un cliente por defecto
+  // (id fijo 'CLI-005', un residuo del seed de demostración que ya no
+  // sembramos, o directamente el primer cliente de la lista) -- si
+  // `customers` está vacío (Sheets sin clientes reales todavía) ambos
+  // fallbacks devuelven undefined, y ese undefined se usaba después como
+  // si fuera un Customer real (selectedCustomer.id), provocando el crash.
+  // Ahora el tipo es explícitamente Customer | null.
+  const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(() => {
+    const persistedId = persistedPosState?.selectedCustomerId;
+    if (!persistedId) return null;
+    return (customers || []).find((c) => c.id === persistedId) || null;
+  });
+  const [discountType, setDiscountType] = useState<'PORCENTAJE' | 'MONTO'>(
+    () => persistedPosState?.discountType || 'PORCENTAJE'
   );
-  const [discountType, setDiscountType] = useState<'PORCENTAJE' | 'MONTO'>('PORCENTAJE');
-  const [overallDiscountValue, setOverallDiscountValue] = useState<number | string>(0);
-  const [applyTax, setApplyTax] = useState<boolean>(settings.aplicarImpuestoPorDefecto);
+  const [overallDiscountValue, setOverallDiscountValue] = useState<number | string>(
+    () => persistedPosState?.overallDiscountValue ?? 0
+  );
+  const [applyTax, setApplyTax] = useState<boolean>(
+    () => persistedPosState?.applyTax ?? settings.aplicarImpuestoPorDefecto
+  );
 
   // Modals
   const [selectedProductForVariant, setSelectedProductForVariant] = useState<Product | null>(null);
@@ -59,6 +109,22 @@ export const POSView: React.FC = () => {
   const [newCustDoc, setNewCustDoc] = useState('');
   const [newCustTel, setNewCustTel] = useState('');
   const [newCustLimite, setNewCustLimite] = useState(25000);
+  const [creatingQuickCustomer, setCreatingQuickCustomer] = useState(false);
+
+  // PARTE 5 (Hydration-First / F5): persiste el estado de trabajo del POS
+  // en cada cambio relevante, para que un F5 posterior lo recupere. Nunca
+  // se usa para autorizar nada -- el checkout siempre valida/recalcula
+  // contra el backend real (ver PaymentModal -> salesApi.createSale).
+  useEffect(() => {
+    storageService.savePosWorkingState({
+      cartItems,
+      selectedCustomerId: selectedCustomer?.id,
+      discountType,
+      overallDiscountValue:
+        typeof overallDiscountValue === 'number' ? overallDiscountValue : Number(overallDiscountValue) || 0,
+      applyTax,
+    });
+  }, [cartItems, selectedCustomer, discountType, overallDiscountValue, applyTax]);
 
   // Filtered Products for Live Search & Category Filtering
   const filteredProducts = useMemo(() => {
@@ -332,6 +398,7 @@ export const POSView: React.FC = () => {
     if ((cartItems || []).length === 0) return;
     setCartItems([]);
     setOverallDiscountValue(0);
+    storageService.clearPosWorkingState();
     showToast('Carrito Vacío', 'Se limpiaron todas las prendas del carrito', 'informacion');
   };
 
@@ -356,37 +423,56 @@ export const POSView: React.FC = () => {
   const grandTotal = Math.max(0, taxableBase + totalTax);
 
   // Quick Customer Creation
-  const handleCreateQuickCustomer = (e: React.FormEvent) => {
+  // FASE 3.6D (Parte 5): crea el cliente vía customersApi.save (backend
+  // real) -- ya no se escribe un cliente sintético directo a
+  // storageService. Antes, un cliente creado aquí solo existía en el
+  // navegador y una venta a crédito con él fallaba en el backend real
+  // (CREDIT_ERROR: El cliente no existe) porque nunca llegaba a
+  // `Clientes`. Si el backend rechaza la creación, no se inventa ningún
+  // cliente local ni se continúa como si existiera.
+  const handleCreateQuickCustomer = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newCustNombre.trim()) {
       showToast('Datos Incompletos', 'Ingrese el nombre del cliente.', 'error');
       return;
     }
-    const newCust: Customer = {
-      id: storageService.getNextSequence('CLI'),
+
+    setCreatingQuickCustomer(true);
+    const res = await customersApi.save({
       nombre: newCustNombre.trim(),
       apellido: newCustApellido.trim(),
-      documento: newCustDoc.trim() || 'N/A',
+      documento: newCustDoc.trim() || undefined,
       telefono: newCustTel.trim() || 'N/A',
-      correo: 'cliente@zioclothes.com',
-      direccion: 'Santo Domingo',
-      ciudad: 'Santo Domingo',
       limiteCredito: Number(newCustLimite) || 25000,
       diasCreditoPorDefecto: 30,
-      estado: 'ACTIVO',
-      fechaCreacion: new Date().toISOString().replace('T', ' ').substring(0, 19),
-    };
+    });
 
-    const currentCustomers = storageService.getCustomers();
-    currentCustomers.unshift(newCust);
-    storageService.saveCustomers(currentCustomers);
-    setSelectedCustomer(newCust);
+    if (!res.success || !res.data) {
+      setCreatingQuickCustomer(false);
+      showToast('Error al Crear Cliente', res.message || 'No se pudo registrar el cliente en el backend.', 'error');
+      return; // No se crea ningún cliente local ni se continúa como si existiera.
+    }
+
+    // CORREGIR AUDITORÍA: invalida el DataStore central de clientes (misma
+    // colección que usa CustomersView) en vez de mantener un
+    // storageService.saveCustomers() paralelo -- getCustomers() lee el
+    // valor ya actualizado inmediatamente después del refresh, sin
+    // esperar al siguiente render. Nunca se construye un registro
+    // sintético: se busca por el ID real que el backend confirmó.
+    await refreshCustomers({ force: true });
+    setCreatingQuickCustomer(false);
+
+    const created = getCustomers().find((c) => c.id === res.data!.customerId);
+    if (created) {
+      setSelectedCustomer(created);
+    }
+
     setNewCustomerModalOpen(false);
     setNewCustNombre('');
     setNewCustApellido('');
     setNewCustDoc('');
     setNewCustTel('');
-    showToast('Cliente Creado', `Se seleccionó a ${newCust.nombre} ${newCust.apellido}`, 'exito');
+    showToast('Cliente Creado', `Se registró y seleccionó a ${newCustNombre.trim()} en Google Sheets.`, 'exito');
   };
 
   return (
@@ -534,7 +620,19 @@ export const POSView: React.FC = () => {
             })}
           </div>
 
-          {(filteredProducts || []).length === 0 && (
+          {/* FASE 3.6C: catálogo real vacío es un estado válido -- se
+              distingue de "sin resultados para este filtro/búsqueda" para
+              no confundir al usuario ni sugerirle reintentar algo que
+              nunca va a encontrar nada. */}
+          {(filteredProducts || []).length === 0 && (products || []).length === 0 && (
+            <div className="text-center py-16 space-y-3">
+              <ShoppingBag className="w-12 h-12 text-[#756E65]/40 mx-auto" />
+              <p className="text-sm font-semibold text-[#2F2A25]">Sin productos disponibles</p>
+              <p className="text-xs text-[#756E65]">Crea productos desde Productos para comenzar una venta.</p>
+            </div>
+          )}
+
+          {(filteredProducts || []).length === 0 && (products || []).length > 0 && (
             <div className="text-center py-16 space-y-3">
               <ShoppingBag className="w-12 h-12 text-[#756E65]/40 mx-auto" />
               <p className="text-sm font-semibold text-[#2F2A25]">No se encontraron prendas</p>
@@ -561,13 +659,18 @@ export const POSView: React.FC = () => {
           </div>
 
           <select
-            value={selectedCustomer.id}
+            value={selectedCustomer?.id || ''}
             onChange={(e) => {
+              if (e.target.value === '') {
+                setSelectedCustomer(null);
+                return;
+              }
               const cust = (customers || []).find((c) => c.id === e.target.value);
               if (cust) setSelectedCustomer(cust);
             }}
             className="w-full px-3 py-2 rounded-xl bg-white border border-[#E4DDD2] text-xs font-semibold text-[#2F2A25] focus:outline-none focus:border-[#2F2A25]"
           >
+            <option value="">Consumidor Final (sin cliente)</option>
             {(customers || []).map((c) => (
               <option key={c.id} value={c.id}>
                 {c.nombre} {c.apellido} ({c.documento})
@@ -575,8 +678,10 @@ export const POSView: React.FC = () => {
             ))}
           </select>
 
-          {/* Customer Credit Brief Pill */}
-          {selectedCustomer.id !== 'CLI-005' && (
+          {/* Customer Credit Brief Pill -- solo si hay un cliente real
+              seleccionado (ya no se compara contra el id fijo 'CLI-005',
+              residuo del seed de demostración). */}
+          {selectedCustomer && (
             <div className="p-2 bg-[#FAF8F4] rounded-xl border border-[#E4DDD2] flex items-center justify-between text-[11px]">
               <span className="text-[#756E65]">Crédito Disponible:</span>
               <span className="font-bold text-[#2F2A25]">
@@ -923,13 +1028,37 @@ export const POSView: React.FC = () => {
           descuentoTotal={totalDiscount}
           impuestoTotal={totalTax}
           total={grandTotal}
+          applyTax={applyTax}
           selectedCustomer={selectedCustomer}
           onClose={() => setPaymentModalOpen(false)}
           onSuccess={(sale) => {
             setPaymentModalOpen(false);
             setCartItems([]);
             setOverallDiscountValue(0);
+            // La venta ya fue confirmada por el backend real -- recién
+            // aquí se limpia el estado de trabajo persistido (PARTE 8: el
+            // carrito nunca se limpia antes del éxito).
+            storageService.clearPosWorkingState();
             setCompletedSale(sale);
+            // CORREGIR AUDITORÍA (§4 "Venta y stock"): la venta ya fue
+            // confirmada por el backend -- recién AHORA se invalida el
+            // DataStore para que el stock descontado se refleje de
+            // inmediato en Catálogo/Inventario/Compras, sin logout/login
+            // ni F5. No se actualiza el stock "a mano" restando cantidades
+            // localmente: se vuelve a pedir el catálogo real completo, así
+            // que lo mostrado siempre coincide exactamente con lo que el
+            // backend confirmó.
+            refreshProducts({ force: true });
+            refreshSales({ force: true });
+            if (sale.esCredito && sale.montoFinanciado && sale.montoFinanciado > 0) {
+              // La nueva cuenta por cobrar afecta también el saldo/crédito
+              // disponible del cliente (customers.list lo recalcula
+              // server-side desde Creditos real) -- CustomersView y una
+              // próxima venta a crédito del mismo cliente ven la cifra
+              // correcta sin logout/login ni F5.
+              refreshCredits({ force: true });
+              refreshCustomers({ force: true });
+            }
           }}
         />
       )}
@@ -1009,15 +1138,17 @@ export const POSView: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setNewCustomerModalOpen(false)}
-                  className="flex-1 py-2 rounded-xl bg-white border border-[#E4DDD2] text-[#756E65]"
+                  disabled={creatingQuickCustomer}
+                  className="flex-1 py-2 rounded-xl bg-white border border-[#E4DDD2] text-[#756E65] disabled:opacity-50"
                 >
                   Cancelar
                 </button>
                 <button
                   type="submit"
-                  className="flex-1 py-2 rounded-xl bg-[#2F2A25] text-white font-bold"
+                  disabled={creatingQuickCustomer}
+                  className="flex-1 py-2 rounded-xl bg-[#2F2A25] text-white font-bold disabled:opacity-60 disabled:cursor-not-allowed"
                 >
-                  Guardar & Seleccionar
+                  {creatingQuickCustomer ? 'Guardando...' : 'Guardar & Seleccionar'}
                 </button>
               </div>
             </form>

@@ -1,8 +1,9 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { storageService } from '../../services/storageService';
-import { apiService } from '../../services/apiService';
+import { authApi } from '../../services/authApi';
+import { settingsApi } from '../../services/settingsApi';
 import { SystemSettings, UserRole, User } from '../../types';
 import { formatDateTime } from '../../utils/formatters';
 import { exportToCSV } from '../../utils/exportUtils';
@@ -26,22 +27,128 @@ import {
 } from 'lucide-react';
 
 export const SettingsView: React.FC = () => {
-  const { settings, updateSettings, currentUser, hasPermission } = useAuth();
+  const { settings, updateSettings, currentUser, hasPermission, refreshCatalog } = useAuth();
   const { showToast } = useToast();
 
   const [activeTab, setActiveTab] = useState<'GENERAL' | 'USUARIOS' | 'SHEETS' | 'BACKUP' | 'AUDITORIA'>('GENERAL');
 
-  // General Settings Form
+  // FASE 3.7H: configuración empresarial real vía settingsApi.get()
+  // (SettingsController.handleGetSettings -> hoja Configuracion real).
+  // `settings` de AuthContext (poblado en login/bootstrap) se usa solo
+  // como valor inicial para no mostrar campos vacíos mientras se confirma
+  // la lectura fresca -- pero SIEMPRE se sobreescribe con la respuesta
+  // real al abrir esta pantalla, tal como exige esta fase ("Al abrir
+  // SettingsView: obtener configuración desde backend").
   const [formSettings, setFormSettings] = useState<SystemSettings>({ ...settings });
+  const [settingsLoading, setSettingsLoading] = useState(true);
+  const [settingsLoadError, setSettingsLoadError] = useState<string | null>(null);
+  const [savingSettings, setSavingSettings] = useState(false);
 
-  // Users State
-  const [users, setUsers] = useState<User[]>(() => storageService.getUsers() || []);
-  const [newUserModal, setNewUserModal] = useState(false);
+  const fetchBusinessSettings = useCallback(async () => {
+    setSettingsLoading(true);
+    setSettingsLoadError(null);
+    const res = await settingsApi.get();
+    if (res.success) {
+      setFormSettings((prev) => ({ ...prev, ...res.data }));
+    } else {
+      setSettingsLoadError(res.message || 'No se pudo obtener la configuración real desde el backend.');
+    }
+    setSettingsLoading(false);
+  }, []);
+
+  useEffect(() => {
+    fetchBusinessSettings();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // FASE 3.6D (Parte 3): la URL del Web App ya NO vive en formSettings/
+  // zio_settings -- vive en zio_infrastructure_config, separada de la
+  // configuración comercial, para que limpiar el caché de negocio nunca
+  // la destruya.
+  const [googleAppsScriptUrl, setGoogleAppsScriptUrlState] = useState<string>(() =>
+    storageService.getGoogleAppsScriptUrl()
+  );
+
+  // FASE 3.7G: usuarios administrativos reales vía auth.listUsers/
+  // auth.saveUser (AuthController.gs). Antes storageService.getUsers()/
+  // saveUsers() eran 100% locales -- un "usuario" creado aquí nunca podía
+  // iniciar sesión de verdad (AuthContext ya validaba solo contra el
+  // backend real desde antes de esta fase), y la lista mostrada no tenía
+  // relación alguna con los usuarios reales de Sheets. El backend NUNCA
+  // devuelve contraseñas ni hashes -- este estado tampoco los guarda
+  // jamás.
+  const [users, setUsers] = useState<User[]>([]);
+  const [usersLoading, setUsersLoading] = useState(true);
+  const [usersError, setUsersError] = useState<string | null>(null);
+
+  const fetchUsers = useCallback(async () => {
+    setUsersLoading(true);
+    setUsersError(null);
+    const res = await authApi.listUsers();
+    if (res.success) {
+      setUsers(res.data || []);
+    } else {
+      setUsersError(res.message || 'No se pudo obtener la lista real de usuarios.');
+    }
+    setUsersLoading(false);
+  }, []);
+
+  useEffect(() => {
+    if (hasPermission('admin.usuarios')) {
+      fetchUsers();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const [userModalOpen, setUserModalOpen] = useState(false);
+  const [editingUserId, setEditingUserId] = useState<string | null>(null);
   const [newUsername, setNewUsername] = useState('');
-  const [newPassword, setNewPassword] = useState('123456');
+  const [newPassword, setNewPassword] = useState('');
   const [newNombre, setNewNombre] = useState('');
   const [newApellido, setNewApellido] = useState('');
+  const [newCorreo, setNewCorreo] = useState('');
+  const [newTelefono, setNewTelefono] = useState('');
   const [newRol, setNewRol] = useState<UserRole>('CAJERO');
+  const [newEstado, setNewEstado] = useState<'ACTIVO' | 'INACTIVO' | 'BLOQUEADO'>('ACTIVO');
+  const [savingUser, setSavingUser] = useState(false);
+
+  // Únicamente los 5 roles reales definidos en SeedSetup.gs -- el
+  // selector anterior ofrecía 'ENCARGADO', un rol que nunca existió en el
+  // backend (asignado solo mediante un cast de TypeScript que ocultaba el
+  // problema en tiempo de compilación).
+  const REAL_ROLES: { value: UserRole; label: string }[] = [
+    { value: 'CAJERO', label: 'Cajero / POS (Ventas, Clientes, Abonos)' },
+    { value: 'VENDEDOR', label: 'Asesor de Ventas (Catálogo, Ventas)' },
+    { value: 'SUPERVISOR', label: 'Supervisor de Turno (Caja, Inventario, Descuentos)' },
+    { value: 'GERENTE', label: 'Gerente de Tienda (Reportes, Anulaciones)' },
+    { value: 'ADMIN', label: 'Administrador General (Acceso Total)' },
+  ];
+
+  const handleOpenCreateUser = () => {
+    setEditingUserId(null);
+    setNewUsername('');
+    setNewPassword('');
+    setNewNombre('');
+    setNewApellido('');
+    setNewCorreo('');
+    setNewTelefono('');
+    setNewRol('CAJERO');
+    setNewEstado('ACTIVO');
+    setUserModalOpen(true);
+  };
+
+  const handleOpenEditUser = (u: User) => {
+    setEditingUserId(u.id);
+    setNewUsername(u.usuario);
+    setNewPassword('');
+    setNewNombre(u.nombre);
+    setNewApellido(u.apellido || '');
+    setNewCorreo(u.correo || '');
+    setNewTelefono(u.telefono || '');
+    setNewRol(u.rol);
+    setNewEstado((u.estado as 'ACTIVO' | 'INACTIVO' | 'BLOQUEADO') || 'ACTIVO');
+    setUserModalOpen(true);
+  };
 
   // Audit Logs
   const auditLogs = storageService.getAuditLogs() || [];
@@ -50,61 +157,94 @@ export const SettingsView: React.FC = () => {
   const [syncing, setSyncing] = useState(false);
 
   // Save General Settings
-  const handleSaveGeneral = (e: React.FormEvent) => {
+  // FASE 3.7H: ahora async y real -- espera la confirmación del backend
+  // (vía AuthContext.updateSettings -> settingsApi.save ->
+  // system.updateSettings) antes de mostrar éxito. Sin actualización
+  // optimista: si el backend rechaza, el toast de error ya lo muestra
+  // updateSettings y esta función simplemente no hace nada más.
+  const handleSaveGeneral = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (savingSettings) return; // previene doble submit
     const tax = Number(formSettings.impuestoPorcentaje);
     if (!Number.isFinite(tax) || tax < 0 || tax > 100) {
       showToast('Impuesto Inválido', 'El ITBIS debe ser un porcentaje válido entre 0% y 100%.', 'error');
       return;
     }
-    updateSettings({
+
+    setSavingSettings(true);
+    await updateSettings({
       ...formSettings,
       impuestoPorcentaje: tax,
     });
-    showToast('Configuración Guardada', 'Los datos del negocio han sido actualizados.', 'exito');
+    setSavingSettings(false);
   };
 
-  // Add User
-  const handleAddUser = (e: React.FormEvent) => {
+  // FASE 3.7G: crea/edita un usuario real vía auth.saveUser
+  // (AuthController.handleSaveUser). Nunca se construye ni se guarda
+  // localmente un usuario -- solo se refleja lo que el backend confirmó,
+  // recargando la lista real. La contraseña nunca se persiste en
+  // storageService/localStorage; solo vive en el estado del formulario
+  // mientras el modal está abierto y se descarta al cerrarlo.
+  const handleSaveUser = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (savingUser) return; // previene doble submit
     if (!newUsername.trim() || !newNombre.trim()) {
-      showToast('Campos Requeridos', 'Complete todos los campos obligatorios.', 'error');
+      showToast('Campos Requeridos', 'Usuario y nombre son obligatorios.', 'error');
+      return;
+    }
+    // Contraseña obligatoria solo al crear -- al editar, un campo vacío
+    // significa "no cambiar la contraseña actual" (semántica ya
+    // soportada explícitamente por el backend real).
+    if (!editingUserId && !newPassword.trim()) {
+      showToast('Contraseña Requerida', 'Debe asignar una contraseña inicial para el nuevo usuario.', 'error');
       return;
     }
 
-    const newUser: User = {
-      id: `USR-${Date.now()}`,
+    setSavingUser(true);
+
+    const res = await authApi.saveUser({
+      id: editingUserId || undefined,
       usuario: newUsername.trim().toLowerCase(),
-      username: newUsername.trim().toLowerCase(),
       nombre: newNombre.trim(),
-      apellido: newApellido.trim(),
-      correo: `${newUsername.trim().toLowerCase()}@zioclothes.com`,
-      telefono: '809-555-0100',
+      apellido: newApellido.trim() || undefined,
+      correo: newCorreo.trim() || undefined,
+      telefono: newTelefono.trim() || undefined,
       rol: newRol,
-      estado: 'ACTIVO',
-      activo: true,
-      fechaCreacion: new Date().toISOString().replace('T', ' ').substring(0, 19),
-    };
-
-    const updated = [...users, newUser];
-    storageService.saveUsers(updated);
-    setUsers(updated);
-    setNewUserModal(false);
-    showToast('Usuario Creado', `Usuario ${newUser.usuario} añadido con rol ${newUser.rol}.`, 'exito');
-  };
-
-  // Trigger Google Sheets Sync
-  const handleTriggerSync = async () => {
-    setSyncing(true);
-    const res = await apiService.syncWithGoogleAppsScript('FULL_SYNC', {
-      source: 'Settings Manual Trigger',
+      estado: newEstado,
+      password: newPassword.trim() || undefined,
     });
-    setSyncing(false);
+
+    setSavingUser(false);
 
     if (res.success) {
-      showToast('Sincronización Exitosa', res.message, 'exito');
+      showToast(editingUserId ? 'Usuario Actualizado' : 'Usuario Creado', res.message, 'exito');
+      setUserModalOpen(false);
+      await fetchUsers();
     } else {
-      showToast('Aviso de Sincronización', res.message, 'advertencia');
+      showToast('Error', res.message, 'error');
+      // No se agrega ni modifica ningún usuario en la lista mostrada --
+      // sigue siendo la última confirmada por el backend.
+    }
+  };
+
+  // FASE 3.6 (corrección de bloqueante — Parte 9): "FULL_SYNC" no existe
+  // como acción en Main.gs (verificado en el backend real) -- este botón
+  // llamaba a un endpoint inventado que siempre fallaría. Se repunta al
+  // mecanismo real de sincronización que ya existe (system.getBootstrapData,
+  // vía refreshCatalog en AuthContext), en vez de inventar un endpoint.
+  const handleTriggerSync = async () => {
+    setSyncing(true);
+    const ok = await refreshCatalog();
+    setSyncing(false);
+
+    if (ok) {
+      showToast('Sincronización Exitosa', 'Catálogo (productos, clientes, configuración) actualizado desde Google Sheets.', 'exito');
+    } else {
+      showToast(
+        'Aviso de Sincronización',
+        'No se pudo sincronizar. Verifique la URL del Web App y que haya una sesión iniciada.',
+        'advertencia'
+      );
     }
   };
 
@@ -121,9 +261,18 @@ export const SettingsView: React.FC = () => {
     showToast('Copia de Seguridad', 'Base de datos exportada en formato JSON.', 'exito');
   };
 
-  // Reset to Demo Data
+  // FASE 3.6B: ya NO restaura un catálogo/directorio de demostración --
+  // storageService.initialize() dejó de sembrar productos/clientes/etc.
+  // demo (ver storageService.ts). Ahora solo limpia el caché local
+  // (sesión, catálogo cacheado, estado de trabajo del POS) y reaplica los
+  // valores de configuración/permisos por defecto; el catálogo real se
+  // vuelve a traer del backend en el siguiente login/sincronización.
   const handleResetData = () => {
-    if (window.confirm('¿Está seguro de restablecer todos los datos a la demostración inicial de ZIO CLOTHES? Esta acción no se puede deshacer.')) {
+    if (
+      window.confirm(
+        'Esto borrará el caché local (sesión, catálogo cacheado, carrito) y restablecerá la configuración a sus valores por defecto. La URL de conexión con Google Sheets NO se borra. El catálogo real se volverá a descargar al iniciar sesión de nuevo. ¿Continuar?'
+      )
+    ) {
       storageService.resetToInitialDemo();
       window.location.reload();
     }
@@ -158,7 +307,15 @@ export const SettingsView: React.FC = () => {
           <span>Negocio & Ticket</span>
         </button>
 
-        {hasPermission('usuarios.gestionar') && (
+        {/* FASE 3.7G: corregido -- el backend real exige 'admin.usuarios'
+            (AuthController.handleListUsers/handleSaveUser vía
+            Security.requirePermission), no 'usuarios.gestionar', que
+            nunca existió en ningún rol real del seed (ver SeedSetup.gs).
+            Antes de este fix, esta pestaña era inalcanzable para
+            cualquier rol que no sea ADMIN (que ya tiene un bypass total
+            en AuthContext.hasPermission independiente del código exacto
+            del permiso). */}
+        {hasPermission('admin.usuarios') && (
           <button
             type="button"
             onClick={() => setActiveTab('USUARIOS')}
@@ -217,106 +374,140 @@ export const SettingsView: React.FC = () => {
 
       {/* TAB 1: GENERAL SETTINGS */}
       {activeTab === 'GENERAL' && (
-        <form onSubmit={handleSaveGeneral} noValidate className="bg-white p-6 rounded-3xl border border-[#E4DDD2] space-y-6 shadow-xs">
-          <div>
-            <h3 className="font-serif font-bold text-base text-[#2F2A25]">Identidad de la Boutique & Facturación</h3>
-            <p className="text-xs text-[#756E65]">Datos que se imprimen en recibos térmicos y estados de cuenta.</p>
-          </div>
+        <div className="space-y-4">
+          {settingsLoadError && (
+            <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                <span>No se pudo cargar la configuración real desde el backend: {settingsLoadError}</span>
+              </div>
+              <button type="button" onClick={() => fetchBusinessSettings()} className="px-3 py-1.5 rounded-lg bg-rose-700 text-white font-bold text-[11px] shrink-0">
+                Reintentar
+              </button>
+            </div>
+          )}
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
-            <div>
-              <label className="block font-bold text-[#2F2A25] mb-1">Nombre Comercial:</label>
-              <input
-                type="text"
-                value={formSettings.nombreNegocio}
-                onChange={(e) => setFormSettings({ ...formSettings, nombreNegocio: e.target.value })}
-                className="w-full px-3.5 py-2.5 rounded-xl border border-[#E4DDD2] bg-white font-medium"
-              />
+          <form onSubmit={handleSaveGeneral} noValidate className="bg-white p-6 rounded-3xl border border-[#E4DDD2] space-y-6 shadow-xs">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="font-serif font-bold text-base text-[#2F2A25]">Identidad de la Boutique & Facturación</h3>
+                <p className="text-xs text-[#756E65]">Datos que se imprimen en recibos térmicos y estados de cuenta.</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => fetchBusinessSettings()}
+                disabled={settingsLoading}
+                className="flex items-center gap-2 px-3 py-2 rounded-xl bg-white border border-[#E4DDD2] text-xs font-semibold text-[#2F2A25] hover:bg-[#F6F1E8] disabled:opacity-50"
+                title="Volver a consultar el backend real"
+              >
+                <RefreshCw className={`w-4 h-4 text-[#756E65] ${settingsLoading ? 'animate-spin' : ''}`} />
+                <span>{settingsLoading ? 'Cargando...' : 'Actualizar'}</span>
+              </button>
             </div>
 
-            <div>
-              <label className="block font-bold text-[#2F2A25] mb-1">RNC / Cédula Fiscal:</label>
-              <input
-                type="text"
-                value={formSettings.rnc}
-                onChange={(e) => setFormSettings({ ...formSettings, rnc: e.target.value })}
-                className="w-full px-3.5 py-2.5 rounded-xl border border-[#E4DDD2] bg-white font-mono"
-              />
-            </div>
+            <fieldset disabled={settingsLoading || savingSettings} className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs disabled:opacity-60">
+              <div>
+                <label className="block font-bold text-[#2F2A25] mb-1">Nombre Comercial:</label>
+                <input
+                  type="text"
+                  value={formSettings.nombreNegocio}
+                  onChange={(e) => setFormSettings({ ...formSettings, nombreNegocio: e.target.value })}
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-[#E4DDD2] bg-white font-medium"
+                />
+              </div>
 
-            <div>
-              <label className="block font-bold text-[#2F2A25] mb-1">Teléfono / WhatsApp:</label>
-              <input
-                type="text"
-                value={formSettings.telefono}
-                onChange={(e) => setFormSettings({ ...formSettings, telefono: e.target.value })}
-                className="w-full px-3.5 py-2.5 rounded-xl border border-[#E4DDD2] bg-white"
-              />
-            </div>
+              <div>
+                <label className="block font-bold text-[#2F2A25] mb-1">RNC / Cédula Fiscal:</label>
+                <input
+                  type="text"
+                  value={formSettings.rnc}
+                  onChange={(e) => setFormSettings({ ...formSettings, rnc: e.target.value })}
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-[#E4DDD2] bg-white font-mono"
+                />
+              </div>
 
-            <div>
-              <label className="block font-bold text-[#2F2A25] mb-1">Dirección del Local:</label>
-              <input
-                type="text"
-                value={formSettings.direccion}
-                onChange={(e) => setFormSettings({ ...formSettings, direccion: e.target.value })}
-                className="w-full px-3.5 py-2.5 rounded-xl border border-[#E4DDD2] bg-white"
-              />
-            </div>
+              <div>
+                <label className="block font-bold text-[#2F2A25] mb-1">Teléfono / WhatsApp:</label>
+                <input
+                  type="text"
+                  value={formSettings.telefono}
+                  onChange={(e) => setFormSettings({ ...formSettings, telefono: e.target.value })}
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-[#E4DDD2] bg-white"
+                />
+              </div>
 
-            <div>
-              <label className="block font-bold text-[#2F2A25] mb-1">Símbolo de Moneda:</label>
-              <input
-                type="text"
-                value={formSettings.simboloMoneda}
-                onChange={(e) => setFormSettings({ ...formSettings, simboloMoneda: e.target.value })}
-                className="w-full px-3.5 py-2.5 rounded-xl border border-[#E4DDD2] bg-white font-bold"
-              />
-            </div>
+              <div>
+                <label className="block font-bold text-[#2F2A25] mb-1">Dirección del Local:</label>
+                <input
+                  type="text"
+                  value={formSettings.direccion}
+                  onChange={(e) => setFormSettings({ ...formSettings, direccion: e.target.value })}
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-[#E4DDD2] bg-white"
+                />
+              </div>
 
-            <div>
-              <label className="block font-bold text-[#2F2A25] mb-1">Tasa de Impuesto / ITBIS (%):</label>
-              <input
-                type="number"
-                min="0"
-                max="100"
-                step="any"
-                inputMode="decimal"
-                value={formSettings.impuestoPorcentaje === undefined ? '' : formSettings.impuestoPorcentaje}
-                onChange={(e) => {
-                  const val = e.target.value;
-                  if (val === '') {
-                    setFormSettings({ ...formSettings, impuestoPorcentaje: 0 });
-                  } else {
-                    const num = parseFloat(val);
-                    setFormSettings({ ...formSettings, impuestoPorcentaje: isNaN(num) ? 0 : num });
-                  }
-                }}
-                className="w-full px-3.5 py-2.5 rounded-xl border border-[#E4DDD2] bg-white font-bold"
-              />
-            </div>
+              <div>
+                <label className="block font-bold text-[#2F2A25] mb-1">Símbolo de Moneda:</label>
+                <input
+                  type="text"
+                  value={formSettings.simboloMoneda}
+                  onChange={(e) => setFormSettings({ ...formSettings, simboloMoneda: e.target.value })}
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-[#E4DDD2] bg-white font-bold"
+                />
+              </div>
 
-            <div className="col-span-1 sm:col-span-2">
-              <label className="block font-bold text-[#2F2A25] mb-1">Mensaje al Pie del Recibo:</label>
-              <input
-                type="text"
-                value={formSettings.mensajePieFactura}
-                onChange={(e) => setFormSettings({ ...formSettings, mensajePieFactura: e.target.value })}
-                className="w-full px-3.5 py-2.5 rounded-xl border border-[#E4DDD2] bg-white"
-              />
-            </div>
-          </div>
+              <div>
+                <label className="block font-bold text-[#2F2A25] mb-1">Tasa de Impuesto / ITBIS (%):</label>
+                <input
+                  type="number"
+                  min="0"
+                  max="100"
+                  step="any"
+                  inputMode="decimal"
+                  value={formSettings.impuestoPorcentaje === undefined ? '' : formSettings.impuestoPorcentaje}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    if (val === '') {
+                      setFormSettings({ ...formSettings, impuestoPorcentaje: 0 });
+                    } else {
+                      const num = parseFloat(val);
+                      setFormSettings({ ...formSettings, impuestoPorcentaje: isNaN(num) ? 0 : num });
+                    }
+                  }}
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-[#E4DDD2] bg-white font-bold"
+                />
+              </div>
 
-          <div className="pt-4 border-t border-[#E4DDD2] flex justify-end">
-            <button
-              type="submit"
-              className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-[#2F2A25] text-white text-xs font-bold hover:bg-[#403932] transition shadow-xs"
-            >
-              <Save className="w-4 h-4 text-[#E8DCC8]" />
-              <span>Guardar Cambios</span>
-            </button>
-          </div>
-        </form>
+              <div className="col-span-1 sm:col-span-2">
+                <label className="block font-bold text-[#2F2A25] mb-1">Mensaje al Pie del Recibo:</label>
+                {/* FASE 3.7H: corregido -- este campo leía/escribía
+                    `formSettings.mensajePieFactura`, una clave que nunca
+                    existió en SystemSettings ni en el backend (el campo
+                    real ya declarado en el tipo es `mensajeTicketPie`,
+                    mapeado a `pieTicket` en el backend). El input quedaba
+                    permanentemente vacío sin importar lo que el backend
+                    devolviera. */}
+                <input
+                  type="text"
+                  value={formSettings.mensajeTicketPie || ''}
+                  onChange={(e) => setFormSettings({ ...formSettings, mensajeTicketPie: e.target.value })}
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-[#E4DDD2] bg-white"
+                />
+              </div>
+            </fieldset>
+
+            <div className="pt-4 border-t border-[#E4DDD2] flex justify-end">
+              <button
+                type="submit"
+                disabled={settingsLoading || savingSettings}
+                className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-[#2F2A25] text-white text-xs font-bold hover:bg-[#403932] transition shadow-xs disabled:bg-zinc-300"
+              >
+                <Save className="w-4 h-4 text-[#E8DCC8]" />
+                <span>{savingSettings ? 'Guardando...' : 'Guardar Cambios'}</span>
+              </button>
+            </div>
+          </form>
+        </div>
       )}
 
       {/* TAB 2: USERS & ROLES */}
@@ -327,17 +518,46 @@ export const SettingsView: React.FC = () => {
               <h3 className="font-serif font-bold text-base text-[#2F2A25]">Cuentas de Usuarios & Roles</h3>
               <p className="text-xs text-[#756E65]">Control de acceso por cajero, supervisor y administrador.</p>
             </div>
-            <button
-              type="button"
-              onClick={() => setNewUserModal(true)}
-              className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-[#2F2A25] text-white text-xs font-bold hover:bg-[#403932]"
-            >
-              <Plus className="w-4 h-4 text-[#E8DCC8]" />
-              <span>Nuevo Usuario</span>
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => fetchUsers()}
+                disabled={usersLoading}
+                className="flex items-center gap-2 px-3 py-2 rounded-xl bg-white border border-[#E4DDD2] text-xs font-semibold text-[#2F2A25] hover:bg-[#F6F1E8] disabled:opacity-50"
+                title="Volver a consultar el backend real"
+              >
+                <RefreshCw className={`w-4 h-4 text-[#756E65] ${usersLoading ? 'animate-spin' : ''}`} />
+                <span>{usersLoading ? 'Actualizando...' : 'Actualizar'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleOpenCreateUser}
+                className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-[#2F2A25] text-white text-xs font-bold hover:bg-[#403932]"
+              >
+                <Plus className="w-4 h-4 text-[#E8DCC8]" />
+                <span>Nuevo Usuario</span>
+              </button>
+            </div>
           </div>
 
+          {usersError && (
+            <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                <span>No se pudo cargar la lista real de usuarios: {usersError}</span>
+              </div>
+              <button type="button" onClick={() => fetchUsers()} className="px-3 py-1.5 rounded-lg bg-rose-700 text-white font-bold text-[11px] shrink-0">
+                Reintentar
+              </button>
+            </div>
+          )}
+
           <div className="overflow-x-auto">
+            {usersLoading && users.length === 0 ? (
+              <div className="text-center py-10 text-[#756E65] text-xs">Consultando usuarios reales en el backend...</div>
+            ) : !usersLoading && !usersError && users.length === 0 ? (
+              <div className="text-center py-10 text-[#756E65] text-xs">Todavía no hay usuarios registrados en Google Sheets.</div>
+            ) : (
             <table className="w-full text-xs text-left">
               <thead className="bg-[#F6F1E8] text-[#2F2A25] uppercase text-[10px] font-bold">
                 <tr>
@@ -345,12 +565,13 @@ export const SettingsView: React.FC = () => {
                   <th className="py-2.5 px-4">Nombre Completo</th>
                   <th className="py-2.5 px-4">Rol Asignado</th>
                   <th className="py-2.5 px-4 text-center">Estado</th>
+                  <th className="py-2.5 px-4 text-center">Acciones</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[#E4DDD2]/60">
                 {(users || []).map((u) => (
                   <tr key={u.id}>
-                    <td className="py-3 px-4 font-mono font-bold text-[#2F2A25]">@{u.username}</td>
+                    <td className="py-3 px-4 font-mono font-bold text-[#2F2A25]">@{u.usuario}</td>
                     <td className="py-3 px-4">{u.nombre} {u.apellido}</td>
                     <td className="py-3 px-4">
                       <span className="px-2 py-0.5 rounded-lg bg-[#FAF8F4] border border-[#E4DDD2] text-[10px] font-bold text-[#2F2A25]">
@@ -358,19 +579,44 @@ export const SettingsView: React.FC = () => {
                       </span>
                     </td>
                     <td className="py-3 px-4 text-center">
-                      <span className="text-[10px] font-bold text-emerald-700">ACTIVO</span>
+                      <span
+                        className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                          u.estado === 'ACTIVO'
+                            ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                            : 'bg-rose-50 text-rose-700 border-rose-200'
+                        }`}
+                      >
+                        {u.estado}
+                      </span>
+                    </td>
+                    <td className="py-3 px-4 text-center">
+                      <button
+                        type="button"
+                        onClick={() => handleOpenEditUser(u)}
+                        className="px-2.5 py-1 rounded-lg bg-[#FAF8F4] border border-[#E4DDD2] text-[11px] font-bold text-[#2F2A25] hover:bg-[#F6F1E8]"
+                      >
+                        Editar
+                      </button>
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
+            )}
           </div>
 
-          {newUserModal && (
+          {userModalOpen && (
             <div className="fixed inset-0 bg-black/50 backdrop-blur-xs z-50 flex items-center justify-center p-4">
-              <div className="bg-[#FAF8F4] border border-[#E4DDD2] rounded-3xl max-w-md w-full p-5 space-y-4 shadow-2xl">
-                <h3 className="text-sm font-bold text-[#2F2A25] border-b border-[#E4DDD2] pb-2">Crear Empleado / Usuario</h3>
-                <form onSubmit={handleAddUser} noValidate className="space-y-3 text-xs">
+              <div className="bg-[#FAF8F4] border border-[#E4DDD2] rounded-3xl max-w-md w-full p-5 space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto">
+                <h3 className="text-sm font-bold text-[#2F2A25] border-b border-[#E4DDD2] pb-2">
+                  {editingUserId ? 'Editar Empleado / Usuario' : 'Crear Empleado / Usuario'}
+                </h3>
+                {editingUserId && editingUserId === currentUser?.id && (
+                  <div className="p-2.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-800 text-[11px]">
+                    ⚠ Estás editando tu propia cuenta. Si cambias tu rol o estado, el cambio no tendrá efecto en tu sesión actual hasta que vuelvas a iniciar sesión.
+                  </div>
+                )}
+                <form onSubmit={handleSaveUser} noValidate className="space-y-3 text-xs">
                   <div>
                     <label className="block font-bold text-[#2F2A25] mb-1">Nombre de Usuario (@):</label>
                     <input
@@ -379,6 +625,7 @@ export const SettingsView: React.FC = () => {
                       placeholder="ej. maria.vendedor"
                       value={newUsername}
                       onChange={(e) => setNewUsername(e.target.value)}
+                      disabled={savingUser}
                       className="w-full px-3 py-2 rounded-xl border border-[#E4DDD2] bg-white font-mono"
                     />
                   </div>
@@ -390,6 +637,7 @@ export const SettingsView: React.FC = () => {
                         required
                         value={newNombre}
                         onChange={(e) => setNewNombre(e.target.value)}
+                        disabled={savingUser}
                         className="w-full px-3 py-2 rounded-xl border border-[#E4DDD2] bg-white"
                       />
                     </div>
@@ -399,45 +647,94 @@ export const SettingsView: React.FC = () => {
                         type="text"
                         value={newApellido}
                         onChange={(e) => setNewApellido(e.target.value)}
+                        disabled={savingUser}
                         className="w-full px-3 py-2 rounded-xl border border-[#E4DDD2] bg-white"
                       />
                     </div>
                   </div>
-                  <div>
-                    <label className="block font-bold text-[#2F2A25] mb-1">Rol / Permisos:</label>
-                    <select
-                      value={newRol}
-                      onChange={(e) => setNewRol(e.target.value as UserRole)}
-                      className="w-full px-3 py-2 rounded-xl border border-[#E4DDD2] bg-white font-semibold"
-                    >
-                      <option value="CAJERO">Cajero / Vendedor (POS, Ventas, Clientes)</option>
-                      <option value="ENCARGADO">Encargado de Tienda (Inventario, Caja, Abonos)</option>
-                      <option value="ADMIN">Administrador General (Acceso Total & Costos)</option>
-                    </select>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="block font-bold text-[#2F2A25] mb-1">Correo (opcional):</label>
+                      <input
+                        type="email"
+                        value={newCorreo}
+                        onChange={(e) => setNewCorreo(e.target.value)}
+                        disabled={savingUser}
+                        placeholder="usuario@zioclothes.com"
+                        className="w-full px-3 py-2 rounded-xl border border-[#E4DDD2] bg-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="block font-bold text-[#2F2A25] mb-1">Teléfono (opcional):</label>
+                      <input
+                        type="text"
+                        value={newTelefono}
+                        onChange={(e) => setNewTelefono(e.target.value)}
+                        disabled={savingUser}
+                        className="w-full px-3 py-2 rounded-xl border border-[#E4DDD2] bg-white"
+                      />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="block font-bold text-[#2F2A25] mb-1">Rol / Permisos:</label>
+                      <select
+                        value={newRol}
+                        onChange={(e) => setNewRol(e.target.value as UserRole)}
+                        disabled={savingUser}
+                        className="w-full px-3 py-2 rounded-xl border border-[#E4DDD2] bg-white font-semibold"
+                      >
+                        {REAL_ROLES.map((r) => (
+                          <option key={r.value} value={r.value}>{r.label}</option>
+                        ))}
+                      </select>
+                    </div>
+                    {editingUserId && (
+                      <div>
+                        <label className="block font-bold text-[#2F2A25] mb-1">Estado:</label>
+                        <select
+                          value={newEstado}
+                          onChange={(e) => setNewEstado(e.target.value as any)}
+                          disabled={savingUser}
+                          className="w-full px-3 py-2 rounded-xl border border-[#E4DDD2] bg-white font-semibold"
+                        >
+                          <option value="ACTIVO">Activo</option>
+                          <option value="INACTIVO">Inactivo</option>
+                          <option value="BLOQUEADO">Bloqueado</option>
+                        </select>
+                      </div>
+                    )}
                   </div>
                   <div>
-                    <label className="block font-bold text-[#2F2A25] mb-1">Contraseña:</label>
+                    <label className="block font-bold text-[#2F2A25] mb-1">
+                      Contraseña{editingUserId ? ' (dejar en blanco para no cambiarla):' : ':'}
+                    </label>
                     <input
                       type="password"
-                      required
+                      required={!editingUserId}
+                      autoComplete="new-password"
+                      placeholder={editingUserId ? '••••••••' : ''}
                       value={newPassword}
                       onChange={(e) => setNewPassword(e.target.value)}
+                      disabled={savingUser}
                       className="w-full px-3 py-2 rounded-xl border border-[#E4DDD2] bg-white font-mono"
                     />
                   </div>
                   <div className="flex gap-2 pt-2">
                     <button
                       type="button"
-                      onClick={() => setNewUserModal(false)}
-                      className="flex-1 py-2 rounded-xl bg-white border border-[#E4DDD2] font-semibold text-[#756E65]"
+                      onClick={() => setUserModalOpen(false)}
+                      disabled={savingUser}
+                      className="flex-1 py-2 rounded-xl bg-white border border-[#E4DDD2] font-semibold text-[#756E65] disabled:opacity-50"
                     >
                       Cancelar
                     </button>
                     <button
                       type="submit"
-                      className="flex-1 py-2 rounded-xl bg-[#2F2A25] font-bold text-white shadow-md"
+                      disabled={savingUser}
+                      className="flex-1 py-2 rounded-xl bg-[#2F2A25] font-bold text-white shadow-md disabled:bg-zinc-300"
                     >
-                      Crear Usuario
+                      {savingUser ? 'Guardando...' : editingUserId ? 'Guardar Cambios' : 'Crear Usuario'}
                     </button>
                   </div>
                 </form>
@@ -471,11 +768,11 @@ export const SettingsView: React.FC = () => {
               <input
                 type="text"
                 placeholder="https://script.google.com/macros/s/.../exec"
-                value={formSettings.googleAppsScriptUrl || ''}
+                value={googleAppsScriptUrl}
                 onChange={(e) => {
-                  const updated = { ...formSettings, googleAppsScriptUrl: e.target.value };
-                  setFormSettings(updated);
-                  updateSettings(updated);
+                  const url = e.target.value;
+                  setGoogleAppsScriptUrlState(url);
+                  storageService.setGoogleAppsScriptUrl(url);
                 }}
                 className="w-full px-3.5 py-2.5 rounded-xl border border-[#E4DDD2] bg-white font-mono text-xs"
               />
@@ -486,7 +783,7 @@ export const SettingsView: React.FC = () => {
             <div>
               <span className="text-[11px] font-bold uppercase text-emerald-900">Estado de la Sincronización</span>
               <p className="text-xs text-emerald-800 mt-0.5">
-                {formSettings.googleAppsScriptUrl
+                {googleAppsScriptUrl
                   ? 'Webhook configurado listo para enviar transacciones.'
                   : 'Listo para conectar con Google Sheets.'}
               </p>
@@ -529,9 +826,11 @@ export const SettingsView: React.FC = () => {
             </div>
 
             <div className="p-4 rounded-2xl border border-rose-200 bg-rose-50 space-y-3">
-              <h4 className="font-bold text-xs text-rose-900">Restablecer Datos de Demostración</h4>
+              <h4 className="font-bold text-xs text-rose-900">Limpiar Caché Local</h4>
               <p className="text-xs text-rose-800">
-                Reinicia el catálogo y clientes a las colecciones iniciales de ZIO CLOTHES.
+                Borra la sesión y el catálogo cacheado localmente, y restablece la configuración por
+                defecto. La URL de conexión con Google Sheets se conserva. El catálogo real se vuelve
+                a descargar al iniciar sesión.
               </p>
               <button
                 type="button"

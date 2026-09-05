@@ -1,35 +1,65 @@
-import React, { useState } from 'react';
-import { Sale, SaleItem, ReturnRecord } from '../../types';
-import { storageService } from '../../services/storageService';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { Sale, ReturnRecord } from '../../types';
+import { returnsApi } from '../../services/returnsApi';
 import { useAuth } from '../../context/AuthContext';
+import { useDataStore } from '../../context/DataStoreContext';
 import { useToast } from '../../context/ToastContext';
 import { formatCurrency, formatDateTime } from '../../utils/formatters';
-import { RotateCcw, Search, CheckCircle2, AlertTriangle, ArrowRight, Package } from 'lucide-react';
+import { RotateCcw, Search, CheckCircle2, AlertTriangle, ArrowRight, Package, RefreshCcw } from 'lucide-react';
 
 export const ReturnsView: React.FC = () => {
-  const { currentUser, settings, hasPermission } = useAuth();
+  const { currentUser, settings, hasPermission, refreshActiveCashSession } = useAuth();
   const { showToast } = useToast();
 
-  const [sales] = useState<Sale[]>(() => storageService.getSales());
-  const [returns, setReturns] = useState<ReturnRecord[]>(() => storageService.getReturns());
+  // FASE 3.7F / CORREGIR AUDITORÍA: ventas reales leídas del DataStore
+  // central (misma colección compartida con SalesView/Dashboard/Reportes
+  // -- antes cada una pedía sales.list por su cuenta, ver informe de
+  // auditoría) y devoluciones reales vía returnsApi.list()
+  // (ReturnsController.handleListReturns -> Google Sheets real). Este
+  // dominio (`returns`) no está duplicado en ninguna otra vista, así que
+  // sigue siendo propio de este componente.
+  const { sales, salesLoading, salesError, salesStale, refreshSales, refreshProducts, refreshCredits, refreshCustomers } =
+    useDataStore();
+
+  const [returns, setReturns] = useState<ReturnRecord[]>([]);
+  const [returnsLoading, setReturnsLoading] = useState(true);
+  const [returnsError, setReturnsError] = useState<string | null>(null);
+
+  const fetchReturns = useCallback(async () => {
+    setReturnsLoading(true);
+    setReturnsError(null);
+    const res = await returnsApi.list();
+    if (res.success) {
+      setReturns(res.data || []);
+    } else {
+      setReturnsError(res.message || 'No se pudo obtener el historial real de devoluciones.');
+    }
+    setReturnsLoading(false);
+  }, []);
+
+  useEffect(() => {
+    refreshSales();
+    fetchReturns();
+  }, [refreshSales, fetchReturns]);
+
   const [searchSaleCode, setSearchSaleCode] = useState('');
   const [foundSale, setFoundSale] = useState<Sale | null>(null);
 
   // Return Form State
-  const [selectedItemId, setSelectedItemId] = useState<string>('');
+  const [selectedVariantId, setSelectedVariantId] = useState<string>('');
   const [returnQuantity, setReturnQuantity] = useState<number | string>(1);
   const [returnReason, setReturnReason] = useState('Cambio por talla diferente');
-  const [refundType, setRefundType] = useState<'EFECTIVO' | 'CREDITO_CUENTA' | 'VALE_TIENDA'>('EFECTIVO');
-  const [loading, setLoading] = useState(false);
+  const [refundType, setRefundType] = useState<string>('EFECTIVO');
+  const [processing, setProcessing] = useState(false);
 
   const handleSearchSale = (e: React.FormEvent) => {
     e.preventDefault();
     const code = searchSaleCode.trim().toUpperCase();
     if (!code) return;
 
-    const sale = sales.find((s) => s.numeroVenta.toUpperCase() === code || s.id === code);
+    const sale = (sales || []).find((s) => s.numeroVenta.toUpperCase() === code || s.id === code);
     if (!sale) {
-      showToast('Venta no encontrada', `No existe ninguna venta con el número ${code}`, 'error');
+      showToast('Venta no encontrada', `No existe ninguna venta con el número ${code} en el historial real.`, 'error');
       setFoundSale(null);
       return;
     }
@@ -41,157 +71,150 @@ export const ReturnsView: React.FC = () => {
     }
 
     setFoundSale(sale);
-    setSelectedItemId(sale.items?.[0]?.id || '');
+    setSelectedVariantId(sale.items?.[0]?.varianteId || '');
     setReturnQuantity(1);
+    setRefundType('EFECTIVO');
   };
 
-  const selectedItem = (foundSale?.items || []).find((i) => i.id === selectedItemId);
+  const selectedItem = (foundSale?.items || []).find((i) => i.varianteId === selectedVariantId);
 
-  const handleProcessReturn = () => {
+  // UX únicamente: cuánto de esta variante ya se devolvió en devoluciones
+  // reales previas de ESTA venta, para no dejar que el usuario intente una
+  // cantidad que el backend rechazaría de todas formas. El backend sigue
+  // siendo la autoridad real (recalculateReturnAuthoritatively vuelve a
+  // validar esto mismo contra Devoluciones reales dentro del lock).
+  const alreadyReturnedForSelectedItem = useMemo(() => {
+    if (!foundSale || !selectedItem) return 0;
+    return (returns || [])
+      .filter((r) => r.ventaId === foundSale.id)
+      .flatMap((r) => r.items || [])
+      .filter((it) => it.varianteId === selectedItem.varianteId)
+      .reduce((sum, it) => sum + (it.cantidad || 0), 0);
+  }, [returns, foundSale, selectedItem]);
+
+  const availableToReturn = selectedItem ? Math.max(0, selectedItem.cantidad - alreadyReturnedForSelectedItem) : 0;
+
+  const handleProcessReturn = async () => {
+    if (processing) return; // previene doble submit
     if (!foundSale || !selectedItem || !currentUser) return;
+
     const numQty = typeof returnQuantity === 'number' ? returnQuantity : parseInt(returnQuantity, 10);
-    if (!Number.isFinite(numQty) || numQty <= 0 || numQty > selectedItem.cantidad) {
-      showToast('Cantidad Inválida', `La cantidad a devolver debe estar entre 1 y ${selectedItem.cantidad} unidades.`, 'error');
+    if (!Number.isFinite(numQty) || numQty <= 0) {
+      showToast('Cantidad Inválida', 'La cantidad a devolver debe ser mayor a 0.', 'error');
+      return;
+    }
+    if (numQty > availableToReturn) {
+      showToast(
+        'Cantidad Inválida',
+        `Solo quedan ${availableToReturn} unidad(es) disponibles para devolver de esta prenda (vendidas: ${selectedItem.cantidad}, ya devueltas: ${alreadyReturnedForSelectedItem}).`,
+        'error'
+      );
+      return;
+    }
+    if (!returnReason.trim()) {
+      showToast('Motivo Requerido', 'Ingrese el motivo de la devolución.', 'error');
       return;
     }
 
-    setLoading(true);
+    setProcessing(true);
 
-    try {
-      const returnNum = storageService.getNextSequence('DEV');
-      const refundAmount = selectedItem.precioUnitario * numQty;
+    // FASE 3.7F: returns.create real (ReturnsController.handleCreateReturn).
+    // Solo se envían datos base (ventaId, varianteId, cantidad, motivo,
+    // tipoReembolso) -- el backend recalcula precio/descuento/impuesto/
+    // total desde Venta_Items real, reintegra stock, y ya integra caja y
+    // crédito internamente en la misma transacción. Nunca se llama
+    // cashApi.addMovement() ni se toca storageService.getCredits()/
+    // saveCredits() desde aquí.
+    const res = await returnsApi.create({
+      ventaId: foundSale.id,
+      items: [{ varianteId: selectedItem.varianteId, cantidad: numQty }],
+      motivo: returnReason.trim(),
+      tipoReembolso: refundType,
+    });
 
-      // 1. Reintegrate stock into Product Variant
-      const products = storageService.getProducts();
-      const pIndex = products.findIndex((p) => p.id === selectedItem.productoId);
-      if (pIndex !== -1) {
-        const vIndex = products[pIndex].variantes.findIndex((v) => v.id === selectedItem.varianteId);
-        if (vIndex !== -1) {
-          const variant = products[pIndex].variantes[vIndex];
-          const stockAnterior = variant.stock;
-          const stockNuevo = stockAnterior + numQty;
-          products[pIndex].variantes[vIndex].stock = stockNuevo;
-          storageService.saveProducts(products);
+    setProcessing(false);
 
-          // Log movement
-          const movements = storageService.getMovements();
-          movements.unshift({
-            id: storageService.getNextSequence('MOV'),
-            productoId: selectedItem.productoId,
-            productoNombre: selectedItem.nombreProducto,
-            varianteId: selectedItem.varianteId,
-            sku: selectedItem.sku,
-            talla: selectedItem.talla,
-            color: selectedItem.color,
-            cantidad: numQty,
-            tipo: 'DEVOLUCION',
-            stockAnterior,
-            stockNuevo,
-            motivo: `Devolución ${returnNum} de venta ${foundSale.numeroVenta}: ${returnReason}`,
-            referencia: returnNum,
-            usuarioId: currentUser.id,
-            usuarioNombre: `${currentUser.nombre} ${currentUser.apellido}`,
-            fecha: new Date().toISOString().replace('T', ' ').substring(0, 19),
-          });
-          storageService.saveMovements(movements);
-        }
-      }
-
-      // 2. If credit sale & refundType is CREDITO_CUENTA, deduct from Account Receivable
-      if (foundSale.cuentaCobrarId && refundType === 'CREDITO_CUENTA') {
-        const credits = storageService.getCredits();
-        const cIndex = credits.findIndex((c) => c.id === foundSale.cuentaCobrarId);
-        if (cIndex !== -1) {
-          const credit = credits[cIndex];
-          credit.saldoPendiente = Math.max(0, credit.saldoPendiente - refundAmount);
-          if (credit.saldoPendiente === 0) credit.estado = 'PAGADA';
-          credits[cIndex] = credit;
-          storageService.saveCredits(credits);
-        }
-      }
-
-      // 3. If refund is cash, deduct from active cash register
-      if (refundType === 'EFECTIVO') {
-        const activeCash = storageService.getActiveCashSession();
-        if (activeCash) {
-          const cashSessions = storageService.getCashSessions();
-          const sIndex = cashSessions.findIndex((s) => s.id === activeCash.id);
-          if (sIndex !== -1) {
-            cashSessions[sIndex].devolucionesEfectivo += refundAmount;
-            cashSessions[sIndex].efectivoEsperado -= refundAmount;
-            storageService.saveCashSessions(cashSessions);
-          }
-        }
-      }
-
-      // 4. Save Return Record
-      const newReturn: ReturnRecord = {
-        id: `DEV-${Date.now()}`,
-        numeroDevolucion: returnNum,
-        ventaId: foundSale.id,
-        numeroVenta: foundSale.numeroVenta,
-        clienteId: foundSale.clienteId,
-        clienteNombre: foundSale.clienteNombre,
-        items: [
-          {
-            saleItemId: selectedItem.id,
-            productoId: selectedItem.productoId,
-            varianteId: selectedItem.varianteId,
-            nombreProducto: selectedItem.nombreProducto,
-            talla: selectedItem.talla,
-            color: selectedItem.color,
-            cantidad: returnQuantity,
-            precioUnitario: selectedItem.precioUnitario,
-            total: refundAmount,
-          },
-        ],
-        montoDevuelto: refundAmount,
-        tipoReembolso: refundType,
-        motivo: returnReason,
-        usuarioId: currentUser.id,
-        usuarioNombre: `${currentUser.nombre} ${currentUser.apellido}`,
-        fecha: new Date().toISOString().replace('T', ' ').substring(0, 19),
-      };
-
-      const currentReturns = storageService.getReturns();
-      currentReturns.unshift(newReturn);
-      storageService.saveReturns(currentReturns);
-      setReturns(currentReturns);
-
-      // Audit Log
-      storageService.logAudit({
-        usuarioId: currentUser.id,
-        usuarioNombre: `${currentUser.nombre} ${currentUser.apellido}`,
-        usuarioRol: currentUser.rol,
-        accion: 'RETURN',
-        modulo: 'DEVOLUCIONES',
-        entidad: 'ReturnRecord',
-        entidadId: newReturn.id,
-        descripcion: `Devolución ${returnNum} por RD$${refundAmount.toLocaleString()} de venta ${foundSale.numeroVenta}. Prenda: ${selectedItem.nombreProducto}`,
-        resultado: 'EXITO',
-      });
-
-      showToast('Devolución Procesada', `Comprobante ${returnNum} emitido e inventario reingresado.`, 'exito');
+    if (res.success) {
+      showToast('Devolución Procesada', res.message, 'exito');
       setFoundSale(null);
       setSearchSaleCode('');
-    } catch (err: any) {
-      showToast('Error', err.message || 'No se pudo procesar la devolución', 'error');
-    } finally {
-      setLoading(false);
+      // CORREGIR AUDITORÍA (§5): invalida el DataStore central de ventas,
+      // productos (stock reintegrado) y créditos (el backend reduce el
+      // saldo de la cuenta por cobrar asociada si existía, sin importar
+      // tipoReembolso -- ver ReturnsController.gs) -- POS/Catálogo/
+      // Inventario/Créditos/Dashboard/Reportes reflejan el resultado de
+      // inmediato, sin logout/login ni F5. Si el reembolso fue en
+      // efectivo, la caja activa real también pudo cambiar.
+      await Promise.all([
+        fetchReturns(),
+        refreshSales({ force: true }),
+        refreshProducts({ force: true }),
+        refreshCredits({ force: true }),
+        refreshCustomers({ force: true }),
+      ]);
+      if (refundType === 'EFECTIVO') {
+        await refreshActiveCashSession();
+      }
+    } else {
+      showToast('Error', res.message, 'error');
+      // No se modifica stock, caja, crédito ni el historial mostrado --
+      // siguen siendo los últimos reales confirmados por el backend.
     }
   };
 
   return (
     <div id="returns-view" className="p-4 sm:p-6 lg:p-8 space-y-6 max-w-7xl mx-auto">
       {/* Header */}
-      <div className="pb-4 border-b border-[#E4DDD2]">
-        <span className="text-xs uppercase tracking-widest text-[#756E65] font-semibold">
-          Servicio al Cliente & Garantías
-        </span>
-        <h1 className="text-2xl font-serif font-bold text-[#2F2A25]">
-          Devoluciones y Cambios de Ropa
-        </h1>
+      <div className="flex items-center justify-between pb-4 border-b border-[#E4DDD2]">
+        <div>
+          <span className="text-xs uppercase tracking-widest text-[#756E65] font-semibold">
+            Servicio al Cliente & Garantías
+          </span>
+          <h1 className="text-2xl font-serif font-bold text-[#2F2A25]">
+            Devoluciones y Cambios de Ropa
+          </h1>
+        </div>
+        <button
+          type="button"
+          onClick={() => {
+            refreshSales({ force: true });
+            fetchReturns();
+          }}
+          disabled={salesLoading || returnsLoading}
+          className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-white border border-[#E4DDD2] text-xs font-semibold text-[#2F2A25] hover:bg-[#F6F1E8] transition shadow-2xs disabled:opacity-50"
+          title="Volver a consultar el backend real"
+        >
+          <RefreshCcw className={`w-4 h-4 text-[#756E65] ${salesLoading || returnsLoading ? 'animate-spin' : ''}`} />
+          <span>{salesLoading || returnsLoading ? 'Actualizando...' : 'Actualizar'}</span>
+        </button>
       </div>
+
+      {/* Errores reales del backend -- nunca se sustituyen por datos demo/locales */}
+      {salesError && (
+        <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            <span>
+              No se pudo cargar el historial real de ventas: {salesError}
+              {salesStale && ' (se muestra la última información disponible, puede no estar actualizada)'}
+            </span>
+          </div>
+          <button type="button" onClick={() => refreshSales({ force: true })} className="px-3 py-1.5 rounded-lg bg-rose-700 text-white font-bold text-[11px] shrink-0">
+            Reintentar
+          </button>
+        </div>
+      )}
+      {returnsError && (
+        <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            <span>No se pudo cargar el historial real de devoluciones: {returnsError}</span>
+          </div>
+          <button type="button" onClick={() => fetchReturns()} className="px-3 py-1.5 rounded-lg bg-rose-700 text-white font-bold text-[11px] shrink-0">
+            Reintentar
+          </button>
+        </div>
+      )}
 
       {/* Top Action: Search Sale */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -211,15 +234,17 @@ export const ReturnsView: React.FC = () => {
                 placeholder="VEN-000001"
                 value={searchSaleCode}
                 onChange={(e) => setSearchSaleCode(e.target.value)}
+                disabled={salesLoading}
                 className="w-full px-3.5 py-2.5 rounded-xl border border-[#E4DDD2] bg-[#FAF8F4] font-mono text-xs font-bold text-[#2F2A25] focus:outline-none focus:border-[#2F2A25]"
               />
             </div>
             <button
               type="submit"
-              className="w-full py-2.5 px-4 rounded-xl text-xs font-bold text-white bg-[#2F2A25] hover:bg-[#403932] transition flex items-center justify-center gap-2"
+              disabled={salesLoading}
+              className="w-full py-2.5 px-4 rounded-xl text-xs font-bold text-white bg-[#2F2A25] hover:bg-[#403932] transition flex items-center justify-center gap-2 disabled:opacity-50"
             >
               <Search className="w-3.5 h-3.5 text-[#E8DCC8]" />
-              <span>Buscar Venta</span>
+              <span>{salesLoading ? 'Cargando ventas...' : 'Buscar Venta'}</span>
             </button>
           </form>
 
@@ -235,6 +260,11 @@ export const ReturnsView: React.FC = () => {
               <p className="font-bold text-[#2F2A25]">
                 Total Original: {formatCurrency(foundSale.total, settings.simboloMoneda)}
               </p>
+              {foundSale.cuentaCobrarId && (
+                <p className="text-amber-700 text-[10px] leading-relaxed">
+                  ⚠ Esta venta fue a crédito: el saldo pendiente del cliente se reducirá automáticamente al procesar la devolución, sin importar la forma de reembolso elegida (así lo determina el backend real).
+                </p>
+              )}
             </div>
           )}
         </div>
@@ -246,7 +276,12 @@ export const ReturnsView: React.FC = () => {
             <span>2. Procesar Devolución & Reingreso a Inventario</span>
           </h3>
 
-          {!foundSale ? (
+          {!hasPermission('devoluciones.crear') ? (
+            <div className="text-center py-12 text-[#756E65] space-y-2">
+              <AlertTriangle className="w-10 h-10 opacity-30 mx-auto" />
+              <p className="text-xs font-medium">No tiene permiso para procesar devoluciones.</p>
+            </div>
+          ) : !foundSale ? (
             <div className="text-center py-12 text-[#756E65] space-y-2">
               <Package className="w-10 h-10 opacity-30 mx-auto" />
               <p className="text-xs font-medium">Busque una factura para habilitar el formulario de devolución</p>
@@ -259,12 +294,16 @@ export const ReturnsView: React.FC = () => {
                   Seleccionar Prenda a Devolver:
                 </label>
                 <select
-                  value={selectedItemId}
-                  onChange={(e) => setSelectedItemId(e.target.value)}
+                  value={selectedVariantId}
+                  onChange={(e) => {
+                    setSelectedVariantId(e.target.value);
+                    setReturnQuantity(1);
+                  }}
+                  disabled={processing}
                   className="w-full px-3.5 py-2.5 rounded-xl border border-[#E4DDD2] bg-[#FAF8F4] text-xs font-semibold text-[#2F2A25]"
                 >
                   {(foundSale.items || []).map((i) => (
-                    <option key={i.id} value={i.id}>
+                    <option key={i.varianteId} value={i.varianteId}>
                       {i.nombreProducto} (Talla {i.talla} / {i.color}) — {i.cantidad} ud(s) facturadas @ {formatCurrency(i.precioUnitario, settings.simboloMoneda)}
                     </option>
                   ))}
@@ -275,15 +314,17 @@ export const ReturnsView: React.FC = () => {
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
                   <div>
                     <label className="block font-bold text-[#2F2A25] mb-1">
-                      Cantidad a Devolver (Máx {selectedItem.cantidad}):
+                      Cantidad a Devolver (Máx {availableToReturn}
+                      {alreadyReturnedForSelectedItem > 0 ? `, ya devueltas ${alreadyReturnedForSelectedItem}` : ''}):
                     </label>
                     <input
                       type="number"
-                      min="0"
+                      min="1"
                       step="1"
                       inputMode="numeric"
                       placeholder="1"
                       value={returnQuantity === '' ? '' : returnQuantity}
+                      disabled={processing || availableToReturn === 0}
                       onChange={(e) => {
                         const val = e.target.value;
                         if (val === '') setReturnQuantity('');
@@ -294,20 +335,22 @@ export const ReturnsView: React.FC = () => {
                       }}
                       className="w-full px-3 py-2 rounded-xl border border-[#E4DDD2] bg-white font-bold"
                     />
+                    {availableToReturn === 0 && (
+                      <p className="mt-1 text-[10px] text-rose-700">Esta prenda ya fue devuelta en su totalidad.</p>
+                    )}
                   </div>
 
                   <div>
                     <label className="block font-bold text-[#2F2A25] mb-1">Forma de Reembolso:</label>
                     <select
                       value={refundType}
-                      onChange={(e) => setRefundType(e.target.value as any)}
+                      onChange={(e) => setRefundType(e.target.value)}
+                      disabled={processing}
                       className="w-full px-3 py-2 rounded-xl border border-[#E4DDD2] bg-white font-semibold"
                     >
-                      <option value="EFECTIVO">Efectivo de Caja</option>
-                      {foundSale.esCredito && (
-                        <option value="CREDITO_CUENTA">Deducir de Cuenta por Cobrar</option>
-                      )}
+                      <option value="EFECTIVO">Efectivo (afecta la caja real)</option>
                       <option value="VALE_TIENDA">Vale de Tienda / Crédito a Favor</option>
+                      <option value="CREDITO_CUENTA">Nota de Crédito / Otro</option>
                     </select>
                   </div>
 
@@ -317,6 +360,7 @@ export const ReturnsView: React.FC = () => {
                       type="text"
                       value={returnReason}
                       onChange={(e) => setReturnReason(e.target.value)}
+                      disabled={processing}
                       placeholder="Ej. Talla inadecuada / Defecto en costura / Cambio de color"
                       className="w-full px-3.5 py-2 rounded-xl border border-[#E4DDD2] bg-white"
                     />
@@ -324,10 +368,12 @@ export const ReturnsView: React.FC = () => {
                 </div>
               )}
 
-              {/* Total Calculation */}
+              {/* Preview -- estimado solo para UX; el backend recalcula el
+                  monto real desde la venta original y puede diferir
+                  ligeramente si hubo descuento/impuesto en la línea. */}
               {selectedItem && (
                 <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-2xl flex items-center justify-between text-xs font-bold text-emerald-900">
-                  <span>Monto Total a Reembolsar / Acreditar:</span>
+                  <span>Monto Estimado a Reembolsar / Acreditar:</span>
                   <span className="text-base">
                     {formatCurrency(
                       selectedItem.precioUnitario *
@@ -340,12 +386,12 @@ export const ReturnsView: React.FC = () => {
 
               <button
                 type="button"
-                disabled={loading}
+                disabled={processing || !selectedItem || availableToReturn === 0}
                 onClick={handleProcessReturn}
                 className="w-full py-3 px-4 rounded-2xl text-xs font-bold text-[#FAF8F4] bg-[#2F2A25] hover:bg-[#403932] disabled:bg-zinc-300 transition shadow-md flex items-center justify-center gap-2"
               >
                 <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                <span>{loading ? 'Procesando...' : 'Confirmar Devolución e Incrementar Stock'}</span>
+                <span>{processing ? 'Procesando...' : 'Confirmar Devolución e Incrementar Stock'}</span>
               </button>
             </div>
           )}
@@ -357,6 +403,16 @@ export const ReturnsView: React.FC = () => {
         <div className="p-4 bg-[#F6F1E8] border-b border-[#E4DDD2] font-bold text-xs text-[#2F2A25]">
           Historial de Devoluciones Procesadas
         </div>
+        {returnsLoading && returns.length === 0 ? (
+          <div className="text-center py-14 space-y-2 text-[#756E65]">
+            <RefreshCcw className="w-7 h-7 opacity-40 mx-auto animate-spin" />
+            <p className="font-semibold text-xs">Consultando devoluciones reales en el backend...</p>
+          </div>
+        ) : !returnsLoading && !returnsError && returns.length === 0 ? (
+          <div className="text-center py-10 text-xs text-[#756E65]">
+            Todavía no hay devoluciones registradas en Google Sheets.
+          </div>
+        ) : (
         <div className="overflow-x-auto">
           <table className="w-full text-xs text-left">
             <thead className="bg-[#FAF8F4] text-[#756E65] border-b border-[#E4DDD2] uppercase text-[10px]">
@@ -394,13 +450,8 @@ export const ReturnsView: React.FC = () => {
               ))}
             </tbody>
           </table>
-
-          {(returns || []).length === 0 && (
-            <div className="text-center py-8 text-xs text-[#756E65]">
-              No hay devoluciones registradas hasta el momento.
-            </div>
-          )}
         </div>
+        )}
       </div>
     </div>
   );

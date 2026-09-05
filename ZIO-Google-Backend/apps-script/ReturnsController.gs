@@ -1,0 +1,339 @@
+/**
+ * ZIO CLOTHES — Google Apps Script Backend
+ * File: ReturnsController.gs
+ * Description: Customer return processing, stock reincorporation, Kardex logging, and cash refund handling.
+ */
+
+const ReturnsController = {
+  /**
+   * Returns list of processed customer returns.
+   */
+  handleListReturns(data) {
+    const returnsList = DbHelper.getAllRows('Devoluciones');
+    returnsList.sort((a, b) => String(b.fecha || '').localeCompare(String(a.fecha || '')));
+
+    return {
+      success: true,
+      returns: returnsList.map(r => {
+        let items = [];
+        try {
+          items = r.items_json ? JSON.parse(r.items_json) : [];
+        } catch (e) {
+          items = [];
+        }
+
+        return {
+          id: r.id,
+          numeroDevolucion: r.numero_devolucion,
+          ventaId: r.venta_id,
+          numeroVenta: r.numero_venta,
+          clienteId: r.cliente_id || undefined,
+          clienteNombre: r.cliente_nombre || 'Cliente',
+          items: items,
+          montoDevuelto: Number(r.monto_devuelto) || 0,
+          tipoReembolso: r.tipo_reembolso,
+          motivo: r.motivo,
+          usuarioId: r.usuario_id,
+          usuarioNombre: r.usuario_nombre,
+          fecha: r.fecha
+        };
+      })
+    };
+  },
+
+  /**
+   * FASE 3.6D (corrección de bloqueante P0): recalcula de forma
+   * AUTORITATIVA el importe de cada línea de devolución a partir de lo
+   * que realmente quedó registrado en `Venta_Items` para esa venta --
+   * nunca del `item.total`/`subtotal`/`descuento`/`impuesto` que envíe el
+   * cliente. Usar el precio/descuento/impuesto de la venta ORIGINAL (no
+   * el precio actual de `Variantes`) es lo correcto contablemente: se
+   * reembolsa lo que el cliente realmente pagó, no el precio de catálogo
+   * de hoy (que pudo haber cambiado desde la venta).
+   *
+   * También valida que la cantidad devuelta no exceda la cantidad
+   * vendida menos lo ya devuelto en devoluciones previas de esa misma
+   * venta (evita devolver dos veces la misma mercancía).
+   *
+   * @returns {{ items: Array, totalRefund: number }}
+   */
+  recalculateReturnAuthoritatively(sale, data) {
+    if (!data.items || !Array.isArray(data.items) || data.items.length === 0) {
+      throw new Error('VALIDATION_ERROR: Debe indicar al menos una prenda a devolver.');
+    }
+
+    const ventaItems = DbHelper.findRows('Venta_Items', vi => vi.venta_id === sale.id);
+    const allVariants = DbHelper.getAllRows('Variantes');
+
+    // Cantidad ya devuelta previamente, por variante, en devoluciones
+    // anteriores de ESTA misma venta (recorre Devoluciones reales, no lo
+    // que diga el cliente).
+    const previousReturns = DbHelper.findRows('Devoluciones', r => r.venta_id === sale.id);
+    const alreadyReturnedByVariant = {};
+    previousReturns.forEach(r => {
+      let prevItems = [];
+      try {
+        prevItems = r.items_json ? JSON.parse(r.items_json) : [];
+      } catch (e) {
+        prevItems = [];
+      }
+      prevItems.forEach(pi => {
+        const vId = String(pi.varianteId || '').trim();
+        alreadyReturnedByVariant[vId] = (alreadyReturnedByVariant[vId] || 0) + (Number(pi.cantidad) || 0);
+      });
+    });
+
+    let totalRefund = 0;
+    const computedItems = [];
+
+    for (const item of data.items) {
+      const varId = String(item.varianteId || '').trim();
+      const variant = allVariants.find(v => v.id === varId);
+
+      if (!variant) {
+        throw new Error(`NOT_FOUND: La variante '${varId}' no existe en el catálogo.`);
+      }
+
+      const qty = Number(item.cantidad);
+      if (!Number.isFinite(qty) || qty <= 0) {
+        throw new Error('VALIDATION_ERROR: La cantidad a devolver debe ser mayor a cero.');
+      }
+
+      // La línea DEBE existir en la venta original -- no se puede
+      // devolver algo que esa venta nunca vendió.
+      const originalItem = ventaItems.find(vi => vi.variante_id === varId);
+      if (!originalItem) {
+        throw new Error(`NOT_FOUND: La variante '${varId}' no forma parte de la venta ${sale.numero_venta}.`);
+      }
+
+      const cantidadVendida = Number(originalItem.cantidad) || 0;
+      const yaDevuelta = alreadyReturnedByVariant[varId] || 0;
+      const disponibleParaDevolver = cantidadVendida - yaDevuelta;
+
+      if (qty > disponibleParaDevolver) {
+        throw new Error(
+          `DEVOLUCION_EXCEDE_CANTIDAD: No se puede devolver ${qty} unidad(es) de '${variant.sku}' -- vendidas: ${cantidadVendida}, ya devueltas: ${yaDevuelta}, disponible para devolver: ${Math.max(0, disponibleParaDevolver)}.`
+        );
+      }
+
+      // Autoritativo: precio/descuento/impuesto de la línea ORIGINAL de
+      // venta (lo que el cliente realmente pagó), prorrateado por unidad
+      // -- nunca lo que envíe el cliente en esta petición de devolución.
+      const precioUnitario = Number(originalItem.precio_unitario) || 0;
+      const costoUnitario = Number(originalItem.costo_unitario) || 0;
+      const descuentoUnitario = cantidadVendida > 0 ? (Number(originalItem.descuento_monto) || 0) / cantidadVendida : 0;
+      const impuestoUnitario = cantidadVendida > 0 ? (Number(originalItem.impuesto_monto) || 0) / cantidadVendida : 0;
+
+      const itemSubtotal = roundMoney(precioUnitario * qty);
+      const itemDescuento = roundMoney(descuentoUnitario * qty);
+      const itemImpuesto = roundMoney(impuestoUnitario * qty);
+      const itemTotal = roundMoney(itemSubtotal - itemDescuento + itemImpuesto);
+
+      totalRefund = roundMoney(totalRefund + itemTotal);
+
+      computedItems.push({
+        varianteId: varId,
+        variant,
+        productoId: variant.producto_id,
+        nombreProducto: originalItem.nombre_producto || 'Prenda',
+        sku: variant.sku,
+        talla: variant.talla,
+        color: variant.color,
+        cantidad: qty,
+        precioUnitario,
+        costoUnitario,
+        descuentoMonto: itemDescuento,
+        impuestoMonto: itemImpuesto,
+        subtotal: itemSubtotal,
+        total: itemTotal
+      });
+    }
+
+    return { items: computedItems, totalRefund };
+  },
+
+  /**
+   * ATOMIC RETURN PROCESSING
+   */
+  handleCreateReturn(data, user) {
+    Security.requirePermission(user, 'devoluciones.crear');
+
+    if (!data.ventaId || !data.items || !Array.isArray(data.items) || data.items.length === 0 || !data.motivo) {
+      throw new Error('VALIDATION_ERROR: Venta original, prendas a devolver y motivo son obligatorios.');
+    }
+
+    return LockServiceHelper.runWithLock(CONFIG.LOCK_TIMEOUT_MS, () => {
+      const tx = DbHelper.beginTx();
+
+      try {
+        const sale = DbHelper.findById('Ventas', data.ventaId);
+        if (!sale) throw new Error('NOT_FOUND: Venta original no encontrada.');
+
+        if (sale.estado === 'ANULADA') {
+          throw new Error('INVALID_STATE: No se puede procesar devolución de una venta que ya fue anulada.');
+        }
+
+        // Recalculo autoritativo (lanza NOT_FOUND/VALIDATION_ERROR/
+        // DEVOLUCION_EXCEDE_CANTIDAD si algo no es válido) -- ANTES de
+        // escribir nada, igual que en SalesController.
+        const computed = this.recalculateReturnAuthoritatively(sale, data);
+
+        const returnId = Sequences.getNext('DEV');
+        const nowStr = getNowFormatted();
+        const kardexToInsert = [];
+
+        for (const ci of computed.items) {
+          const variant = ci.variant;
+          const varId = String(variant.id).trim();
+
+          const oldStock = Number(variant.stock) || 0;
+          const newStock = oldStock + ci.cantidad;
+
+          DbHelper.recordUpdate(tx, 'Variantes', varId, { stock: oldStock });
+          DbHelper.updateRowById('Variantes', varId, { stock: newStock });
+
+          const movId = Sequences.getNext('MOV');
+          const kardex = {
+            id: movId,
+            producto_id: variant.producto_id,
+            producto_nombre: ci.nombreProducto,
+            variante_id: varId,
+            sku: variant.sku,
+            talla: variant.talla,
+            color: variant.color,
+            cantidad: ci.cantidad,
+            tipo: 'DEVOLUCION',
+            stock_anterior: oldStock,
+            stock_nuevo: newStock,
+            motivo: `Devolución ${returnId} (Venta ${sale.numero_venta}): ${data.motivo}`,
+            referencia: returnId,
+            usuario_id: user ? user.id : 'USR-001',
+            usuario_nombre: user ? `${user.nombre} ${user.apellido || ''}`.trim() : 'Sistema',
+            fecha: nowStr
+          };
+          kardexToInsert.push(kardex);
+          DbHelper.recordInsert(tx, 'Inventario_Kardex', movId);
+        }
+
+        DbHelper.insertRows('Inventario_Kardex', kardexToInsert);
+
+        // If cash refund and cash session open, update cash session
+        const esReembolsoEfectivo = data.tipoReembolso === 'EFECTIVO';
+        if (esReembolsoEfectivo) {
+          const activeCash = DbHelper.findRows('Cajas', s => s.estado === 'ABIERTA')[0];
+          if (activeCash) {
+            const currentDevs = Number(activeCash.devoluciones_efectivo) || 0;
+            DbHelper.recordUpdate(tx, 'Cajas', activeCash.id, { devoluciones_efectivo: currentDevs });
+            DbHelper.updateRowById('Cajas', activeCash.id, {
+              devoluciones_efectivo: currentDevs + computed.totalRefund
+            });
+
+            const cmovId = Sequences.getNext('CMOV');
+            const cashMov = {
+              id: cmovId,
+              caja_sesion_id: activeCash.id,
+              tipo: 'DEVOLUCION_EFECTIVO',
+              monto: computed.totalRefund,
+              motivo: `Reembolso por devolución ${returnId}`,
+              categoria_gasto: '',
+              referencia: returnId,
+              usuario_id: user ? user.id : 'USR-001',
+              usuario_nombre: user ? `${user.nombre} ${user.apellido || ''}`.trim() : 'Cajero',
+              fecha: nowStr,
+              estado: 'ACTIVO'
+            };
+            DbHelper.insertRow('Caja_Movimientos', cashMov);
+            DbHelper.recordInsert(tx, 'Caja_Movimientos', cmovId);
+          }
+        }
+
+        // If the return corresponds to a credit sale, reduce the
+        // outstanding credit balance proportionally (crédito real, no
+        // inventado): solo si la venta generó una cuenta por cobrar.
+        if (sale.cuenta_cobrar_id) {
+          const credit = DbHelper.findById('Creditos', sale.cuenta_cobrar_id);
+          if (credit && credit.estado !== 'PAGADA' && credit.estado !== 'ANULADA') {
+            const reduccion = Math.min(computed.totalRefund, Number(credit.saldo_pendiente) || 0);
+            if (reduccion > 0) {
+              const nuevoSaldo = roundMoney((Number(credit.saldo_pendiente) || 0) - reduccion);
+              DbHelper.recordUpdate(tx, 'Creditos', credit.id, {
+                saldo_pendiente: credit.saldo_pendiente,
+                estado: credit.estado
+              });
+              DbHelper.updateRowById('Creditos', credit.id, {
+                saldo_pendiente: nuevoSaldo,
+                estado: nuevoSaldo <= 0 ? 'PAGADA' : credit.estado
+              });
+            }
+          }
+        }
+
+        // Insert Return record -- items_json guarda los importes YA
+        // recalculados autoritativamente, nunca los del cliente.
+        const returnRecord = {
+          id: returnId,
+          numero_devolucion: returnId,
+          venta_id: sale.id,
+          numero_venta: sale.numero_venta,
+          cliente_id: sale.cliente_id || '',
+          cliente_nombre: sale.cliente_nombre || 'Consumidor Final',
+          items_json: JSON.stringify(computed.items.map(ci => ({
+            varianteId: ci.varianteId,
+            productoId: ci.productoId,
+            nombreProducto: ci.nombreProducto,
+            sku: ci.sku,
+            talla: ci.talla,
+            color: ci.color,
+            cantidad: ci.cantidad,
+            precioUnitario: ci.precioUnitario,
+            costoUnitario: ci.costoUnitario,
+            descuentoMonto: ci.descuentoMonto,
+            impuestoMonto: ci.impuestoMonto,
+            subtotal: ci.subtotal,
+            total: ci.total
+          }))),
+          monto_devuelto: computed.totalRefund,
+          tipo_reembolso: data.tipoReembolso || 'EFECTIVO',
+          motivo: data.motivo.trim(),
+          usuario_id: user ? user.id : 'USR-001',
+          usuario_nombre: user ? `${user.nombre} ${user.apellido || ''}`.trim() : 'Sistema',
+          fecha: nowStr
+        };
+
+        DbHelper.insertRow('Devoluciones', returnRecord);
+        DbHelper.recordInsert(tx, 'Devoluciones', returnId);
+
+        // Update Sale Status to DEVUELTA_PARCIAL or DEVUELTA_TOTAL --
+        // comparado contra el total real de la venta, acumulando también
+        // devoluciones previas (no solo esta).
+        const totalDevueltoAcumulado = roundMoney(
+          DbHelper.findRows('Devoluciones', r => r.venta_id === sale.id)
+            .reduce((sum, r) => sum + (Number(r.monto_devuelto) || 0), 0) + computed.totalRefund
+        );
+        const nuevoEstadoVenta = totalDevueltoAcumulado >= Number(sale.total) ? 'DEVUELTA_TOTAL' : 'DEVUELTA_PARCIAL';
+        DbHelper.recordUpdate(tx, 'Ventas', sale.id, { estado: sale.estado });
+        DbHelper.updateRowById('Ventas', sale.id, { estado: nuevoEstadoVenta });
+
+        AuditController.log(
+          user,
+          'RETURN_PROCESSED',
+          'VENTAS',
+          'ReturnRecord',
+          returnId,
+          `Devolución ${returnId} por RD$${computed.totalRefund.toLocaleString()} procesada para venta ${sale.numero_venta}`
+        );
+
+        return {
+          success: true,
+          message: `Devolución ${returnId} procesada exitosamente por RD$${computed.totalRefund.toLocaleString()}.`,
+          devolucionId: returnId,
+          montoDevuelto: computed.totalRefund
+        };
+
+      } catch (err) {
+        DbHelper.rollback(tx, err);
+        throw err;
+      }
+    });
+  }
+};

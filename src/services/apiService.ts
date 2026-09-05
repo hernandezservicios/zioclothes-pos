@@ -22,6 +22,65 @@ export interface ApiResponse<T = any> {
   errorCode?: string;
 }
 
+// FASE 4.0 (CORREGIR AUDITORÍA): códigos de error emitidos por la propia
+// capa de transporte HTTP -- distintos de los códigos de negocio que ya
+// emitía el backend (formato "CODIGO: mensaje", sin cambios, ver más abajo).
+// Sirven para que la UI muestre siempre un mensaje humano y nunca el texto
+// crudo de un SyntaxError ("Unexpected token '<'...").
+export type TransportErrorCode =
+  | 'NETWORK_ERROR'
+  | 'TIMEOUT_ERROR'
+  | 'HTTP_ERROR'
+  | 'DATA_FORMAT_ERROR'
+  | 'API_ERROR'
+  | 'ABORTED';
+
+const REQUEST_TIMEOUT_MS = 20000;
+const RETRY_DELAY_MS = 700;
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * FASE 4.0: acciones de solo lectura -- seguras para UN único reintento
+ * automático ante un fallo transitorio de red/timeout. Deliberadamente NO
+ * se reintenta ninguna acción que cree/modifique/elimine datos (crear
+ * venta, guardar producto, registrar abono, abrir caja, etc.): el backend
+ * no implementa ningún mecanismo de idempotencia para esas acciones, así
+ * que reintentar automáticamente arriesgaría duplicar la operación real en
+ * Google Sheets. Ante duda, una acción NO listada aquí nunca se reintenta.
+ */
+function isSafeToRetry(action: string): boolean {
+  if (action.endsWith('.list') || action.endsWith('.listAuxiliaries') || action.endsWith('.kardex')) return true;
+  return ['system.ping', 'system.getSettings', 'system.getBootstrapData', 'auth.validateSession', 'cash.getActiveSession'].includes(
+    action
+  );
+}
+
+/**
+ * FASE 4.0: mensajes amigables por código de transporte -- el detalle
+ * técnico real (stack, status, contenido del body) se registra aparte vía
+ * console.warn/console.error para diagnóstico, nunca se muestra al usuario.
+ */
+function friendlyTransportMessage(code: TransportErrorCode, detail?: string): string {
+  switch (code) {
+    case 'NETWORK_ERROR':
+      return 'No se pudo conectar con el servidor. Verifique su conexión a internet e intente de nuevo.';
+    case 'TIMEOUT_ERROR':
+      return 'El servidor tardó demasiado en responder. Intente de nuevo en unos segundos.';
+    case 'HTTP_ERROR':
+      return `El servidor respondió con un error${detail ? ` (${detail})` : ''}. Intente de nuevo más tarde.`;
+    case 'DATA_FORMAT_ERROR':
+      return 'El servidor no está disponible en este momento. Verifique la URL de conexión configurada e intente de nuevo.';
+    case 'ABORTED':
+      return 'La solicitud fue cancelada.';
+    case 'API_ERROR':
+    default:
+      return 'Ocurrió un error inesperado al comunicarse con el servidor.';
+  }
+}
+
 class ApiService {
   // Check if current user has permission
   public hasPermission(permission: PermissionCode): boolean {
@@ -35,10 +94,77 @@ class ApiService {
     return permissions.includes(permission);
   }
 
-  // Google Apps Script Proxy Dispatcher
-  public async syncWithGoogleAppsScript(action: string, payload: any = {}): Promise<ApiResponse> {
-    const settings = storageService.getSettings();
-    const url = settings.googleAppsScriptUrl;
+  // FASE 4.0: deduplicación de requests idénticos en vuelo. Si dos llamadas
+  // con la misma acción + mismos datos + mismo token están en curso al
+  // mismo tiempo -- típicamente por el doble montaje de React StrictMode en
+  // desarrollo, o por dos componentes pidiendo el mismo dominio a la vez --
+  // comparten la misma Promise en vez de disparar dos peticiones HTTP
+  // reales. La entrada se limpia apenas la petición en vuelo resuelve
+  // (éxito o error), así que nunca sirve un resultado obsoleto.
+  private inFlight = new Map<string, Promise<ApiResponse>>();
+
+  /**
+   * Google Apps Script Proxy Dispatcher.
+   *
+   * FASE 3.6: corregido para usar el contrato REAL de ZIO-Google-Backend
+   * (Main.gs doPost), verificado directamente en el código del backend:
+   *   Petición:  { action, sessionToken, data }
+   *   Éxito:     { success: true, ...campos según la acción }
+   *   Error:     { success: false, error: "CODIGO: mensaje", timestamp }
+   * (antes se enviaba { action, payload, user, timestamp }, que no
+   * corresponde a ningún campo que Main.gs lea).
+   *
+   * `data` en la respuesta contiene el JSON crudo devuelto por el backend
+   * (distinto según la acción: sessionToken/user/permissions en login,
+   * saleId/numeroVenta en sales.create, data.products/data.customers en
+   * system.getBootstrapData, etc.) -- los callers desestructuran lo que
+   * necesiten de ahí en vez de asumir una forma única.
+   *
+   * FASE 4.0 (CORREGIR AUDITORÍA): el contrato de entrada/salida de este
+   * método NO cambia -- todos los callers existentes (productsApi,
+   * salesApi, settingsApi, etc.) siguen funcionando sin modificación.
+   * Se le agrega, por dentro: deduplicación de requests idénticos en
+   * vuelo, timeout real vía AbortController, verificación de
+   * `response.ok`/cuerpo no vacío antes de parsear JSON, clasificación de
+   * errores de transporte (nunca más "Unexpected token '<'" crudo llegando
+   * a la UI), y un único reintento automático solo para acciones de
+   * lectura ante fallo transitorio de red/timeout.
+   */
+  public async syncWithGoogleAppsScript(
+    action: string,
+    data: any = {},
+    sessionToken?: string
+  ): Promise<ApiResponse> {
+    const dedupeKey = `${action}|${sessionToken || ''}|${JSON.stringify(data ?? {})}`;
+    const existing = this.inFlight.get(dedupeKey);
+    if (existing) return existing;
+
+    const promise = this.executeWithRetry(action, data, sessionToken);
+    this.inFlight.set(dedupeKey, promise);
+    try {
+      return await promise;
+    } finally {
+      this.inFlight.delete(dedupeKey);
+    }
+  }
+
+  private async executeWithRetry(action: string, data: any, sessionToken?: string): Promise<ApiResponse> {
+    const result = await this.executeRequest(action, data, sessionToken);
+    const isTransient = result.errorCode === 'NETWORK_ERROR' || result.errorCode === 'TIMEOUT_ERROR';
+
+    if (!result.success && isTransient && isSafeToRetry(action)) {
+      await delay(RETRY_DELAY_MS);
+      return this.executeRequest(action, data, sessionToken);
+    }
+    return result;
+  }
+
+  private async executeRequest(action: string, data: any, sessionToken?: string): Promise<ApiResponse> {
+    // FASE 3.6D (Parte 3): la URL del Web App vive en la configuración de
+    // infraestructura separada (zio_infrastructure_config), no en
+    // zio_settings -- así una limpieza de caché de negocio/UX nunca la
+    // destruye.
+    const url = storageService.getGoogleAppsScriptUrl();
     if (!url || !url.startsWith('http')) {
       return {
         success: false,
@@ -47,27 +173,96 @@ class ApiService {
       };
     }
 
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    let response: Response;
+
     try {
-      const response = await fetch(url, {
+      response = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // Apps script friendly
-        body: JSON.stringify({
-          action,
-          payload,
-          user: storageService.getCurrentUser(),
-          timestamp: new Date().toISOString(),
-        }),
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // Apps script friendly, evita preflight CORS
+        body: JSON.stringify({ action, sessionToken, data }),
+        signal: controller.signal,
       });
-      const data = await response.json();
-      return data;
     } catch (error: any) {
-      console.warn('Google Apps Script request error:', error);
+      clearTimeout(timer);
+      if (error && error.name === 'AbortError') {
+        console.warn(`[apiService] Timeout (${REQUEST_TIMEOUT_MS}ms) en la acción "${action}".`);
+        return { success: false, message: friendlyTransportMessage('TIMEOUT_ERROR'), errorCode: 'TIMEOUT_ERROR' };
+      }
+      console.warn(`[apiService] Error de red en la acción "${action}":`, error);
+      return { success: false, message: friendlyTransportMessage('NETWORK_ERROR'), errorCode: 'NETWORK_ERROR' };
+    }
+    clearTimeout(timer);
+
+    // Diagnóstico técnico completo a consola -- nunca al usuario.
+    const contentType = response.headers.get('content-type') || '';
+
+    let bodyText: string;
+    try {
+      bodyText = await response.text();
+    } catch (error) {
+      console.warn(`[apiService] No se pudo leer el cuerpo de la respuesta para "${action}".`, error);
+      return { success: false, message: friendlyTransportMessage('NETWORK_ERROR'), errorCode: 'NETWORK_ERROR' };
+    }
+
+    if (!bodyText || !bodyText.trim()) {
+      console.warn(`[apiService] Respuesta vacía para "${action}" (status ${response.status}, content-type "${contentType}").`);
+      return { success: false, message: friendlyTransportMessage('DATA_FORMAT_ERROR'), errorCode: 'DATA_FORMAT_ERROR' };
+    }
+
+    let json: any;
+    try {
+      json = JSON.parse(bodyText);
+    } catch (parseError) {
+      // Aquí es exactamente donde antes se filtraba "Unexpected token '<'"
+      // hacia la UI -- ahora queda solo en consola, con todo el contexto
+      // real para diagnosticar (status, content-type, primeros caracteres
+      // del cuerpo real recibido).
+      console.warn(
+        `[apiService] Respuesta no-JSON para "${action}" (status ${response.status}, content-type "${contentType}"): ` +
+          bodyText.slice(0, 200)
+      );
       return {
         success: false,
-        message: `Error al conectar con Google Apps Script: ${error.message || error}`,
-        errorCode: 'NETWORK_ERROR',
+        message: friendlyTransportMessage('DATA_FORMAT_ERROR'),
+        errorCode: 'DATA_FORMAT_ERROR',
       };
     }
+
+    if (!response.ok) {
+      // El backend (Main.gs) siempre responde 200 incluso en sus propios
+      // errores de negocio -- si llegamos aquí con response.ok === false
+      // pero el body sí parseó como JSON, es una respuesta de negocio real
+      // (defensivo, por si el contrato cambiara); si no trae la forma
+      // esperada, se clasifica como HTTP_ERROR explícito.
+      if (!json || typeof json.success !== 'boolean') {
+        console.warn(`[apiService] HTTP ${response.status} para "${action}".`, json);
+        return {
+          success: false,
+          message: friendlyTransportMessage('HTTP_ERROR', `HTTP ${response.status}`),
+          errorCode: 'HTTP_ERROR',
+        };
+      }
+    }
+
+    if (json && json.success === true) {
+      return { success: true, message: json.message || 'OK', data: json };
+    }
+
+    // El backend real siempre lanza errores con formato "CODIGO: mensaje"
+    // (ver AuthController/SalesController/etc.), capturados por el
+    // catch-all de Main.gs como { success:false, error: "...", timestamp }.
+    // Estos son códigos de NEGOCIO (backend), distintos de los
+    // TransportErrorCode de arriba -- se preservan sin cambios.
+    const rawError: string = (json && (json.error || json.message)) || 'Error desconocido del servidor.';
+    const match = /^([A-Z_]+):\s*(.*)$/.exec(rawError);
+
+    return {
+      success: false,
+      errorCode: match ? match[1] : undefined,
+      message: match ? match[2] : rawError,
+    };
   }
 
   // --- SALES & POS TRANSACTION ---
@@ -611,7 +806,12 @@ class ApiService {
       talla: variant.talla,
       color: variant.color,
       cantidad: delta,
-      tipo: delta > 0 ? 'AJUSTE_POSITIVO' : 'AJUSTE_NEGATIVO',
+      // FASE 3.7C: 'AJUSTE_POSITIVO'/'AJUSTE_NEGATIVO' nunca fueron valores
+      // reales de Inventario_Kardex.tipo (ver InventoryMovementType) --
+      // este método local ya no tiene ningún llamador real
+      // (InventoryView usa inventoryApi.adjust), se ajusta solo para
+      // seguir compilando contra el tipo corregido.
+      tipo: delta > 0 ? 'ENTRADA' : 'SALIDA',
       stockAnterior,
       stockNuevo,
       motivo: data.motivo,

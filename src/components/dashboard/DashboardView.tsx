@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   ResponsiveContainer,
   BarChart,
@@ -8,8 +8,8 @@ import {
   Tooltip,
   CartesianGrid,
 } from 'recharts';
-import { storageService } from '../../services/storageService';
 import { useAuth } from '../../context/AuthContext';
+import { useDataStore } from '../../context/DataStoreContext';
 import { formatCurrency } from '../../utils/formatters';
 import {
   TrendingUp,
@@ -26,6 +26,7 @@ import {
   Sparkles,
   PieChart,
   BarChart3,
+  RefreshCcw,
 } from 'lucide-react';
 
 interface DashboardViewProps {
@@ -33,16 +34,53 @@ interface DashboardViewProps {
 }
 
 export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
-  const { settings, hasPermission } = useAuth();
+  const { settings, hasPermission, activeCashSession } = useAuth();
   const [period, setPeriod] = useState<'7d' | '30d' | 'mes' | 'ano'>('30d');
 
-  const sales = (storageService.getSales() || []).filter((s) => s && s.estado !== 'ANULADA');
-  const credits = storageService.getCredits() || [];
-  const installments = (storageService.getInstallments() || []).filter((i) => i && i.estado !== 'ANULADO');
-  const products = storageService.getProducts() || [];
-  const customers = storageService.getCustomers() || [];
-  const expenses = storageService.getExpenses() || [];
-  const activeCash = storageService.getActiveCashSession();
+  // FASE 3.7A/3.7B / CORREGIR AUDITORÍA: ventas, créditos, productos,
+  // clientes y gastos vienen todos del DataStore central -- la MISMA
+  // colección que consumen SalesView/ReturnsView (ventas),
+  // CreditsView/InstallmentsView (créditos), ProductsView/POSView/
+  // Inventario/Compras (productos) y CustomersView (clientes). Antes cada
+  // uno de estos KPIs pedía su propio sales.list/credits.list por
+  // separado (Dashboard era una de las 4 llamadas independientes a cada
+  // uno, ver informe de auditoría), y productos/clientes/gastos se leían
+  // directo de storageService (un caché que solo se llenaba en login,
+  // igual que el bug del POS). No hay endpoint de "abonos" separado: se
+  // aplana credit.abonos[] de cada cuenta.
+  const {
+    sales: salesData,
+    salesLoading,
+    salesError,
+    refreshSales,
+    credits: creditsData,
+    creditsLoading,
+    creditsError,
+    refreshCredits,
+    products,
+    refreshProducts,
+    customers,
+    refreshCustomers,
+    expenses,
+    refreshExpenses,
+  } = useDataStore();
+
+  useEffect(() => {
+    refreshSales();
+    refreshCredits();
+    refreshProducts();
+    refreshCustomers();
+    refreshExpenses();
+  }, [refreshSales, refreshCredits, refreshProducts, refreshCustomers, refreshExpenses]);
+
+  // activeCash viene de AuthContext (cash.getActiveSession real), no del
+  // DataStore -- la caja sigue fuera de alcance de esta fase (ver informe).
+  const sales = (salesData || []).filter((s) => s && s.estado !== 'ANULADA');
+  const credits = creditsData || [];
+  const installments = (creditsData || [])
+    .flatMap((c) => c.abonos || [])
+    .filter((i) => i && i.estado !== 'ANULADO');
+  const activeCash = activeCashSession;
 
   // 1. KPI Calculations
   const todayStr = new Date().toISOString().substring(0, 10);
@@ -233,6 +271,42 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
         </div>
       </div>
 
+      {/* Error real del backend de ventas -- nunca se sustituye por datos demo/locales */}
+      {salesError && (
+        <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            <span>No se pudieron cargar las ventas reales para los KPIs: {salesError}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => refreshSales({ force: true })}
+            className="px-3 py-1.5 rounded-lg bg-rose-700 text-white font-bold text-[11px] shrink-0 flex items-center gap-1.5"
+          >
+            <RefreshCcw className="w-3.5 h-3.5" />
+            Reintentar
+          </button>
+        </div>
+      )}
+
+      {/* Error real del backend de créditos -- nunca se sustituye por datos demo/locales */}
+      {creditsError && (
+        <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            <span>No se pudo cargar la cartera real de créditos para los KPIs: {creditsError}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => refreshCredits({ force: true })}
+            className="px-3 py-1.5 rounded-lg bg-rose-700 text-white font-bold text-[11px] shrink-0 flex items-center gap-1.5"
+          >
+            <RefreshCcw className="w-3.5 h-3.5" />
+            Reintentar
+          </button>
+        </div>
+      )}
+
       {/* Actionable Alerts Bar */}
       {overdueCreditsCount > 0 || lowStockCount > 0 ? (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -291,7 +365,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
           </div>
           <div className="mt-3">
             <h3 className="text-lg sm:text-xl font-bold text-[#2F2A25]">
-              {formatCurrency(salesToday, settings.simboloMoneda)}
+              {salesLoading ? '...' : formatCurrency(salesToday, settings.simboloMoneda)}
             </h3>
             <span className="text-[10px] text-[#756E65]">Facturación del día</span>
           </div>
@@ -308,7 +382,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
           </div>
           <div className="mt-3">
             <h3 className="text-lg sm:text-xl font-bold text-[#2F2A25]">
-              {formatCurrency(salesMonth, settings.simboloMoneda)}
+              {salesLoading ? '...' : formatCurrency(salesMonth, settings.simboloMoneda)}
             </h3>
             <span className="text-[10px] text-[#756E65]">Mes actual</span>
           </div>
@@ -325,7 +399,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
           </div>
           <div className="mt-3">
             <h3 className="text-lg sm:text-xl font-bold text-emerald-700">
-              {hasPermission('ventas.ver_ganancias') ? formatCurrency(grossProfitMonth, settings.simboloMoneda) : '******'}
+              {salesLoading
+                ? '...'
+                : hasPermission('ventas.ver_ganancias')
+                ? formatCurrency(grossProfitMonth, settings.simboloMoneda)
+                : '******'}
             </h3>
             <span className="text-[10px] text-[#756E65]">Margen sobre costo</span>
           </div>
@@ -342,7 +420,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
           </div>
           <div className="mt-3">
             <h3 className="text-lg sm:text-xl font-bold text-[#2F2A25]">
-              {formatCurrency(totalReceivables, settings.simboloMoneda)}
+              {creditsLoading ? '...' : formatCurrency(totalReceivables, settings.simboloMoneda)}
             </h3>
             <span className="text-[10px] text-[#756E65]">Cartera de crédito activa</span>
           </div>
@@ -359,7 +437,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
           </div>
           <div className="mt-3">
             <h3 className="text-lg sm:text-xl font-bold text-rose-700">
-              {formatCurrency(overdueTotal, settings.simboloMoneda)}
+              {creditsLoading ? '...' : formatCurrency(overdueTotal, settings.simboloMoneda)}
             </h3>
             <span className="text-[10px] text-rose-600">{overdueCredits.length} cliente(s) en mora</span>
           </div>
@@ -376,7 +454,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
           </div>
           <div className="mt-3">
             <h3 className="text-lg sm:text-xl font-bold text-[#2F2A25]">
-              {formatCurrency(installmentsMonth, settings.simboloMoneda)}
+              {creditsLoading ? '...' : formatCurrency(installmentsMonth, settings.simboloMoneda)}
             </h3>
             <span className="text-[10px] text-[#756E65]">Recuperación de cartera</span>
           </div>

@@ -1,7 +1,8 @@
-import React, { useState, useMemo } from 'react';
-import { Installment, CreditAccount } from '../../types';
-import { storageService } from '../../services/storageService';
+import React, { useState, useMemo, useEffect } from 'react';
+import { Installment } from '../../types';
+import { creditsApi } from '../../services/creditsApi';
 import { useAuth } from '../../context/AuthContext';
+import { useDataStore } from '../../context/DataStoreContext';
 import { useToast } from '../../context/ToastContext';
 import { formatCurrency, formatDateTime } from '../../utils/formatters';
 import { exportToCSV } from '../../utils/exportUtils';
@@ -16,26 +17,55 @@ import {
   Eye,
   FileText,
   CreditCard,
+  AlertTriangle,
+  RefreshCcw,
+  Ban,
 } from 'lucide-react';
 
 export const InstallmentsView: React.FC = () => {
   const { settings, hasPermission } = useAuth();
   const { showToast } = useToast();
 
-  const [installments, setInstallments] = useState<Installment[]>(() => storageService.getInstallments() || []);
-  const credits = storageService.getCredits() || [];
+  // FASE 3.7B / CORREGIR AUDITORÍA: no existe un endpoint separado
+  // "listar abonos" -- el contrato real (CreditsController.
+  // handleListCredits) embebe el historial de abonos dentro de cada
+  // cuenta (credit.abonos[]). Esta vista aplana ese historial a partir
+  // del DataStore central de créditos -- la MISMA colección que también
+  // consumen CreditsView, DashboardView y ReportsView (antes cada una
+  // pedía credits.list por su cuenta, ver informe de auditoría).
+  const { credits, creditsLoading: loading, creditsError: loadError, creditsStale, refreshCredits, refreshCustomers } =
+    useDataStore();
+
+  useEffect(() => {
+    refreshCredits();
+  }, [refreshCredits]);
+
+  const installments: Installment[] = useMemo(() => {
+    const flat = (credits || []).flatMap((c) => c.abonos || []);
+    flat.sort((a, b) => String(b.fecha || '').localeCompare(String(a.fecha || '')));
+    return flat;
+  }, [credits]);
 
   const [searchQuery, setSearchQuery] = useState('');
   const [methodFilter, setMethodFilter] = useState<string>('TODOS');
 
   // Direct Abono Modal
-  const [selectedCreditForNewAbono, setSelectedCreditForNewAbono] = useState<CreditAccount | null>(null);
+  const [selectedCreditForNewAbonoId, setSelectedCreditForNewAbonoId] = useState<string | null>(null);
   const [directAbonoModalOpen, setDirectAbonoModalOpen] = useState(false);
 
   // Selected Installment for Receipt Modal
   const [selectedReceiptInstallment, setSelectedReceiptInstallment] = useState<Installment | null>(null);
 
+  // Void Abono
+  const [voidingAbono, setVoidingAbono] = useState<Installment | null>(null);
+  const [voidAbonoReason, setVoidAbonoReason] = useState('');
+  const [loadingVoidAbono, setLoadingVoidAbono] = useState(false);
+
   const activeCredits = (credits || []).filter((c) => c && (c.saldoPendiente || 0) > 0);
+  const selectedCreditForNewAbono = useMemo(
+    () => activeCredits.find((c) => c.id === selectedCreditForNewAbonoId) || null,
+    [activeCredits, selectedCreditForNewAbonoId]
+  );
 
   const filteredInstallments = useMemo(() => {
     return (installments || []).filter((inst) => {
@@ -60,7 +90,9 @@ export const InstallmentsView: React.FC = () => {
     });
   }, [installments, methodFilter, searchQuery]);
 
-  const totalCollected = (filteredInstallments || []).reduce((acc, i) => acc + (i.montoAbonado || 0), 0);
+  const totalCollected = (filteredInstallments || [])
+    .filter((i) => i.estado !== 'ANULADO')
+    .reduce((acc, i) => acc + (i.montoAbonado || 0), 0);
 
   const handleExportCSV = () => {
     const rows = (filteredInstallments || []).map((i) => ({
@@ -74,9 +106,33 @@ export const InstallmentsView: React.FC = () => {
       SaldoAnterior: i.saldoAnterior,
       SaldoRestante: i.saldoRestante ?? i.saldoNuevo,
       Cajero: i.usuarioNombre,
+      Estado: i.estado,
     }));
     exportToCSV('Historial_Abonos_ZIO', rows);
     showToast('Exportación Exitosa', 'Historial de abonos exportado en CSV.', 'exito');
+  };
+
+  const handleConfirmVoidAbono = async () => {
+    if (!voidingAbono) return;
+    if (!voidAbonoReason.trim()) {
+      showToast('Motivo Requerido', 'Debe ingresar el motivo de la anulación.', 'error');
+      return;
+    }
+    setLoadingVoidAbono(true);
+    const res = await creditsApi.voidAbono(voidingAbono.id, voidAbonoReason.trim());
+    setLoadingVoidAbono(false);
+
+    if (res.success) {
+      showToast('Abono Anulado', res.message, 'exito');
+      setVoidingAbono(null);
+      setVoidAbonoReason('');
+      // CORREGIR AUDITORÍA (§6): invalida créditos y clientes --
+      // CreditsView/Dashboard/Reportes/POS reflejan el resultado de
+      // inmediato, sin logout/login ni F5.
+      await Promise.all([refreshCredits({ force: true }), refreshCustomers({ force: true })]);
+    } else {
+      showToast('Error', res.message, 'error');
+    }
   };
 
   return (
@@ -95,8 +151,19 @@ export const InstallmentsView: React.FC = () => {
         <div className="flex items-center gap-2.5">
           <button
             type="button"
+            onClick={() => refreshCredits({ force: true })}
+            disabled={loading}
+            className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-white border border-[#E4DDD2] text-xs font-semibold text-[#2F2A25] hover:bg-[#F6F1E8] transition shadow-2xs disabled:opacity-50"
+            title="Volver a consultar el backend real"
+          >
+            <RefreshCcw className={`w-4 h-4 text-[#756E65] ${loading ? 'animate-spin' : ''}`} />
+            <span>{loading ? 'Actualizando...' : 'Actualizar'}</span>
+          </button>
+          <button
+            type="button"
             onClick={handleExportCSV}
-            className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-white border border-[#E4DDD2] text-xs font-semibold text-[#2F2A25] hover:bg-[#F6F1E8] transition shadow-2xs"
+            disabled={installments.length === 0}
+            className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-white border border-[#E4DDD2] text-xs font-semibold text-[#2F2A25] hover:bg-[#F6F1E8] transition shadow-2xs disabled:opacity-50"
           >
             <Download className="w-4 h-4 text-[#756E65]" />
             <span>Exportar CSV</span>
@@ -106,7 +173,7 @@ export const InstallmentsView: React.FC = () => {
             <button
               type="button"
               onClick={() => {
-                setSelectedCreditForNewAbono(activeCredits[0]);
+                setSelectedCreditForNewAbonoId(activeCredits[0].id);
                 setDirectAbonoModalOpen(true);
               }}
               className="flex items-center gap-2 px-4 py-2 rounded-xl bg-[#2F2A25] text-white text-xs font-bold hover:bg-[#403932] transition shadow-xs"
@@ -118,12 +185,32 @@ export const InstallmentsView: React.FC = () => {
         </div>
       </div>
 
+      {/* Error real del backend -- nunca se sustituye por datos demo/locales */}
+      {loadError && (
+        <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            <span>
+              No se pudo cargar el historial de abonos desde el backend: {loadError}
+              {creditsStale && ' (se muestra la última información disponible, puede no estar actualizada)'}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => refreshCredits({ force: true })}
+            className="px-3 py-1.5 rounded-lg bg-rose-700 text-white font-bold text-[11px] shrink-0"
+          >
+            Reintentar
+          </button>
+        </div>
+      )}
+
       {/* Summary KPI Banner */}
       <div className="p-4 bg-[#F6F1E8] rounded-2xl border border-[#E4DDD2] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div>
           <span className="text-[11px] font-bold uppercase text-[#756E65]">Total Recaudado en Abonos</span>
           <h2 className="text-2xl font-serif font-bold text-[#2F2A25]">
-            {formatCurrency(totalCollected, settings.simboloMoneda)}
+            {loading ? '...' : formatCurrency(totalCollected, settings.simboloMoneda)}
           </h2>
         </div>
         <div className="text-xs text-[#756E65] sm:text-right">
@@ -159,6 +246,17 @@ export const InstallmentsView: React.FC = () => {
 
       {/* Table */}
       <div className="bg-white rounded-3xl border border-[#E4DDD2] overflow-hidden shadow-xs">
+        {loading && installments.length === 0 ? (
+          <div className="text-center py-14 space-y-2 text-[#756E65]">
+            <RefreshCcw className="w-7 h-7 opacity-40 mx-auto animate-spin" />
+            <p className="font-semibold text-xs">Consultando abonos reales en el backend...</p>
+          </div>
+        ) : !loading && !loadError && installments.length === 0 ? (
+          <div className="text-center py-14 space-y-2 text-[#756E65]">
+            <Coins className="w-8 h-8 opacity-40 mx-auto" />
+            <p className="font-semibold text-xs text-[#2F2A25]">No se han registrado abonos aún</p>
+          </div>
+        ) : (
         <div className="overflow-x-auto">
           <table className="w-full text-xs text-left">
             <thead className="bg-[#F6F1E8] text-[#2F2A25] border-b border-[#E4DDD2] uppercase text-[10px] tracking-wider font-bold">
@@ -171,6 +269,7 @@ export const InstallmentsView: React.FC = () => {
                 <th className="py-3 px-4 text-right">Monto Abonado</th>
                 <th className="py-3 px-4 text-right">Nuevo Saldo</th>
                 <th className="py-3 px-4">Cajero</th>
+                <th className="py-3 px-4 text-center">Estado</th>
                 <th className="py-3 px-4 text-center">Acciones</th>
               </tr>
             </thead>
@@ -178,9 +277,10 @@ export const InstallmentsView: React.FC = () => {
               {(filteredInstallments || []).map((inst) => {
                 const recNum = inst.numeroRecibo || inst.numeroAbono || inst.id;
                 const saldoRest = inst.saldoRestante ?? inst.saldoNuevo ?? 0;
+                const isVoided = inst.estado === 'ANULADO';
 
                 return (
-                  <tr key={inst.id} className="hover:bg-[#FAF8F4]/80 transition">
+                  <tr key={inst.id} className={`hover:bg-[#FAF8F4]/80 transition ${isVoided ? 'opacity-60' : ''}`}>
                     <td className="py-3.5 px-4 font-mono font-bold text-[#2F2A25]">
                       {recNum}
                     </td>
@@ -192,13 +292,24 @@ export const InstallmentsView: React.FC = () => {
                         {inst.metodoPago}
                       </span>
                     </td>
-                    <td className="py-3.5 px-4 text-right font-bold text-emerald-700 text-sm">
+                    <td className={`py-3.5 px-4 text-right font-bold text-sm ${isVoided ? 'text-[#756E65] line-through' : 'text-emerald-700'}`}>
                       {formatCurrency(inst.montoAbonado, settings.simboloMoneda)}
                     </td>
                     <td className="py-3.5 px-4 text-right font-semibold text-[#2F2A25]">
                       {formatCurrency(saldoRest, settings.simboloMoneda)}
                     </td>
                     <td className="py-3.5 px-4 text-[#756E65]">{inst.usuarioNombre}</td>
+                    <td className="py-3.5 px-4 text-center">
+                      <span
+                        className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                          isVoided
+                            ? 'bg-rose-50 text-rose-800 border-rose-200'
+                            : 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                        }`}
+                      >
+                        {inst.estado}
+                      </span>
+                    </td>
                     <td className="py-3.5 px-4 text-center">
                       <div className="flex items-center justify-center gap-1.5">
                         <button
@@ -208,8 +319,20 @@ export const InstallmentsView: React.FC = () => {
                           title="Ver y reimprimir recibo térmico"
                         >
                           <Printer className="w-3.5 h-3.5 text-[#756E65]" />
-                          <span>Recibo</span>
                         </button>
+                        {!isVoided && hasPermission('creditos.anular_abonos') && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setVoidingAbono(inst);
+                              setVoidAbonoReason('');
+                            }}
+                            className="p-1.5 rounded-lg text-rose-600 hover:bg-rose-50 border border-rose-200 transition"
+                            title="Anular abono"
+                          >
+                            <Ban className="w-3.5 h-3.5" />
+                          </button>
+                        )}
                       </div>
                     </td>
                   </tr>
@@ -218,13 +341,14 @@ export const InstallmentsView: React.FC = () => {
             </tbody>
           </table>
 
-          {(filteredInstallments || []).length === 0 && (
+          {installments.length > 0 && (filteredInstallments || []).length === 0 && (
             <div className="text-center py-12 text-[#756E65] space-y-2">
               <Coins className="w-8 h-8 opacity-40 mx-auto" />
-              <p className="font-semibold text-xs text-[#2F2A25]">No se han registrado abonos aún</p>
+              <p className="font-semibold text-xs text-[#2F2A25]">Ningún abono coincide con los filtros aplicados</p>
             </div>
           )}
         </div>
+        )}
       </div>
 
       {/* Direct Abono Modal with Account Selector */}
@@ -237,11 +361,8 @@ export const InstallmentsView: React.FC = () => {
             <div className="space-y-3">
               <label className="block text-xs font-bold text-[#2F2A25]">Cuentas con saldo pendiente:</label>
               <select
-                value={selectedCreditForNewAbono?.id || ''}
-                onChange={(e) => {
-                  const found = (activeCredits || []).find((c) => c && c.id === e.target.value);
-                  if (found) setSelectedCreditForNewAbono(found);
-                }}
+                value={selectedCreditForNewAbonoId || ''}
+                onChange={(e) => setSelectedCreditForNewAbonoId(e.target.value)}
                 className="w-full px-3 py-2.5 rounded-xl border border-[#E4DDD2] bg-white text-xs font-semibold text-[#2F2A25]"
               >
                 {(activeCredits || []).map((c) => (
@@ -278,12 +399,63 @@ export const InstallmentsView: React.FC = () => {
       {selectedCreditForNewAbono && !directAbonoModalOpen && (
         <InstallmentModal
           credit={selectedCreditForNewAbono}
-          onClose={() => setSelectedCreditForNewAbono(null)}
-          onSuccess={() => {
-            setSelectedCreditForNewAbono(null);
-            setInstallments(storageService.getInstallments());
+          onClose={() => setSelectedCreditForNewAbonoId(null)}
+          onSuccess={async () => {
+            setSelectedCreditForNewAbonoId(null);
+            await Promise.all([refreshCredits({ force: true }), refreshCustomers({ force: true })]);
           }}
         />
+      )}
+
+      {/* Void Abono Reason Modal */}
+      {voidingAbono && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-xs z-50 flex items-center justify-center p-4">
+          <div className="bg-[#FAF8F4] border border-[#E4DDD2] rounded-3xl max-w-md w-full p-5 space-y-4 shadow-2xl">
+            <div className="flex items-center gap-3 text-rose-800 font-bold text-sm border-b border-[#E4DDD2] pb-3">
+              <AlertTriangle className="w-5 h-5 text-rose-600" />
+              <span>Anular Abono {voidingAbono.numeroRecibo || voidingAbono.numeroAbono}</span>
+            </div>
+
+            <p className="text-xs text-[#756E65] leading-relaxed">
+              Esta acción restaurará el saldo pendiente de la cuenta por{' '}
+              {formatCurrency(voidingAbono.montoAbonado, settings.simboloMoneda)}, y revertirá el
+              efecto en caja si el abono fue cobrado en efectivo.
+            </p>
+
+            <div>
+              <label className="block text-xs font-bold text-[#2F2A25] mb-1 uppercase">
+                Motivo de Anulación:
+              </label>
+              <textarea
+                rows={3}
+                required
+                value={voidAbonoReason}
+                onChange={(e) => setVoidAbonoReason(e.target.value)}
+                placeholder="Ej. Abono registrado por error / Duplicado"
+                className="w-full p-2.5 rounded-xl border border-[#E4DDD2] bg-white text-xs text-[#2F2A25] focus:outline-none focus:border-rose-600"
+              />
+            </div>
+
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => setVoidingAbono(null)}
+                disabled={loadingVoidAbono}
+                className="flex-1 py-2 rounded-xl bg-white border border-[#E4DDD2] text-xs font-semibold text-[#756E65]"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={loadingVoidAbono || !voidAbonoReason.trim()}
+                onClick={handleConfirmVoidAbono}
+                className="flex-1 py-2 rounded-xl bg-rose-700 hover:bg-rose-800 text-xs font-bold text-white transition disabled:bg-zinc-300"
+              >
+                {loadingVoidAbono ? 'Anulando...' : 'Confirmar Anulación'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Thermal Receipt Modal */}

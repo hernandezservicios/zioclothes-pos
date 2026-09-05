@@ -1,6 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Product, ProductVariant, Category, Size, Color } from '../../types';
-import { storageService } from '../../services/storageService';
 import { useToast } from '../../context/ToastContext';
 import { formatCurrency } from '../../utils/formatters';
 import {
@@ -26,7 +25,17 @@ interface ProductFormModalProps {
   onClose: () => void;
   editingProduct: Product | null;
   categories: Category[];
+  // FASE 3.6B: tallas/colores REALES traídos del backend
+  // (products.listAuxiliaries -> Tallas/Colores en Sheets), ya no hay
+  // ningún catálogo hardcodeado de respaldo. Si el backend no tiene
+  // ninguna talla/color sembrada, estas listas llegan vacías -- el
+  // usuario puede seguir escribiendo una talla/color nueva a mano para
+  // ESTA prenda (ver nota en el catálogo de gestión más abajo), pero ya
+  // no se rellena silenciosamente con una lista inventada.
+  initialSizes: Size[];
+  initialColors: Color[];
   currencySymbol?: string;
+  saving?: boolean;
   onSave: (productData: {
     nombre: string;
     descripcion: string;
@@ -41,42 +50,15 @@ interface ProductFormModalProps {
   }) => void;
 }
 
-const DEFAULT_FALLBACK_SIZES: Size[] = [
-  { id: 'SIZ-01', nombre: 'XS', orden: 1 },
-  { id: 'SIZ-02', nombre: 'S', orden: 2 },
-  { id: 'SIZ-03', nombre: 'M', orden: 3 },
-  { id: 'SIZ-04', nombre: 'L', orden: 4 },
-  { id: 'SIZ-05', nombre: 'XL', orden: 5 },
-  { id: 'SIZ-06', nombre: 'XXL', orden: 6 },
-  { id: 'SIZ-07', nombre: 'Única', orden: 7 },
-  { id: 'SIZ-08', nombre: '28', orden: 8 },
-  { id: 'SIZ-09', nombre: '30', orden: 9 },
-  { id: 'SIZ-10', nombre: '32', orden: 10 },
-  { id: 'SIZ-11', nombre: '34', orden: 11 },
-  { id: 'SIZ-12', nombre: '36', orden: 12 },
-  { id: 'SIZ-13', nombre: '38', orden: 13 },
-];
-
-const DEFAULT_FALLBACK_COLORS: Color[] = [
-  { id: 'COL-01', nombre: 'Negro', hex: '#1E1E1E' },
-  { id: 'COL-02', nombre: 'Blanco', hex: '#FFFFFF' },
-  { id: 'COL-03', nombre: 'Beige', hex: '#D2B48C' },
-  { id: 'COL-04', nombre: 'Azul Marino', hex: '#1E293B' },
-  { id: 'COL-05', nombre: 'Rojo Carmesí', hex: '#990000' },
-  { id: 'COL-06', nombre: 'Verde Oliva', hex: '#4D5B44' },
-  { id: 'COL-07', nombre: 'Gris Perla', hex: '#94A3B8' },
-  { id: 'COL-08', nombre: 'Terracota', hex: '#C2410C' },
-  { id: 'COL-09', nombre: 'Rosa Palo', hex: '#E0BFB8' },
-  { id: 'COL-10', nombre: 'Mostaza', hex: '#D97706' },
-  { id: 'COL-11', nombre: 'Café Moka', hex: '#593B2B' },
-];
-
 export const ProductFormModal: React.FC<ProductFormModalProps> = ({
   isOpen,
   onClose,
   editingProduct,
   categories,
+  initialSizes,
+  initialColors,
   currencySymbol = 'RD$',
+  saving = false,
   onSave,
 }) => {
   const { showToast } = useToast();
@@ -102,16 +84,16 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
   const cameraInputRef = useRef<HTMLInputElement>(null);
   const galleryInputRef = useRef<HTMLInputElement>(null);
 
-  // Available Sizes & Colors Catalogs (Persisted in storage)
-  const [availableSizes, setAvailableSizes] = useState<Size[]>(() => {
-    const saved = storageService.getSizes();
-    return saved && saved.length > 0 ? saved : DEFAULT_FALLBACK_SIZES;
-  });
-
-  const [availableColors, setAvailableColors] = useState<Color[]>(() => {
-    const saved = storageService.getColors();
-    return saved && saved.length > 0 ? saved : DEFAULT_FALLBACK_COLORS;
-  });
+  // FASE 3.6B: tallas/colores disponibles = los reales del backend
+  // (initialSizes/initialColors, prop). El add/edit/delete de este panel
+  // sigue existiendo como conveniencia para armar LA MATRIZ DE ESTA
+  // PRENDA (los nombres viajan dentro de cada variante al guardar el
+  // producto), pero ya NO se persiste a storageService como si fuera un
+  // catálogo compartido real -- no existe ningún endpoint de backend para
+  // eso (ProductsController.gs no tiene sizes.save/colors.save), así que
+  // persistir localmente sería aparentar una fuente de verdad que no es.
+  const [availableSizes, setAvailableSizes] = useState<Size[]>(initialSizes);
+  const [availableColors, setAvailableColors] = useState<Color[]>(initialColors);
 
   // Selected for matrix generator
   const [selectedSizes, setSelectedSizes] = useState<string[]>([]);
@@ -141,22 +123,10 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
   useEffect(() => {
     if (!isOpen) return;
 
-    // Refresh available catalogs from storage
-    const currentSizes = storageService.getSizes();
-    if (currentSizes && currentSizes.length > 0) {
-      setAvailableSizes(currentSizes);
-    } else {
-      storageService.saveSizes(DEFAULT_FALLBACK_SIZES);
-      setAvailableSizes(DEFAULT_FALLBACK_SIZES);
-    }
-
-    const currentColors = storageService.getColors();
-    if (currentColors && currentColors.length > 0) {
-      setAvailableColors(currentColors);
-    } else {
-      storageService.saveColors(DEFAULT_FALLBACK_COLORS);
-      setAvailableColors(DEFAULT_FALLBACK_COLORS);
-    }
+    // Refresca desde las props (backend real) cada vez que se abre --
+    // ya no hay fallback local ni persistencia a storageService.
+    setAvailableSizes(initialSizes);
+    setAvailableColors(initialColors);
 
     setImageError(null);
     setIsAddingSize(false);
@@ -365,7 +335,9 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
 
     const updated = [...availableSizes, newSizeItem];
     setAvailableSizes(updated);
-    storageService.saveSizes(updated);
+    // FASE 3.6B: ya no se persiste a storageService (no hay endpoint real
+    // de backend para un catálogo de tallas escribible) -- solo estado
+    // local de esta sesión del formulario.
 
     // Auto-select the newly created size
     if (!selectedSizes.includes(cleanName)) {
@@ -401,7 +373,9 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
 
     const updated = availableSizes.map((s) => (s.id === id ? { ...s, nombre: cleanName } : s));
     setAvailableSizes(updated);
-    storageService.saveSizes(updated);
+    // FASE 3.6B: ya no se persiste a storageService (no hay endpoint real
+    // de backend para un catálogo de tallas escribible) -- solo estado
+    // local de esta sesión del formulario.
 
     // Update in selected sizes
     if (oldName && selectedSizes.includes(oldName)) {
@@ -433,7 +407,9 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
 
     const updated = availableSizes.filter((s) => s.id !== id);
     setAvailableSizes(updated);
-    storageService.saveSizes(updated);
+    // FASE 3.6B: ya no se persiste a storageService (no hay endpoint real
+    // de backend para un catálogo de tallas escribible) -- solo estado
+    // local de esta sesión del formulario.
 
     // Remove from current selection
     setSelectedSizes((prev) => prev.filter((s) => s !== sizeName));
@@ -468,7 +444,7 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
 
     const updated = [...availableColors, newColorItem];
     setAvailableColors(updated);
-    storageService.saveColors(updated);
+    // FASE 3.6B: ídem -- solo estado local de esta sesión del formulario.
 
     // Auto select the new color
     if (!selectedColors.includes(cleanName)) {
@@ -507,7 +483,7 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
       c.id === id ? { ...c, nombre: cleanName, hex: editingColorHex } : c
     );
     setAvailableColors(updated);
-    storageService.saveColors(updated);
+    // FASE 3.6B: ídem -- solo estado local de esta sesión del formulario.
 
     // Update selected colors list
     if (oldName && selectedColors.includes(oldName)) {
@@ -539,7 +515,7 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
 
     const updated = availableColors.filter((c) => c.id !== id);
     setAvailableColors(updated);
-    storageService.saveColors(updated);
+    // FASE 3.6B: ídem -- solo estado local de esta sesión del formulario.
 
     // Remove from current selection
     setSelectedColors((prev) => prev.filter((c) => c !== colorName));
@@ -1723,16 +1699,24 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
             <button
               type="button"
               onClick={onClose}
-              className="py-3 px-4 rounded-xl bg-white border border-[#E4DDD2] text-xs font-bold text-[#756E65] hover:bg-[#F6F1E8] hover:text-[#2F2A25] transition cursor-pointer"
+              disabled={saving}
+              className="py-3 px-4 rounded-xl bg-white border border-[#E4DDD2] text-xs font-bold text-[#756E65] hover:bg-[#F6F1E8] hover:text-[#2F2A25] transition cursor-pointer disabled:opacity-50"
             >
               Cancelar
             </button>
             <button
               type="submit"
-              className="flex-1 py-3 px-4 rounded-xl bg-[#2F2A25] text-xs font-bold text-[#FAF8F4] shadow-md hover:bg-[#403932] transition flex items-center justify-center gap-2 cursor-pointer"
+              disabled={saving}
+              className="flex-1 py-3 px-4 rounded-xl bg-[#2F2A25] text-xs font-bold text-[#FAF8F4] shadow-md hover:bg-[#403932] transition flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
             >
               <Check className="w-4 h-4 text-[#E8DCC8]" />
-              <span>{editingProduct ? 'Guardar Cambios de la Prenda' : 'Guardar Prenda en Catálogo'}</span>
+              <span>
+                {saving
+                  ? 'Guardando en Google Sheets...'
+                  : editingProduct
+                  ? 'Guardar Cambios de la Prenda'
+                  : 'Guardar Prenda en Catálogo'}
+              </span>
             </button>
           </div>
         </form>

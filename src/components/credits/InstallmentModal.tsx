@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { CreditAccount, PaymentMethodType, Installment } from '../../types';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
-import { apiService } from '../../services/apiService';
+import { creditsApi } from '../../services/creditsApi';
 import { formatCurrency } from '../../utils/formatters';
 import { printThermalElement } from '../../utils/exportUtils';
 import { sounds } from '../../utils/soundEffects';
@@ -28,7 +28,7 @@ export const InstallmentModal: React.FC<InstallmentModalProps> = ({
   onClose,
   onSuccess,
 }) => {
-  const { currentUser, settings } = useAuth();
+  const { currentUser, settings, activeCashSession } = useAuth();
   const { showToast } = useToast();
 
   const [montoAbonado, setMontoAbonado] = useState<number | string>(0);
@@ -70,13 +70,32 @@ export const InstallmentModal: React.FC<InstallmentModalProps> = ({
 
     setLoading(true);
 
-    const res = await apiService.registerInstallment({
-      cuentaCobrarId: credit.id,
-      monto: amount,
-      metodoPago,
-      referencia: referencia.trim() || undefined,
-      observaciones: notas.trim() || undefined,
-    });
+    // FASE 3.7B: credits.registerAbono real (CreditsController.
+    // handleRegisterAbono). El backend es la autoridad final sobre saldo
+    // pendiente, monto máximo permitido y estado de la cuenta -- las
+    // validaciones de arriba (monto > 0, monto <= saldoPendiente) son solo
+    // UX inmediata; si el backend detecta algo distinto (ej. otro cajero ya
+    // registró un abono sobre esta misma cuenta segundos antes), rechaza
+    // igual y aquí se muestra el error real. cajaSesionId viene de
+    // AuthContext.activeCashSession (nunca de storageService.getCashSessions());
+    // si no hay turno abierto, se omite y el backend simplemente no
+    // actualiza caja (no es obligatorio para registrar el abono).
+    const res = await creditsApi.registerAbono(
+      {
+        cuentaCobrarId: credit.id,
+        monto: amount,
+        metodoPago,
+        referencia: referencia.trim() || undefined,
+        observaciones: notas.trim() || undefined,
+        cajaSesionId: activeCashSession?.id,
+      },
+      {
+        clienteId: credit.clienteId,
+        clienteNombre: credit.clienteNombre,
+        ventaId: credit.ventaId,
+        numeroVenta: credit.numeroVenta,
+      }
+    );
 
     setLoading(false);
 
@@ -256,6 +275,11 @@ export const InstallmentModal: React.FC<InstallmentModalProps> = ({
                 <option value="TRANSFERENCIA">Transferencia Bancaria</option>
                 <option value="CHEQUE">Cheque</option>
               </select>
+              {metodoPago === 'EFECTIVO' && !activeCashSession && (
+                <p className="mt-1.5 text-[10px] text-amber-700">
+                  ⚠ No hay una caja abierta en este momento: el abono se registrará igual, pero no se reflejará en ningún turno de caja.
+                </p>
+              )}
             </div>
 
             {metodoPago !== 'EFECTIVO' && (

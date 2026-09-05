@@ -63,7 +63,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
       items: [
         { id: 'products', label: 'Prendas, Tallas & Colores', icon: Shirt, permission: 'productos.ver' },
         { id: 'inventory', label: 'Kardex & Ajuste Stock', icon: Boxes, permission: 'inventario.ver' },
-        { id: 'purchases', label: 'Órdenes de Compra', icon: Truck, permission: 'inventario.ver' },
+        // FASE 3.7D-FIX: compras.ver es el permiso real y propio de este
+        // módulo (SeedSetup.gs), separado de inventario.ver.
+        { id: 'purchases', label: 'Órdenes de Compra', icon: Truck, permission: 'compras.ver' },
       ],
     },
     {
@@ -79,7 +81,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
       items: [
         { id: 'expenses', label: 'Gastos Operativos', icon: DollarSign, permission: 'gastos.ver' },
         { id: 'reports', label: 'Reportes & Margen', icon: BarChart3, permission: 'reportes.ver' },
-        { id: 'settings', label: 'Configuración & Sheets', icon: Settings, permission: 'configuracion.ver' },
+        // FASE 3.7G-FIX: admin.configuracion es el permiso real
+        // (SeedSetup.gs/SettingsController.gs); configuracion.ver nunca
+        // existió en el backend.
+        { id: 'settings', label: 'Configuración & Sheets', icon: Settings, permission: 'admin.configuracion' },
       ],
     },
   ];

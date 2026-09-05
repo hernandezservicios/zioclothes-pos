@@ -1,7 +1,9 @@
-import React, { useState, useMemo } from 'react';
-import { CreditAccount, Sale, Installment } from '../../types';
-import { storageService } from '../../services/storageService';
+import React, { useState, useMemo, useEffect } from 'react';
+import { AccountReceivable, Sale, PaymentInstallment } from '../../types';
+import { creditsApi } from '../../services/creditsApi';
+import { salesApi } from '../../services/salesApi';
 import { useAuth } from '../../context/AuthContext';
+import { useDataStore } from '../../context/DataStoreContext';
 import { useToast } from '../../context/ToastContext';
 import { formatCurrency, formatDateTime } from '../../utils/formatters';
 import { exportToCSV } from '../../utils/exportUtils';
@@ -23,6 +25,8 @@ import {
   X,
   FileText,
   Printer,
+  Ban,
+  RefreshCcw,
 } from 'lucide-react';
 
 interface CreditsViewProps {
@@ -39,8 +43,21 @@ export const CreditsView: React.FC<CreditsViewProps> = ({
   const { settings, hasPermission } = useAuth();
   const { showToast } = useToast();
 
-  const [credits, setCredits] = useState<CreditAccount[]>(() => storageService.getCredits() || []);
-  const [installments, setInstallments] = useState<Installment[]>(() => storageService.getInstallments() || []);
+  // FASE 3.7B / CORREGIR AUDITORÍA: créditos/cuentas por cobrar y sus
+  // abonos embebidos vienen EXCLUSIVAMENTE de credits.list
+  // (CreditsController.handleListCredits -> Google Sheets real), ahora
+  // leídos del DataStore central -- la MISMA colección que también
+  // consumen InstallmentsView, DashboardView y ReportsView (antes cada
+  // una lo pedía por su cuenta, 4 llamadas independientes a credits.list,
+  // ver informe de auditoría). No hay una fuente local separada de
+  // "installments": cada crédito ya trae su propio historial de abonos
+  // (credit.abonos[]) directamente del backend.
+  const { credits, creditsLoading: loading, creditsError: loadError, creditsStale, refreshCredits, refreshCustomers } =
+    useDataStore();
+
+  useEffect(() => {
+    refreshCredits();
+  }, [refreshCredits]);
 
   const [searchQuery, setSearchQuery] = useState(initialSearchQuery || '');
   const [statusFilter, setStatusFilter] = useState<'TODOS' | 'PENDIENTE' | 'PARCIAL' | 'VENCIDA' | 'PAGADA'>(
@@ -59,11 +76,28 @@ export const CreditsView: React.FC<CreditsViewProps> = ({
     }
   }, [initialSearchQuery]);
 
-  // Modals
-  const [selectedCreditDetail, setSelectedCreditDetail] = useState<CreditAccount | null>(null);
-  const [creditForInstallment, setCreditForInstallment] = useState<CreditAccount | null>(null);
-  const [selectedReceiptInstallment, setSelectedReceiptInstallment] = useState<Installment | null>(null);
+  // Modals -- se guarda solo el ID y se deriva el objeto fresco desde
+  // `credits` en cada render, para que un refresh tras registrar/anular un
+  // abono se refleje de inmediato sin mantener una copia local obsoleta.
+  const [selectedCreditDetailId, setSelectedCreditDetailId] = useState<string | null>(null);
+  const [creditForInstallmentId, setCreditForInstallmentId] = useState<string | null>(null);
+  const [selectedReceiptInstallment, setSelectedReceiptInstallment] = useState<PaymentInstallment | null>(null);
   const [selectedSaleForReceipt, setSelectedSaleForReceipt] = useState<Sale | null>(null);
+  const [loadingSaleReceipt, setLoadingSaleReceipt] = useState(false);
+
+  const selectedCreditDetail = useMemo(
+    () => credits.find((c) => c.id === selectedCreditDetailId) || null,
+    [credits, selectedCreditDetailId]
+  );
+  const creditForInstallment = useMemo(
+    () => credits.find((c) => c.id === creditForInstallmentId) || null,
+    [credits, creditForInstallmentId]
+  );
+
+  // Void Abono
+  const [voidingAbono, setVoidingAbono] = useState<PaymentInstallment | null>(null);
+  const [voidAbonoReason, setVoidAbonoReason] = useState('');
+  const [loadingVoidAbono, setLoadingVoidAbono] = useState(false);
 
   // Filtered Credits
   const filteredCredits = useMemo(() => {
@@ -119,7 +153,7 @@ export const CreditsView: React.FC<CreditsViewProps> = ({
     showToast('Exportación Exitosa', 'Listado de cuentas por cobrar exportado en CSV.', 'exito');
   };
 
-  const handleSendWhatsAppReminder = (credit: CreditAccount) => {
+  const handleSendWhatsAppReminder = (credit: AccountReceivable) => {
     const phone = (credit.clienteTelefono || '').replace(/[^0-9]/g, '');
     const acctNum = credit.numeroCredito || credit.numeroCuenta;
     const msg = encodeURIComponent(
@@ -131,13 +165,53 @@ export const CreditsView: React.FC<CreditsViewProps> = ({
     window.open(url, '_blank');
   };
 
-  const handleOpenSaleReceipt = (credit: CreditAccount) => {
-    const sales = storageService.getSales() || [];
-    const foundSale = sales.find((s) => s.id === credit.ventaId || s.numeroVenta === credit.numeroVenta);
+  // FASE 3.7B: antes buscaba la venta original en storageService.getSales(),
+  // un arreglo que desde FASE 3.7A nadie real vuelve a escribir (sales.create
+  // quedó conectado al backend) -- este botón siempre habría fallado con
+  // "Factura no encontrada" pese a que la venta sí existe en Sheets. Ahora
+  // consulta salesApi.list() bajo demanda, solo al hacer clic.
+  const handleOpenSaleReceipt = async (credit: AccountReceivable) => {
+    setLoadingSaleReceipt(true);
+    const res = await salesApi.list();
+    setLoadingSaleReceipt(false);
+    if (!res.success) {
+      showToast('Error', res.message || 'No se pudo consultar el historial de ventas.', 'error');
+      return;
+    }
+    const foundSale = (res.data || []).find((s) => s.id === credit.ventaId || s.numeroVenta === credit.numeroVenta);
     if (foundSale) {
       setSelectedSaleForReceipt(foundSale);
     } else {
       showToast('Factura no encontrada', `No se encontró el registro completo de la venta ${credit.numeroVenta}`, 'advertencia');
+    }
+  };
+
+  const handleConfirmVoidAbono = async () => {
+    if (!voidingAbono) return;
+    if (!voidAbonoReason.trim()) {
+      showToast('Motivo Requerido', 'Debe ingresar el motivo de la anulación.', 'error');
+      return;
+    }
+    setLoadingVoidAbono(true);
+    // FASE 3.7B: credits.voidAbono real (CreditsController.handleVoidAbono).
+    // El backend valida el permiso creditos.anular_abonos, restaura el
+    // saldo de la cuenta y revierte el efecto en caja si el abono fue en
+    // efectivo -- si rechaza, se muestra el error real y no se toca nada
+    // localmente.
+    const res = await creditsApi.voidAbono(voidingAbono.id, voidAbonoReason.trim());
+    setLoadingVoidAbono(false);
+
+    if (res.success) {
+      showToast('Abono Anulado', res.message, 'exito');
+      setVoidingAbono(null);
+      setVoidAbonoReason('');
+      // CORREGIR AUDITORÍA (§6): invalida créditos y clientes (customers.list
+      // recalcula saldoPendiente/creditoDisponible desde Creditos real) --
+      // InstallmentsView/Dashboard/Reportes/POS reflejan el resultado de
+      // inmediato, sin logout/login ni F5.
+      await Promise.all([refreshCredits({ force: true }), refreshCustomers({ force: true })]);
+    } else {
+      showToast('Error', res.message, 'error');
     }
   };
 
@@ -157,8 +231,19 @@ export const CreditsView: React.FC<CreditsViewProps> = ({
         <div className="flex items-center gap-2.5">
           <button
             type="button"
+            onClick={() => refreshCredits({ force: true })}
+            disabled={loading}
+            className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-white border border-[#E4DDD2] text-xs font-semibold text-[#2F2A25] hover:bg-[#F6F1E8] transition shadow-2xs disabled:opacity-50"
+            title="Volver a consultar el backend real"
+          >
+            <RefreshCcw className={`w-4 h-4 text-[#756E65] ${loading ? 'animate-spin' : ''}`} />
+            <span>{loading ? 'Actualizando...' : 'Actualizar'}</span>
+          </button>
+          <button
+            type="button"
             onClick={handleExportCSV}
-            className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-white border border-[#E4DDD2] text-xs font-semibold text-[#2F2A25] hover:bg-[#F6F1E8] transition shadow-2xs"
+            disabled={credits.length === 0}
+            className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-white border border-[#E4DDD2] text-xs font-semibold text-[#2F2A25] hover:bg-[#F6F1E8] transition shadow-2xs disabled:opacity-50"
           >
             <Download className="w-4 h-4 text-[#756E65]" />
             <span>Exportar CSV</span>
@@ -177,6 +262,26 @@ export const CreditsView: React.FC<CreditsViewProps> = ({
         </div>
       </div>
 
+      {/* Error real del backend -- nunca se sustituye por datos demo/locales */}
+      {loadError && (
+        <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            <span>
+              No se pudo cargar la cartera de créditos desde el backend: {loadError}
+              {creditsStale && ' (se muestra la última información disponible, puede no estar actualizada)'}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => refreshCredits({ force: true })}
+            className="px-3 py-1.5 rounded-lg bg-rose-700 text-white font-bold text-[11px] shrink-0"
+          >
+            Reintentar
+          </button>
+        </div>
+      )}
+
       {/* KPI Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <div className="p-4 bg-white rounded-2xl border border-[#E4DDD2] shadow-2xs">
@@ -186,7 +291,7 @@ export const CreditsView: React.FC<CreditsViewProps> = ({
           </div>
           <div className="mt-2">
             <h3 className="text-xl font-bold text-[#2F2A25]">
-              {formatCurrency(totalReceivables, settings.simboloMoneda)}
+              {loading ? '...' : formatCurrency(totalReceivables, settings.simboloMoneda)}
             </h3>
             <span className="text-[11px] text-[#756E65]">
               {activeAccountsCount} cuenta(s) activa(s)
@@ -201,7 +306,7 @@ export const CreditsView: React.FC<CreditsViewProps> = ({
           </div>
           <div className="mt-2">
             <h3 className="text-xl font-bold text-rose-700">
-              {formatCurrency(overdueTotal, settings.simboloMoneda)}
+              {loading ? '...' : formatCurrency(overdueTotal, settings.simboloMoneda)}
             </h3>
             <span className="text-[11px] text-rose-600">Requiere gestión de cobro</span>
           </div>
@@ -214,10 +319,12 @@ export const CreditsView: React.FC<CreditsViewProps> = ({
           </div>
           <div className="mt-2">
             <h3 className="text-xl font-bold text-emerald-700">
-              {formatCurrency(
-                (credits || []).reduce((acc, c) => acc + (c?.montoPagado || 0), 0),
-                settings.simboloMoneda
-              )}
+              {loading
+                ? '...'
+                : formatCurrency(
+                    (credits || []).reduce((acc, c) => acc + (c?.montoPagado || 0), 0),
+                    settings.simboloMoneda
+                  )}
             </h3>
             <span className="text-[11px] text-[#756E65]">Abonado acumulado</span>
           </div>
@@ -252,6 +359,20 @@ export const CreditsView: React.FC<CreditsViewProps> = ({
 
       {/* Credits Table */}
       <div className="bg-white rounded-3xl border border-[#E4DDD2] overflow-hidden shadow-xs">
+        {loading && credits.length === 0 ? (
+          <div className="text-center py-14 space-y-2 text-[#756E65]">
+            <RefreshCcw className="w-7 h-7 opacity-40 mx-auto animate-spin" />
+            <p className="font-semibold text-xs">Consultando cartera de créditos real en el backend...</p>
+          </div>
+        ) : !loading && !loadError && credits.length === 0 ? (
+          <div className="text-center py-14 space-y-2 text-[#756E65]">
+            <CreditCard className="w-8 h-8 opacity-40 mx-auto" />
+            <p className="font-semibold text-xs text-[#2F2A25]">
+              Todavía no hay cuentas por cobrar en Google Sheets.
+            </p>
+            <p className="text-[11px]">Las ventas a crédito realizadas desde el POS aparecerán aquí automáticamente.</p>
+          </div>
+        ) : (
         <div className="overflow-x-auto">
           <table className="w-full text-xs text-left">
             <thead className="bg-[#F6F1E8] text-[#2F2A25] border-b border-[#E4DDD2] uppercase text-[10px] tracking-wider font-bold">
@@ -279,7 +400,8 @@ export const CreditsView: React.FC<CreditsViewProps> = ({
                       <button
                         type="button"
                         onClick={() => handleOpenSaleReceipt(credit)}
-                        className="hover:underline hover:text-[#2F2A25] text-left"
+                        disabled={loadingSaleReceipt}
+                        className="hover:underline hover:text-[#2F2A25] text-left disabled:opacity-50"
                         title="Ver comprobante de venta original"
                       >
                         {credit.numeroVenta}
@@ -324,7 +446,7 @@ export const CreditsView: React.FC<CreditsViewProps> = ({
                         {credit.saldoPendiente > 0 && (hasPermission('creditos.abonos') || hasPermission('abonos.crear')) && (
                           <button
                             type="button"
-                            onClick={() => setCreditForInstallment(credit)}
+                            onClick={() => setCreditForInstallmentId(credit.id)}
                             className="px-2.5 py-1 rounded-lg bg-[#2F2A25] text-white text-[11px] font-bold hover:bg-[#403932] transition flex items-center gap-1"
                             title="Registrar Abono"
                           >
@@ -334,7 +456,7 @@ export const CreditsView: React.FC<CreditsViewProps> = ({
                         )}
                         <button
                           type="button"
-                          onClick={() => setSelectedCreditDetail(credit)}
+                          onClick={() => setSelectedCreditDetailId(credit.id)}
                           className="p-1.5 rounded-lg text-[#756E65] hover:text-[#2F2A25] hover:bg-[#F6F1E8] transition"
                           title="Ver detalle del estado de cuenta"
                         >
@@ -358,13 +480,14 @@ export const CreditsView: React.FC<CreditsViewProps> = ({
             </tbody>
           </table>
 
-          {(filteredCredits || []).length === 0 && (
+          {credits.length > 0 && (filteredCredits || []).length === 0 && (
             <div className="text-center py-12 text-[#756E65] space-y-2">
               <CreditCard className="w-8 h-8 opacity-40 mx-auto" />
               <p className="font-semibold text-xs text-[#2F2A25]">No hay cuentas por cobrar con estos filtros</p>
             </div>
           )}
         </div>
+        )}
       </div>
 
       {/* Credit Account Detail Modal */}
@@ -383,7 +506,8 @@ export const CreditsView: React.FC<CreditsViewProps> = ({
                   <button
                     type="button"
                     onClick={() => handleOpenSaleReceipt(selectedCreditDetail)}
-                    className="text-[10px] font-bold text-[#2F2A25] underline hover:text-black"
+                    disabled={loadingSaleReceipt}
+                    className="text-[10px] font-bold text-[#2F2A25] underline hover:text-black disabled:opacity-50"
                   >
                     (Ver Factura)
                   </button>
@@ -391,7 +515,7 @@ export const CreditsView: React.FC<CreditsViewProps> = ({
               </div>
               <button
                 type="button"
-                onClick={() => setSelectedCreditDetail(null)}
+                onClick={() => setSelectedCreditDetailId(null)}
                 className="text-[#756E65] p-1 hover:text-[#2F2A25]"
               >
                 <X className="w-5 h-5" />
@@ -426,38 +550,40 @@ export const CreditsView: React.FC<CreditsViewProps> = ({
                 </div>
               </div>
 
-              {/* Installments History */}
+              {/* Installments History -- directamente de credit.abonos, ya
+                  poblado por el backend real (credits.list). */}
               <div>
                 <h5 className="font-bold text-[#2F2A25] uppercase text-[10px] mb-2">
                   Historial de Abonos Recibidos:
                 </h5>
                 <div className="space-y-2">
                   {(() => {
-                    const creditAbonos = (selectedCreditDetail.abonos || []).length > 0
-                      ? selectedCreditDetail.abonos
-                      : (installments || []).filter((inst) => inst && inst.cuentaCobrarId === selectedCreditDetail.id);
-                    
-                    if ((creditAbonos || []).length === 0) {
+                    const creditAbonos = selectedCreditDetail.abonos || [];
+                    if (creditAbonos.length === 0) {
                       return <p className="text-[#756E65] text-[11px] italic">No se han registrado abonos todavía.</p>;
                     }
 
-                    return (creditAbonos || []).map((abono, idx) => {
+                    return creditAbonos.map((abono, idx) => {
                       const recNum = abono.numeroRecibo || abono.numeroAbono || abono.id;
+                      const isVoided = abono.estado === 'ANULADO';
                       return (
                         <div
                           key={idx}
-                          className="p-2.5 bg-white border border-[#E4DDD2] rounded-xl flex items-center justify-between"
+                          className={`p-2.5 bg-white border rounded-xl flex items-center justify-between ${
+                            isVoided ? 'border-rose-200 opacity-60' : 'border-[#E4DDD2]'
+                          }`}
                         >
                           <div>
                             <p className="font-bold text-[#2F2A25]">
                               {recNum} • {abono.metodoPago}
+                              {isVoided && <span className="ml-1.5 text-[9px] text-rose-700 font-bold">ANULADO</span>}
                             </p>
                             <p className="text-[10px] text-[#756E65]">
                               {formatDateTime(abono.fecha)} • Por: {abono.usuarioNombre}
                             </p>
                           </div>
                           <div className="flex items-center gap-2">
-                            <span className="font-bold text-emerald-800">
+                            <span className={`font-bold ${isVoided ? 'text-[#756E65] line-through' : 'text-emerald-800'}`}>
                               {formatCurrency(abono.montoAbonado, settings.simboloMoneda)}
                             </span>
                             <button
@@ -468,6 +594,19 @@ export const CreditsView: React.FC<CreditsViewProps> = ({
                             >
                               <Printer className="w-3.5 h-3.5 text-[#756E65]" />
                             </button>
+                            {!isVoided && hasPermission('creditos.anular_abonos') && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setVoidingAbono(abono);
+                                  setVoidAbonoReason('');
+                                }}
+                                className="p-1 rounded-lg text-rose-600 hover:bg-rose-50 border border-rose-200"
+                                title="Anular abono"
+                              >
+                                <Ban className="w-3.5 h-3.5" />
+                              </button>
+                            )}
                           </div>
                         </div>
                       );
@@ -480,7 +619,7 @@ export const CreditsView: React.FC<CreditsViewProps> = ({
             <div className="flex gap-2 pt-2">
               <button
                 type="button"
-                onClick={() => setSelectedCreditDetail(null)}
+                onClick={() => setSelectedCreditDetailId(null)}
                 className="flex-1 py-2 rounded-xl bg-white border border-[#E4DDD2] text-xs font-semibold text-[#756E65]"
               >
                 Cerrar
@@ -489,8 +628,8 @@ export const CreditsView: React.FC<CreditsViewProps> = ({
                 <button
                   type="button"
                   onClick={() => {
-                    setCreditForInstallment(selectedCreditDetail);
-                    setSelectedCreditDetail(null);
+                    setCreditForInstallmentId(selectedCreditDetail.id);
+                    setSelectedCreditDetailId(null);
                   }}
                   className="flex-1 py-2 rounded-xl bg-[#2F2A25] text-xs font-bold text-white flex items-center justify-center gap-1.5"
                 >
@@ -507,13 +646,67 @@ export const CreditsView: React.FC<CreditsViewProps> = ({
       {creditForInstallment && (
         <InstallmentModal
           credit={creditForInstallment}
-          onClose={() => setCreditForInstallment(null)}
-          onSuccess={() => {
-            setCreditForInstallment(null);
-            setCredits(storageService.getCredits());
-            setInstallments(storageService.getInstallments());
+          onClose={() => setCreditForInstallmentId(null)}
+          onSuccess={async () => {
+            setCreditForInstallmentId(null);
+            // CORREGIR AUDITORÍA (§6 "Créditos y abonos"): invalida
+            // créditos y clientes -- InstallmentsView/Dashboard/Reportes/
+            // POS reflejan el nuevo saldo de inmediato, sin logout/login
+            // ni F5.
+            await Promise.all([refreshCredits({ force: true }), refreshCustomers({ force: true })]);
           }}
         />
+      )}
+
+      {/* Void Abono Reason Modal */}
+      {voidingAbono && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-xs z-50 flex items-center justify-center p-4">
+          <div className="bg-[#FAF8F4] border border-[#E4DDD2] rounded-3xl max-w-md w-full p-5 space-y-4 shadow-2xl">
+            <div className="flex items-center gap-3 text-rose-800 font-bold text-sm border-b border-[#E4DDD2] pb-3">
+              <AlertTriangle className="w-5 h-5 text-rose-600" />
+              <span>Anular Abono {voidingAbono.numeroRecibo || voidingAbono.numeroAbono}</span>
+            </div>
+
+            <p className="text-xs text-[#756E65] leading-relaxed">
+              Esta acción restaurará el saldo pendiente de la cuenta por{' '}
+              {formatCurrency(voidingAbono.montoAbonado, settings.simboloMoneda)}, y revertirá el
+              efecto en caja si el abono fue cobrado en efectivo.
+            </p>
+
+            <div>
+              <label className="block text-xs font-bold text-[#2F2A25] mb-1 uppercase">
+                Motivo de Anulación:
+              </label>
+              <textarea
+                rows={3}
+                required
+                value={voidAbonoReason}
+                onChange={(e) => setVoidAbonoReason(e.target.value)}
+                placeholder="Ej. Abono registrado por error / Duplicado"
+                className="w-full p-2.5 rounded-xl border border-[#E4DDD2] bg-white text-xs text-[#2F2A25] focus:outline-none focus:border-rose-600"
+              />
+            </div>
+
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => setVoidingAbono(null)}
+                disabled={loadingVoidAbono}
+                className="flex-1 py-2 rounded-xl bg-white border border-[#E4DDD2] text-xs font-semibold text-[#756E65]"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={loadingVoidAbono || !voidAbonoReason.trim()}
+                onClick={handleConfirmVoidAbono}
+                className="flex-1 py-2 rounded-xl bg-rose-700 hover:bg-rose-800 text-xs font-bold text-white transition disabled:bg-zinc-300"
+              >
+                {loadingVoidAbono ? 'Anulando...' : 'Confirmar Anulación'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Installment Thermal Receipt Modal */}

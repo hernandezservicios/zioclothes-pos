@@ -1,6 +1,6 @@
-import React, { useState, useMemo } from 'react';
-import { storageService } from '../../services/storageService';
+import React, { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
+import { useDataStore } from '../../context/DataStoreContext';
 import { useToast } from '../../context/ToastContext';
 import { formatCurrency } from '../../utils/formatters';
 import { exportToCSV } from '../../utils/exportUtils';
@@ -25,6 +25,8 @@ import {
   Package,
   Users,
   CreditCard,
+  AlertTriangle,
+  RefreshCcw,
 } from 'lucide-react';
 
 const COLORS = ['#2F2A25', '#C2410C', '#059669', '#2563EB', '#D97706', '#9333EA'];
@@ -35,22 +37,48 @@ export const ReportsView: React.FC = () => {
 
   const [timeRange, setTimeRange] = useState<'HOY' | 'SEMANA' | 'MES' | 'TODO'>('MES');
 
-  const sales = (storageService.getSales() || []).filter((s) => s && s.estado === 'COMPLETADA');
-  const expenses = storageService.getExpenses() || [];
-  const credits = storageService.getCredits() || [];
-  const installments = storageService.getInstallments() || [];
+  // FASE 3.7A/3.7B/3.7E / CORREGIR AUDITORÍA: ventas, créditos y gastos
+  // reales, ahora leídos del DataStore central -- la MISMA colección que
+  // consumen SalesView/ReturnsView/Dashboard (ventas),
+  // CreditsView/InstallmentsView/Dashboard (créditos) y ExpensesView
+  // (gastos). Antes cada uno de estos 3 dominios se pedía por separado
+  // desde este componente (una de las 3-4 llamadas independientes a cada
+  // endpoint detectadas en el informe de auditoría).
+  const {
+    sales: rawSales,
+    salesLoading,
+    salesError,
+    refreshSales,
+    credits: rawCredits,
+    creditsLoading,
+    creditsError,
+    refreshCredits,
+    expenses: rawExpenses,
+    expensesLoading,
+    expensesError,
+    refreshExpenses,
+  } = useDataStore();
+
+  useEffect(() => {
+    refreshSales();
+    refreshCredits();
+    refreshExpenses();
+  }, [refreshSales, refreshCredits, refreshExpenses]);
+
+  const sales = (rawSales || []).filter((s) => s && s.estado === 'COMPLETADA');
+  const expenses = rawExpenses || [];
+  const credits = rawCredits || [];
+  const installments = (rawCredits || []).flatMap((c) => c.abonos || []).filter((i) => i && i.estado !== 'ANULADO');
 
   // Metrics Calculation
   const totalSalesRevenue = sales.reduce((acc, s) => acc + (s.total || 0), 0);
-  const totalCOGS = sales.reduce((acc, s) => {
-    return (
-      acc +
-      (s.items || []).reduce((sum, item) => {
-        const itemCost = ((item.costoUnitario !== undefined ? item.costoUnitario : item.precioUnitario * 0.5)) * (item.cantidad || 0);
-        return sum + itemCost;
-      }, 0)
-    );
-  }, 0);
+  // FASE 3.7A: antes, cuando faltaba costoUnitario en un item, se asumía
+  // un margen del 50% (item.precioUnitario * 0.5) -- un dato financiero
+  // inventado. sales.list ya devuelve costoTotal real por venta (calculado
+  // autoritativamente en el backend al crear la venta desde el costo real
+  // de la variante), así que se usa directamente sin recalcular ni asumir
+  // nada a nivel de item.
+  const totalCOGS = sales.reduce((acc, s) => acc + (s.costoTotal || 0), 0);
 
   const grossProfit = totalSalesRevenue - totalCOGS;
   const grossMargin = totalSalesRevenue > 0 ? (grossProfit / totalSalesRevenue) * 100 : 0;
@@ -132,12 +160,46 @@ export const ReportsView: React.FC = () => {
         </div>
       </div>
 
+      {/* Error real del backend de ventas -- nunca se sustituye por datos demo/locales */}
+      {salesError && (
+        <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            <span>No se pudieron cargar las ventas reales para este reporte: {salesError}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => refreshSales({ force: true })}
+            className="px-3 py-1.5 rounded-lg bg-rose-700 text-white font-bold text-[11px] shrink-0 flex items-center gap-1.5"
+          >
+            <RefreshCcw className="w-3.5 h-3.5" />
+            Reintentar
+          </button>
+        </div>
+      )}
+      {expensesError && (
+        <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            <span>No se pudieron cargar los gastos reales para este reporte: {expensesError}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => refreshExpenses({ force: true })}
+            className="px-3 py-1.5 rounded-lg bg-rose-700 text-white font-bold text-[11px] shrink-0 flex items-center gap-1.5"
+          >
+            <RefreshCcw className="w-3.5 h-3.5" />
+            Reintentar
+          </button>
+        </div>
+      )}
+
       {/* Financial Statement P&L Summary Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <div className="p-4 bg-white rounded-2xl border border-[#E4DDD2] shadow-xs">
           <span className="text-[11px] font-bold uppercase text-[#756E65]">Ventas Totales</span>
           <p className="text-xl font-serif font-bold text-[#2F2A25] mt-1">
-            {formatCurrency(totalSalesRevenue, settings.simboloMoneda)}
+            {salesLoading ? '...' : formatCurrency(totalSalesRevenue, settings.simboloMoneda)}
           </p>
           <span className="text-[10px] text-emerald-700 font-semibold">{sales.length} transacciones</span>
         </div>
@@ -147,17 +209,17 @@ export const ReportsView: React.FC = () => {
             <div className="p-4 bg-white rounded-2xl border border-[#E4DDD2] shadow-xs">
               <span className="text-[11px] font-bold uppercase text-[#756E65]">Ganancia Bruta (Margen)</span>
               <p className="text-xl font-serif font-bold text-emerald-800 mt-1">
-                {formatCurrency(grossProfit, settings.simboloMoneda)}
+                {salesLoading ? '...' : formatCurrency(grossProfit, settings.simboloMoneda)}
               </p>
               <span className="text-[10px] text-emerald-700 font-semibold">
-                Margen Bruto: {grossMargin.toFixed(1)}%
+                Margen Bruto: {salesLoading ? '...' : `${grossMargin.toFixed(1)}%`}
               </span>
             </div>
 
             <div className="p-4 bg-white rounded-2xl border border-[#E4DDD2] shadow-xs">
               <span className="text-[11px] font-bold uppercase text-[#756E65]">Gastos Operativos</span>
               <p className="text-xl font-serif font-bold text-rose-800 mt-1">
-                -{formatCurrency(totalExpenses, settings.simboloMoneda)}
+                {expensesLoading ? '...' : `-${formatCurrency(totalExpenses, settings.simboloMoneda)}`}
               </p>
               <span className="text-[10px] text-rose-700 font-semibold">{expenses.length} gastos registrados</span>
             </div>
@@ -165,7 +227,7 @@ export const ReportsView: React.FC = () => {
             <div className="p-4 bg-emerald-50 rounded-2xl border border-emerald-200 shadow-xs">
               <span className="text-[11px] font-bold uppercase text-emerald-800">Ganancia Neta Real</span>
               <p className="text-xl font-serif font-bold text-emerald-950 mt-1">
-                {formatCurrency(netProfit, settings.simboloMoneda)}
+                {salesLoading || expensesLoading ? '...' : formatCurrency(netProfit, settings.simboloMoneda)}
               </p>
               <span className="text-[10px] text-emerald-700 font-semibold">Utilidad final neta</span>
             </div>
@@ -173,28 +235,44 @@ export const ReportsView: React.FC = () => {
         )}
       </div>
 
-      {/* Credit Cartera Health */}
+      {/* Credit Cartera Health -- FASE 3.7B: conectado a credits.list real
+          (DataStore central). */}
+      {creditsError && (
+        <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            <span>No se pudo cargar la cartera real de créditos para este reporte: {creditsError}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => refreshCredits({ force: true })}
+            className="px-3 py-1.5 rounded-lg bg-rose-700 text-white font-bold text-[11px] shrink-0 flex items-center gap-1.5"
+          >
+            <RefreshCcw className="w-3.5 h-3.5" />
+            Reintentar
+          </button>
+        </div>
+      )}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <div className="p-4 bg-white rounded-2xl border border-[#E4DDD2]">
           <span className="text-[10px] font-bold text-[#756E65] uppercase">Total Créditos Concedidos</span>
           <p className="text-base font-bold text-[#2F2A25] mt-1">
-            {formatCurrency(totalCreditIssued, settings.simboloMoneda)}
+            {creditsLoading ? '...' : formatCurrency(totalCreditIssued, settings.simboloMoneda)}
           </p>
         </div>
         <div className="p-4 bg-white rounded-2xl border border-[#E4DDD2]">
           <span className="text-[10px] font-bold text-emerald-700 uppercase">Abonos Recaudados</span>
           <p className="text-base font-bold text-emerald-800 mt-1">
-            {formatCurrency(totalCreditCollected, settings.simboloMoneda)}
+            {creditsLoading ? '...' : formatCurrency(totalCreditCollected, settings.simboloMoneda)}
           </p>
         </div>
         <div className="p-4 bg-white rounded-2xl border border-[#E4DDD2]">
           <span className="text-[10px] font-bold text-amber-800 uppercase">Cartera Pendiente de Cobro</span>
           <p className="text-base font-bold text-amber-900 mt-1">
-            {formatCurrency(totalPendingDebt, settings.simboloMoneda)}
+            {creditsLoading ? '...' : formatCurrency(totalPendingDebt, settings.simboloMoneda)}
           </p>
         </div>
       </div>
-
       {/* Charts Section */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Sales by Category */}

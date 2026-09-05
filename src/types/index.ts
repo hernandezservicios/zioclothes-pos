@@ -178,6 +178,17 @@ export interface Customer {
   notas?: string;
   estado: 'ACTIVO' | 'INACTIVO' | 'BLOQUEADO';
   fechaCreacion: string;
+  // FASE 3.7B (Sección 11): customers.list / system.getBootstrapData
+  // (CustomersController.handleListCustomers) SIEMPRE calculan y devuelven
+  // estos dos campos para cada cliente real (deuda activa agregada desde
+  // Creditos, y limiteCredito - deuda). Se declaran opcionales -- no
+  // requeridos -- únicamente porque el seed de demostración no usado
+  // (seedData.ts/INITIAL_CUSTOMERS) no los define; cualquier cliente que
+  // realmente provenga del backend real siempre los trae. Antes solo
+  // existían en CustomerWithCredit (customersApi.ts), obligando a un cast
+  // manual en PaymentModal.tsx para leerlos desde un Customer normal.
+  saldoPendiente?: number;
+  creditoDisponible?: number;
 }
 
 export type PaymentMethodType = 'EFECTIVO' | 'TARJETA' | 'TRANSFERENCIA' | 'CREDITO' | 'PAGO_MOVIL' | 'MIXTO';
@@ -297,15 +308,21 @@ export type ExpenseRecord = Expense;
 export type PurchaseOrder = Purchase;
 export type ExpenseCategory = Category;
 
+// FASE 3.7C: corregido para reflejar los valores que el backend real
+// realmente escribe en Inventario_Kardex (SalesController -> 'VENTA',
+// ReturnsController -> 'DEVOLUCION', PurchasesController -> 'COMPRA',
+// InventoryController.handleAdjustStock -> 'ENTRADA'/'SALIDA'/'AJUSTE').
+// Los valores anteriores (AJUSTE_POSITIVO, AJUSTE_NEGATIVO, MERMA_DANIO,
+// CORRECCION, INICIAL) nunca fueron escritos por ningún controlador real
+// -- solo existían en el método local ya desconectado apiService.
+// adjustInventory y en este tipo, sin correspondencia con Sheets.
 export type InventoryMovementType =
-  | 'COMPRA'
   | 'VENTA'
   | 'DEVOLUCION'
-  | 'AJUSTE_POSITIVO'
-  | 'AJUSTE_NEGATIVO'
-  | 'MERMA_DANIO'
-  | 'CORRECCION'
-  | 'INICIAL';
+  | 'COMPRA'
+  | 'ENTRADA'
+  | 'SALIDA'
+  | 'AJUSTE';
 
 export interface InventoryMovement {
   id: string;
@@ -329,7 +346,10 @@ export interface InventoryMovement {
 export interface CashMovement {
   id: string;
   cajaSesionId: string;
-  tipo: 'INGRESO' | 'RETIRO' | 'GASTO' | 'VENTA_EFECTIVO' | 'ABONO_EFECTIVO' | 'DEVOLUCION_EFECTIVO';
+  // FASE 3.7B: agregado REVERSION_ABONO -- CreditsController.handleVoidAbono
+  // ahora revierte el efecto en caja de un abono en efectivo anulado con
+  // este tipo de movimiento (ver CreditsController.gs).
+  tipo: 'INGRESO' | 'RETIRO' | 'GASTO' | 'VENTA_EFECTIVO' | 'ABONO_EFECTIVO' | 'DEVOLUCION_EFECTIVO' | 'REVERSION_ABONO';
   monto: number;
   motivo: string;
   categoriaGasto?: string;
@@ -386,6 +406,7 @@ export interface PurchaseItem {
   productoId: string;
   varianteId: string;
   nombreProducto: string;
+  sku?: string;
   talla: string;
   color: string;
   cantidad: number;
@@ -410,15 +431,26 @@ export interface Purchase {
   notas?: string;
 }
 
+// FASE 3.7F: corregido para reflejar exactamente lo que
+// ReturnsController.recalculateReturnAuthoritatively realmente calcula y
+// persiste en Devoluciones.items_json -- `saleItemId` nunca existió en el
+// backend real (las líneas se identifican por varianteId, no por un id de
+// renglón de venta); `sku`/`costoUnitario`/`descuentoMonto`/
+// `impuestoMonto`/`subtotal` sí se calculan y devuelven, pero no estaban
+// declarados.
 export interface ReturnItem {
-  saleItemId: string;
   productoId: string;
   varianteId: string;
   nombreProducto: string;
+  sku?: string;
   talla: string;
   color: string;
   cantidad: number;
   precioUnitario: number;
+  costoUnitario?: number;
+  descuentoMonto?: number;
+  impuestoMonto?: number;
+  subtotal?: number;
   total: number;
 }
 
@@ -516,6 +548,19 @@ export interface SystemSettings {
   modoConexion: 'LOCAL_HYBRID' | 'APPS_SCRIPT_DIRECT';
   impresionAutomatica: boolean;
   sonidosHabilitados: boolean;
+}
+
+/**
+ * FASE 3.6 / PARTE 5 (Hydration-First): estado de trabajo del POS
+ * persistido para sobrevivir un F5. Es solo conveniencia de UX -- nunca
+ * fuente de verdad de stock, precio o venta.
+ */
+export interface PosWorkingState {
+  cartItems: SaleItem[];
+  selectedCustomerId?: string;
+  discountType: 'PORCENTAJE' | 'MONTO';
+  overallDiscountValue: number;
+  applyTax: boolean;
 }
 
 export interface ToastNotification {

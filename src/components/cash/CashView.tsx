@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { CashSession, CashMovement } from '../../types';
 import { storageService } from '../../services/storageService';
-import { apiService } from '../../services/apiService';
+import { cashApi } from '../../services/cashApi';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { formatCurrency, formatDateTime } from '../../utils/formatters';
@@ -23,12 +23,14 @@ import {
 } from 'lucide-react';
 
 export const CashView: React.FC = () => {
-  const { currentUser, settings, hasPermission } = useAuth();
+  const { currentUser, settings, hasPermission, activeCashSession, refreshActiveCashSession } = useAuth();
   const { showToast } = useToast();
 
-  const [activeSession, setActiveSession] = useState<CashSession | null>(() =>
-    storageService.getActiveCashSession()
-  );
+  // FASE 3.6 (Parte 4): la sesión activa real vive en AuthContext
+  // (respaldada por cash.getActiveSession contra el backend real), no en
+  // storageService local. El historial de cierres pasados sigue siendo
+  // local por ahora (fuera de alcance de esta corrección).
+  const activeSession = activeCashSession || null;
   const [pastSessions, setPastSessions] = useState<CashSession[]>(() =>
     (storageService.getCashSessions() || []).filter((s) => s.estado === 'CERRADA')
   );
@@ -53,13 +55,7 @@ export const CashView: React.FC = () => {
 
   const [loading, setLoading] = useState(false);
 
-  // Refresh active session data
-  const refreshActiveSession = () => {
-    setActiveSession(storageService.getActiveCashSession());
-    setPastSessions((storageService.getCashSessions() || []).filter((s) => s.estado === 'CERRADA'));
-  };
-
-  // Open Cash Register
+  // Open Cash Register — FASE 3.6: contra el backend real (cash.open)
   const handleOpenCash = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!currentUser) return;
@@ -72,10 +68,8 @@ export const CashView: React.FC = () => {
     }
 
     setLoading(true);
-    const res = await apiService.openCashSession({
+    const res = await cashApi.openSession({
       montoInicial: initialAmount,
-      usuarioId: currentUser.id,
-      usuarioNombre: `${currentUser.nombre} ${currentUser.apellido}`,
       cajaNombre: 'Caja Principal Boutique',
     });
     setLoading(false);
@@ -83,7 +77,7 @@ export const CashView: React.FC = () => {
     if (res.success && res.data) {
       sounds.playSuccess();
       showToast('Caja Abierta', res.message, 'exito');
-      setActiveSession(res.data);
+      await refreshActiveCashSession();
       setOpenModalOpen(false);
     } else {
       sounds.playError();
@@ -91,7 +85,7 @@ export const CashView: React.FC = () => {
     }
   };
 
-  // Close Cash Register
+  // Close Cash Register — FASE 3.6: contra el backend real (cash.close)
   const handleCloseCash = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!activeSession || !currentUser) return;
@@ -104,28 +98,43 @@ export const CashView: React.FC = () => {
     }
 
     setLoading(true);
-    const res = await apiService.closeCashSession({
-      sessionId: activeSession.id,
-      montoCierreReal: closeAmount,
-      notasCierre: notasCierre.trim() || undefined,
-      usuarioId: currentUser.id,
-      usuarioNombre: `${currentUser.nombre} ${currentUser.apellido}`,
+    const res = await cashApi.closeSession({
+      efectivoRealContado: closeAmount,
+      observacionCierre: notasCierre.trim() || undefined,
     });
     setLoading(false);
 
     if (res.success && res.data) {
       sounds.playSuccess();
       showToast('Caja Cerrada', res.message, 'exito');
-      setReceiptSession(res.data);
+      // El ticket de cierre usa el último estado conocido de la sesión
+      // (activeSession) combinado con los totales finales del cierre real.
+      if (activeSession) {
+        setReceiptSession({
+          ...activeSession,
+          estado: 'CERRADA',
+          efectivoEsperado: res.data.efectivoEsperado,
+          efectivoRealContado: res.data.efectivoRealContado,
+          montoCierreReal: res.data.efectivoRealContado,
+          diferencia: res.data.diferencia,
+          fechaCierre: new Date().toISOString().replace('T', ' ').substring(0, 19),
+          observacionCierre: notasCierre.trim(),
+        });
+        setPastSessions((prev) => [
+          { ...activeSession, estado: 'CERRADA', efectivoRealContado: res.data!.efectivoRealContado, diferencia: res.data!.diferencia },
+          ...prev,
+        ]);
+      }
       setCloseModalOpen(false);
-      refreshActiveSession();
+      await refreshActiveCashSession();
     } else {
       sounds.playError();
       showToast('Error', res.message, 'error');
     }
   };
 
-  // Register Cash Movement (Ingreso o Retiro)
+  // Register Cash Movement (Ingreso o Retiro) — FASE 3.6: contra el
+  // backend real (cash.addMovement)
   const handleAddMovement = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!activeSession || !currentUser) return;
@@ -143,20 +152,17 @@ export const CashView: React.FC = () => {
     }
 
     setLoading(true);
-    const res = await apiService.addCashMovement({
-      sessionId: activeSession.id,
-      tipo: movementType,
+    const res = await cashApi.addMovement({
+      tipo: movementType === 'ENTRADA' ? 'INGRESO' : 'RETIRO',
       monto: moveAmount,
       motivo: movementReason.trim(),
-      usuarioId: currentUser.id,
-      usuarioNombre: `${currentUser.nombre} ${currentUser.apellido}`,
     });
     setLoading(false);
 
     if (res.success) {
       showToast('Movimiento Registrado', res.message, 'exito');
       setMovementModalOpen(false);
-      refreshActiveSession();
+      await refreshActiveCashSession();
     } else {
       showToast('Error', res.message, 'error');
     }

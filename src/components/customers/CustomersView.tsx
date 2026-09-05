@@ -1,7 +1,8 @@
-import React, { useState, useMemo } from 'react';
-import { Customer, CreditAccount, Sale } from '../../types';
-import { storageService } from '../../services/storageService';
+import React, { useState, useMemo, useEffect } from 'react';
+import { Customer } from '../../types';
+import { customersApi, CustomerWithCredit } from '../../services/customersApi';
 import { useAuth } from '../../context/AuthContext';
+import { useDataStore } from '../../context/DataStoreContext';
 import { useToast } from '../../context/ToastContext';
 import { formatCurrency, formatDateTime } from '../../utils/formatters';
 import { exportToCSV } from '../../utils/exportUtils';
@@ -20,20 +21,43 @@ import {
   X,
   CheckCircle2,
   AlertTriangle,
+  RefreshCw,
 } from 'lucide-react';
 
+/**
+ * FASE 3.6B (corrección de fuente de datos): Clientes vienen
+ * EXCLUSIVAMENTE de customersApi (backend real, ver
+ * CustomersController.gs). Sin fallback local, sin datos demo. El saldo
+ * pendiente / crédito disponible que se muestra viene YA calculado por el
+ * backend desde Creditos real (customers.list) -- no se recalcula aquí a
+ * partir de datos locales.
+ */
 export const CustomersView: React.FC = () => {
   const { settings, hasPermission } = useAuth();
   const { showToast } = useToast();
 
-  const [customers, setCustomers] = useState<Customer[]>(() => storageService.getCustomers() || []);
-  const credits = storageService.getCredits() || [];
-  const sales = storageService.getSales() || [];
+  // CORREGIR AUDITORÍA: clientes ya no viven en un estado local propio de
+  // esta vista -- se leen del DataStore central, la MISMA colección que
+  // también consume POSView (selector de cliente) y que Créditos/Abonos
+  // invalidan tras registrar/anular un abono (saldoPendiente/
+  // creditoDisponible se recalculan server-side desde Creditos real).
+  const {
+    customers,
+    customersLoading: loading,
+    customersError: error,
+    customersStale,
+    refreshCustomers,
+  } = useDataStore();
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    refreshCustomers();
+  }, [refreshCustomers]);
 
   const [searchQuery, setSearchQuery] = useState('');
   const [modalOpen, setModalOpen] = useState(false);
   const [editingCustomer, setEditingCustomer] = useState<Customer | null>(null);
-  const [viewingCustomer, setViewingCustomer] = useState<Customer | null>(null);
+  const [viewingCustomer, setViewingCustomer] = useState<CustomerWithCredit | null>(null);
 
   // Form Fields
   const [nombre, setNombre] = useState('');
@@ -89,10 +113,17 @@ export const CustomersView: React.FC = () => {
     setModalOpen(true);
   };
 
-  const handleSaveCustomer = (e: React.FormEvent) => {
+  // FASE 3.6B: contra customers.save real (CustomersController.gs). El
+  // modal permanece abierto si falla, y se recarga la lista completa
+  // desde el backend tras un éxito.
+  const handleSaveCustomer = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!nombre.trim()) {
       showToast('Nombre Requerido', 'Debe ingresar el nombre del cliente.', 'error');
+      return;
+    }
+    if (!telefono.trim()) {
+      showToast('Teléfono Requerido', 'Debe ingresar el teléfono del cliente.', 'error');
       return;
     }
 
@@ -102,49 +133,35 @@ export const CustomersView: React.FC = () => {
     const safeLimite = Number.isFinite(numLimite) && numLimite >= 0 ? numLimite : 0;
     const safeDias = Number.isFinite(numDias) && numDias >= 0 ? numDias : 30;
 
-    if (editingCustomer) {
-      const updated = (customers || []).map((c) => {
-        if (c.id === editingCustomer.id) {
-          return {
-            ...c,
-            nombre: nombre.trim(),
-            apellido: apellido.trim(),
-            documento: documento.trim() || 'N/A',
-            telefono: telefono.trim() || 'N/A',
-            correo: correo.trim() || 'N/A',
-            direccion: direccion.trim() || 'N/A',
-            ciudad: ciudad.trim(),
-            limiteCredito: safeLimite,
-            diasCreditoPorDefecto: safeDias,
-          };
-        }
-        return c;
-      });
-      storageService.saveCustomers(updated);
-      setCustomers(updated);
-      showToast('Cliente Actualizado', `Se guardaron los datos de ${nombre}`, 'exito');
-    } else {
-      const newCust: Customer = {
-        id: storageService.getNextSequence('CLI'),
-        nombre: nombre.trim(),
-        apellido: apellido.trim(),
-        documento: documento.trim() || 'N/A',
-        telefono: telefono.trim() || 'N/A',
-        correo: correo.trim() || 'N/A',
-        direccion: direccion.trim() || 'N/A',
-        ciudad: ciudad.trim(),
-        limiteCredito: safeLimite,
-        diasCreditoPorDefecto: safeDias,
-        estado: 'ACTIVO',
-        fechaCreacion: new Date().toISOString().replace('T', ' ').substring(0, 19),
-      };
-      const updated = [newCust, ...(customers || [])];
-      storageService.saveCustomers(updated);
-      setCustomers(updated);
-      showToast('Cliente Registrado', `${newCust.nombre} agregado al directorio`, 'exito');
+    setSaving(true);
+    const res = await customersApi.save({
+      id: editingCustomer ? editingCustomer.id : undefined,
+      nombre: nombre.trim(),
+      apellido: apellido.trim(),
+      documento: documento.trim(),
+      telefono: telefono.trim(),
+      correo: correo.trim(),
+      direccion: direccion.trim(),
+      ciudad: ciudad.trim(),
+      limiteCredito: safeLimite,
+      diasCreditoPorDefecto: safeDias,
+    });
+    setSaving(false);
+
+    if (!res.success) {
+      showToast('Error al Guardar', res.message || 'No se pudo guardar el cliente en el backend.', 'error');
+      return; // El modal permanece abierto para reintentar.
     }
 
+    showToast(
+      editingCustomer ? 'Cliente Actualizado' : 'Cliente Registrado',
+      res.message || `${nombre} guardado exitosamente en Google Sheets.`,
+      'exito'
+    );
     setModalOpen(false);
+    // CORREGIR AUDITORÍA: invalida el DataStore central -- el POS ve el
+    // cliente nuevo/editado de inmediato, sin logout/login ni F5.
+    await refreshCustomers({ force: true });
   };
 
   const handleExportCSV = () => {
@@ -179,6 +196,16 @@ export const CustomersView: React.FC = () => {
         <div className="flex items-center gap-2.5">
           <button
             type="button"
+            onClick={() => refreshCustomers({ force: true })}
+            disabled={loading}
+            className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-white border border-[#E4DDD2] text-xs font-semibold text-[#2F2A25] hover:bg-[#F6F1E8] transition shadow-2xs disabled:opacity-50"
+          >
+            <RefreshCw className={`w-4 h-4 text-[#756E65] ${loading ? 'animate-spin' : ''}`} />
+            <span>{loading ? 'Cargando...' : 'Recargar'}</span>
+          </button>
+
+          <button
+            type="button"
             onClick={handleExportCSV}
             className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-white border border-[#E4DDD2] text-xs font-semibold text-[#2F2A25] hover:bg-[#F6F1E8] transition shadow-2xs"
           >
@@ -198,6 +225,32 @@ export const CustomersView: React.FC = () => {
           )}
         </div>
       </div>
+
+      {/* FASE 3.6B: estado de error explícito con Retry -- nunca cae a
+          datos demo/locales. */}
+      {error && (
+        <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5 text-rose-800">
+            <AlertTriangle className="w-5 h-5 shrink-0" />
+            <div>
+              <p className="font-bold text-xs">No se pudo cargar el directorio desde el backend</p>
+              <p className="text-[11px]">{error}</p>
+              {customersStale && (
+                <p className="text-[11px] mt-1 font-semibold text-rose-900">
+                  La tabla de abajo muestra la última información disponible -- no se pudo confirmar si sigue siendo la actual.
+                </p>
+              )}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => refreshCustomers({ force: true })}
+            className="px-3.5 py-2 rounded-xl bg-rose-700 hover:bg-rose-800 text-white text-xs font-bold shrink-0"
+          >
+            Reintentar
+          </button>
+        </div>
+      )}
 
       {/* Search Bar */}
       <div className="p-4 rounded-2xl bg-white border border-[#E4DDD2] flex items-center justify-between shadow-2xs">
@@ -230,14 +283,13 @@ export const CustomersView: React.FC = () => {
             </thead>
             <tbody className="divide-y divide-[#E4DDD2]/60">
               {(filteredCustomers || []).map((cust) => {
-                const customerCredits = (credits || []).filter(
-                  (c) =>
-                    c &&
-                    c.clienteId === cust.id &&
-                    (c.estado === 'PENDIENTE' || c.estado === 'PARCIAL' || c.estado === 'VENCIDA')
-                );
-                const currentDebt = customerCredits.reduce((acc, c) => acc + (c.saldoPendiente || 0), 0);
-                const hasOverdue = customerCredits.some((c) => c.estado === 'VENCIDA');
+                // FASE 3.6B: saldoPendiente ya viene calculado por el
+                // backend (customers.list, agregado real desde Creditos)
+                // -- no se recalcula a partir de datos locales. El estado
+                // "vencida" por cuenta individual requeriría credits.list
+                // (fuera de alcance de esta corrección), así que el badge
+                // se simplifica a dos estados honestos: con o sin deuda.
+                const currentDebt = cust.saldoPendiente;
 
                 return (
                   <tr key={cust.id} className="hover:bg-[#FAF8F4]/80 transition">
@@ -263,16 +315,10 @@ export const CustomersView: React.FC = () => {
                         className={`text-[10px] font-bold px-2.5 py-0.5 rounded-full border ${
                           currentDebt === 0
                             ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                            : hasOverdue
-                            ? 'bg-rose-50 text-rose-800 border-rose-200'
                             : 'bg-amber-50 text-amber-900 border-amber-200'
                         }`}
                       >
-                        {currentDebt === 0
-                          ? 'Al Día (Sin Deuda)'
-                          : hasOverdue
-                          ? 'Vencida en Mora'
-                          : 'Con Crédito Activo'}
+                        {currentDebt === 0 ? 'Al Día (Sin Deuda)' : 'Con Crédito Activo'}
                       </span>
                     </td>
                     <td className="py-3.5 px-4 text-center">
@@ -303,10 +349,23 @@ export const CustomersView: React.FC = () => {
             </tbody>
           </table>
 
-          {(filteredCustomers || []).length === 0 && (
+          {loading && customers.length === 0 && (
+            <div className="text-center py-12 text-[#756E65] space-y-2">
+              <RefreshCw className="w-8 h-8 opacity-40 mx-auto animate-spin" />
+              <p className="font-semibold text-xs text-[#2F2A25]">Cargando directorio desde Google Sheets...</p>
+            </div>
+          )}
+
+          {/* FASE 3.6B: estado vacío honesto -- nunca se rellena con datos
+              demo si el backend devuelve []. */}
+          {!loading && !error && (filteredCustomers || []).length === 0 && (
             <div className="text-center py-12 text-[#756E65] space-y-2">
               <Users className="w-8 h-8 opacity-40 mx-auto" />
-              <p className="font-semibold text-xs text-[#2F2A25]">No se encontraron clientes</p>
+              <p className="font-semibold text-xs text-[#2F2A25]">
+                {customers.length === 0
+                  ? 'El directorio de clientes está vacío en Google Sheets'
+                  : 'No se encontraron clientes con ese filtro'}
+              </p>
             </div>
           )}
         </div>
@@ -433,15 +492,17 @@ export const CustomersView: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setModalOpen(false)}
-                  className="flex-1 py-2 rounded-xl bg-white border border-[#E4DDD2] text-xs font-semibold text-[#756E65]"
+                  disabled={saving}
+                  className="flex-1 py-2 rounded-xl bg-white border border-[#E4DDD2] text-xs font-semibold text-[#756E65] disabled:opacity-50"
                 >
                   Cancelar
                 </button>
                 <button
                   type="submit"
-                  className="flex-1 py-2 rounded-xl bg-[#2F2A25] text-xs font-bold text-white shadow-md hover:bg-[#403932]"
+                  disabled={saving}
+                  className="flex-1 py-2 rounded-xl bg-[#2F2A25] text-xs font-bold text-white shadow-md hover:bg-[#403932] disabled:opacity-60 disabled:cursor-not-allowed"
                 >
-                  Guardar Cliente
+                  {saving ? 'Guardando...' : 'Guardar Cliente'}
                 </button>
               </div>
             </form>
@@ -485,33 +546,33 @@ export const CustomersView: React.FC = () => {
                 </p>
               </div>
 
-              {/* Credit Accounts for this customer */}
-              <div>
-                <h5 className="font-bold text-[#2F2A25] uppercase text-[10px] mb-2">
-                  Cuentas por Cobrar Registradas:
+              {/* FASE 3.6B: resumen de crédito real (customers.list ya lo
+                  calcula desde Creditos en el backend). El detalle por
+                  cuenta individual (número, vencimiento, estado) requiere
+                  credits.list, fuera de alcance de esta corrección -- no
+                  se muestra una lista inventada. */}
+              <div className="p-3.5 bg-white rounded-2xl border border-[#E4DDD2] space-y-1.5">
+                <h5 className="font-bold text-[#2F2A25] uppercase text-[10px] mb-1">
+                  Resumen de Crédito (Google Sheets):
                 </h5>
-                <div className="space-y-2">
-                  {credits
-                    .filter((c) => c.clienteId === viewingCustomer.id)
-                    .map((c) => (
-                      <div
-                        key={c.id}
-                        className="p-2.5 bg-white border border-[#E4DDD2] rounded-xl flex items-center justify-between"
-                      >
-                        <div>
-                          <p className="font-bold text-[#2F2A25]">
-                            {c.numeroCuenta} • Factura {c.numeroVenta}
-                          </p>
-                          <p className="text-[10px] text-[#756E65]">
-                            Vence: {c.fechaVencimiento} • Estado: {c.estado}
-                          </p>
-                        </div>
-                        <span className="font-bold text-[#2F2A25]">
-                          Saldo: {formatCurrency(c.saldoPendiente, settings.simboloMoneda)}
-                        </span>
-                      </div>
-                    ))}
-                </div>
+                <p className="flex justify-between">
+                  <span className="text-[#756E65]">Límite de Crédito:</span>
+                  <span className="font-bold text-[#2F2A25]">
+                    {formatCurrency(viewingCustomer.limiteCredito, settings.simboloMoneda)}
+                  </span>
+                </p>
+                <p className="flex justify-between">
+                  <span className="text-[#756E65]">Saldo Pendiente:</span>
+                  <span className="font-bold text-[#2F2A25]">
+                    {formatCurrency(viewingCustomer.saldoPendiente, settings.simboloMoneda)}
+                  </span>
+                </p>
+                <p className="flex justify-between">
+                  <span className="text-[#756E65]">Crédito Disponible:</span>
+                  <span className="font-bold text-emerald-800">
+                    {formatCurrency(viewingCustomer.creditoDisponible, settings.simboloMoneda)}
+                  </span>
+                </p>
               </div>
             </div>
 

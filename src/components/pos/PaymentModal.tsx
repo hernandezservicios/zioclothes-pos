@@ -3,7 +3,8 @@ import { Customer, PaymentMethodType, Sale, SaleItem, SalePaymentSplit } from '.
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { storageService } from '../../services/storageService';
-import { apiService } from '../../services/apiService';
+import { salesApi } from '../../services/salesApi';
+import { creditsApi } from '../../services/creditsApi';
 import { formatCurrency } from '../../utils/formatters';
 import { sounds } from '../../utils/soundEffects';
 import confetti from 'canvas-confetti';
@@ -26,7 +27,11 @@ interface PaymentModalProps {
   descuentoTotal: number;
   impuestoTotal: number;
   total: number;
-  selectedCustomer: Customer;
+  applyTax: boolean;
+  // FASE 3.6C: null es un estado válido -- "sin cliente seleccionado" /
+  // Consumidor Final. No se asume que siempre exista un cliente real
+  // (Sheets puede estar vacío de clientes).
+  selectedCustomer: Customer | null;
   onClose: () => void;
   onSuccess: (sale: Sale) => void;
 }
@@ -37,18 +42,19 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   descuentoTotal,
   impuestoTotal,
   total,
+  applyTax,
   selectedCustomer,
   onClose,
   onSuccess,
 }) => {
-  const { currentUser, settings } = useAuth();
+  const { currentUser, settings, activeCashSession } = useAuth();
   const { showToast } = useToast();
 
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethodType>('EFECTIVO');
   const [efectivoRecibido, setEfectivoRecibido] = useState<number | string>(0);
   const [referenciaTarjeta, setReferenciaTarjeta] = useState<string>('');
   const [referenciaTransferencia, setReferenciaTransferencia] = useState<string>('');
-  const [diasPlazo, setDiasPlazo] = useState<number>(selectedCustomer.diasCreditoPorDefecto || 30);
+  const [diasPlazo, setDiasPlazo] = useState<number>(selectedCustomer?.diasCreditoPorDefecto || 30);
   const [observacionesCredito, setObservacionesCredito] = useState<string>('');
 
   // Mixed payment states (all start at 0)
@@ -68,17 +74,55 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     setSplitCard(0);
     setSplitTransfer(0);
     setSplitCredit(0);
-  }, [selectedCustomer.id, total]);
+  }, [selectedCustomer?.id, total]);
 
-  // Customer Credit Analysis
-  const activeCredits = (storageService.getCredits() || []).filter(
-    (c) =>
-      c.clienteId === selectedCustomer.id &&
-      (c.estado === 'PENDIENTE' || c.estado === 'PARCIAL' || c.estado === 'VENCIDA')
-  );
-  const currentDebt = activeCredits.reduce((acc, c) => acc + c.saldoPendiente, 0);
-  const availableCredit = selectedCustomer.limiteCredito - currentDebt;
-  const hasOverdue = activeCredits.some((c) => c.estado === 'VENCIDA');
+  // FASE 3.6D (Parte 6) / FASE 3.7B (Sección 11): la deuda actual y el
+  // crédito disponible vienen calculados por el backend real
+  // (customers.list / bootstrap -> CustomersController.handleListCustomers,
+  // campos `saldoPendiente`/`creditoDisponible`, autoritativos porque se
+  // derivan de `Creditos` real en Sheets). El tipo `Customer` base ahora
+  // declara estos dos campos como opcionales (ver types/index.ts) -- ya no
+  // hace falta un cast manual como en FASE 3.6D. Si por algún motivo
+  // faltaran, se asume 0 disponible -- nunca crédito ilimitado por dato
+  // faltante.
+  const currentDebt = selectedCustomer?.saldoPendiente != null ? Number(selectedCustomer.saldoPendiente) || 0 : 0;
+  const availableCredit =
+    selectedCustomer?.creditoDisponible != null ? Number(selectedCustomer.creditoDisponible) || 0 : 0;
+
+  // FASE 3.7B (Sección 10): el aviso de "facturas vencidas" ahora SÍ puede
+  // conectarse al backend real, porque credits.list ya existe (creditsApi).
+  // Se consulta solo cuando el cajero realmente elige pagar a crédito con
+  // un cliente seleccionado (no en cada apertura del modal, para no cargar
+  // toda la cartera de créditos en cada venta). Mientras carga o si falla,
+  // NO se asume "sin vencidas" -- simplemente no se muestra el aviso
+  // (opción B de la Sección 10) hasta tener una respuesta real.
+  const [hasOverdue, setHasOverdue] = useState(false);
+  const [overdueChecked, setOverdueChecked] = useState(false);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    setHasOverdue(false);
+    setOverdueChecked(false);
+    if (paymentMethod !== 'CREDITO' || !selectedCustomer) return;
+
+    creditsApi.list().then((res) => {
+      if (cancelled) return;
+      if (res.success) {
+        const overdue = (res.data || []).some(
+          (c) => c.clienteId === selectedCustomer.id && c.estado === 'VENCIDA'
+        );
+        setHasOverdue(overdue);
+      }
+      // Si falla, se deja hasOverdue en false (sin aviso) en vez de
+      // fabricar un estado -- se documenta como "no disponible" en vez de
+      // "sin vencidas" mostrando overdueChecked=false más abajo.
+      setOverdueChecked(res.success);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [paymentMethod, selectedCustomer]);
 
   // Change Calculation for Cash
   const numEfectivoRecibido = typeof efectivoRecibido === 'number' ? efectivoRecibido : parseFloat(efectivoRecibido) || 0;
@@ -118,9 +162,9 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
           { metodo: 'TRANSFERENCIA', monto: total, referencia: referenciaTransferencia || 'TRANSFERENCIA' },
         ];
       } else if (paymentMethod === 'CREDITO') {
-        if (selectedCustomer.id === 'CLI-005' || selectedCustomer.nombre === 'Consumidor Final') {
+        if (!selectedCustomer) {
           sounds.playError();
-          showToast('Cliente Requerido', 'No se puede otorgar crédito al cliente genérico "Consumidor Final". Seleccione un cliente registrado.', 'advertencia');
+          showToast('Cliente Requerido', 'Debe seleccionar un cliente registrado para vender a crédito. "Consumidor Final" (sin cliente) no puede tener crédito.', 'advertencia');
           setLoading(false);
           return;
         }
@@ -153,7 +197,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
         if (splitCard > 0) finalPayments.push({ metodo: 'TARJETA', monto: splitCard });
         if (splitTransfer > 0) finalPayments.push({ metodo: 'TRANSFERENCIA', monto: splitTransfer });
         if (splitCredit > 0) {
-          if (selectedCustomer.id === 'CLI-005') {
+          if (!selectedCustomer) {
             showToast('Cliente Requerido', 'Debe seleccionar un cliente registrado para la porción a crédito.', 'advertencia');
             setLoading(false);
             return;
@@ -169,12 +213,20 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
         }
       }
 
-      const res = await apiService.createSale({
-        clienteId: selectedCustomer.id,
-        clienteNombre: `${selectedCustomer.nombre} ${selectedCustomer.apellido}`.trim(),
-        clienteDocumento: selectedCustomer.documento,
+      // FASE 3.6: venta real contra ZIO-Google-Backend (sales.create) vía
+      // salesApi -- el backend es quien valida stock/crédito, descuenta
+      // existencias, genera el número de venta y actualiza caja/crédito.
+      // Sin cliente seleccionado: se envía exactamente como lo espera el
+      // backend para "sin cliente registrado" (ver SalesController.gs --
+      // cliente_nombre por defecto 'Consumidor Final' cuando no hay
+      // clienteId), en vez de asumir que siempre existe un Customer real.
+      const res = await salesApi.createSale({
+        clienteId: selectedCustomer?.id,
+        clienteNombre: selectedCustomer ? `${selectedCustomer.nombre} ${selectedCustomer.apellido}`.trim() : 'Consumidor Final',
+        clienteDocumento: selectedCustomer?.documento,
         vendedorId: currentUser.id,
         vendedorNombre: `${currentUser.nombre} ${currentUser.apellido}`,
+        cajaSesionId: activeCashSession?.id,
         items,
         subtotal,
         descuentoTotal,
@@ -186,7 +238,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
         cambioEntregado: paymentMethod === 'EFECTIVO' ? cambio : undefined,
         esCredito,
         montoFinanciado: esCredito ? montoFinanciado : undefined,
-        estado: 'COMPLETADA',
+        aplicarImpuesto: applyTax,
       });
 
       if (res.success && res.data) {
@@ -218,7 +270,10 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
             <div>
               <h3 className="text-base font-bold text-[#2F2A25]">Cobro de Venta</h3>
               <p className="text-xs text-[#756E65]">
-                Cliente: <span className="font-semibold text-[#2F2A25]">{selectedCustomer.nombre} {selectedCustomer.apellido}</span>
+                Cliente:{' '}
+                <span className="font-semibold text-[#2F2A25]">
+                  {selectedCustomer ? `${selectedCustomer.nombre} ${selectedCustomer.apellido}` : 'Consumidor Final (sin cliente)'}
+                </span>
               </p>
             </div>
           </div>
@@ -298,9 +353,13 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
 
               <button
                 type="button"
+                disabled={!selectedCustomer}
                 onClick={() => setPaymentMethod('CREDITO')}
+                title={!selectedCustomer ? 'Seleccione un cliente registrado para vender a crédito' : undefined}
                 className={`p-2.5 rounded-2xl border text-xs font-bold flex flex-col items-center gap-1.5 transition ${
-                  paymentMethod === 'CREDITO'
+                  !selectedCustomer
+                    ? 'bg-zinc-100 text-zinc-400 border-zinc-200 cursor-not-allowed'
+                    : paymentMethod === 'CREDITO'
                     ? 'bg-[#2F2A25] text-[#FAF8F4] border-[#2F2A25] shadow-xs'
                     : 'bg-white text-[#2F2A25] border-[#E4DDD2] hover:bg-[#F6F1E8]'
                 }`}
@@ -432,7 +491,13 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
           )}
 
           {/* CRÉDITO PANEL (CRÍTICO) */}
-          {paymentMethod === 'CREDITO' && (
+          {paymentMethod === 'CREDITO' && !selectedCustomer && (
+            <div className="bg-rose-50 border border-rose-200 p-4 rounded-2xl text-xs text-rose-800 flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 shrink-0" />
+              <span>Debe seleccionar un cliente registrado (arriba, en el POS) para vender a crédito.</span>
+            </div>
+          )}
+          {paymentMethod === 'CREDITO' && selectedCustomer && (
             <div className="bg-white p-4 rounded-2xl border border-[#E4DDD2] space-y-4">
               {/* Credit Status Card */}
               <div className="p-3.5 rounded-xl border border-[#E4DDD2] bg-[#F6F1E8]/70 space-y-2">
@@ -460,6 +525,11 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                 <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center gap-2">
                   <AlertTriangle className="w-4 h-4 shrink-0" />
                   <span>Este cliente posee facturas vencidas pendientes de pago.</span>
+                </div>
+              )}
+              {!hasOverdue && !overdueChecked && (
+                <div className="p-2.5 rounded-xl bg-[#FAF8F4] border border-[#E4DDD2] text-[#756E65] text-[11px] flex items-center gap-2">
+                  <span>Verificando estado de vencimientos con el backend...</span>
                 </div>
               )}
 

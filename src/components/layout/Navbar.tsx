@@ -1,6 +1,5 @@
 import React from 'react';
 import { useAuth } from '../../context/AuthContext';
-import { storageService } from '../../services/storageService';
 import { formatCurrency } from '../../utils/formatters';
 import {
   ShoppingBag,
@@ -23,8 +22,13 @@ export const Navbar: React.FC<NavbarProps> = ({
   activeView,
   onNavigate,
 }) => {
-  const { currentUser, logout, settings, hasPermission } = useAuth();
-  const activeCash = storageService.getActiveCashSession();
+  // FASE 3.6D (Parte 4): la caja activa viene exclusivamente de
+  // AuthContext (respaldada por cash.getActiveSession real) -- ya no de
+  // storageService.getActiveCashSession(), que desde que CashView migró a
+  // cashApi nunca vuelve a escribirse localmente y siempre mostraría
+  // "cerrada" aunque hubiera una caja real abierta.
+  const { currentUser, logout, settings, hasPermission, activeCashSession } = useAuth();
+  const activeCash = activeCashSession;
 
   return (
     <header id="navbar" className="no-print sticky top-0 z-30 bg-[#FAF8F4]/90 backdrop-blur-md border-b border-[#E4DDD2] px-4 sm:px-6 py-3 flex items-center justify-between">

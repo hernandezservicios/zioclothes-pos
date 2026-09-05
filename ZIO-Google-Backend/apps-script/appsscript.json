@@ -1,0 +1,12 @@
+{
+  "timeZone": "America/Santo_Domingo",
+  "dependencies": {
+    "enabledAdvancedServices": []
+  },
+  "webapp": {
+    "executeAs": "USER_DEPLOYING",
+    "access": "ANYONE"
+  },
+  "exceptionLogging": "STACKDRIVER",
+  "runtimeVersion": "V8"
+}

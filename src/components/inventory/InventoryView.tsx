@@ -1,8 +1,8 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import { InventoryMovement, Product, ProductVariant } from '../../types';
-import { storageService } from '../../services/storageService';
-import { apiService } from '../../services/apiService';
+import { inventoryApi } from '../../services/inventoryApi';
 import { useAuth } from '../../context/AuthContext';
+import { useDataStore } from '../../context/DataStoreContext';
 import { useToast } from '../../context/ToastContext';
 import { formatCurrency, formatDateTime } from '../../utils/formatters';
 import { exportToCSV } from '../../utils/exportUtils';
@@ -12,6 +12,7 @@ import {
   ArrowUpRight,
   ArrowDownRight,
   RefreshCw,
+  RefreshCcw,
   Search,
   Filter,
   Download,
@@ -33,8 +34,37 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   const { currentUser, settings, hasPermission } = useAuth();
   const { showToast } = useToast();
 
-  const [movements, setMovements] = useState<InventoryMovement[]>(() => storageService.getMovements() || []);
-  const [products, setProducts] = useState<Product[]>(() => storageService.getProducts() || []);
+  // CORREGIR AUDITORÍA: productos/variantes ya no se piden con una llamada
+  // propia de esta vista -- se leen del DataStore central (la misma
+  // colección que ahora también consumen ProductsView, POSView y
+  // PurchasesView), así que un ajuste de stock hecho aquí, o un producto
+  // creado/editado en Catálogo, se reflejan sin duplicar la llamada
+  // products.list ni requerir F5. El Kardex (inventory.kardex) SÍ sigue
+  // siendo propio de esta vista -- no está duplicado en ningún otro
+  // componente (ver informe de auditoría), así que no había nada que
+  // centralizar ahí.
+  const { products, productsLoading, productsError, productsStale, refreshProducts } = useDataStore();
+
+  const [movements, setMovements] = useState<InventoryMovement[]>([]);
+  const [kardexLoading, setKardexLoading] = useState(true);
+  const [kardexError, setKardexError] = useState<string | null>(null);
+
+  const fetchKardex = useCallback(async () => {
+    setKardexLoading(true);
+    setKardexError(null);
+    const res = await inventoryApi.listKardex();
+    if (res.success) {
+      setMovements(res.data || []);
+    } else {
+      setKardexError(res.message || 'No se pudo obtener el Kardex real desde el backend.');
+    }
+    setKardexLoading(false);
+  }, []);
+
+  useEffect(() => {
+    refreshProducts();
+    fetchKardex();
+  }, [refreshProducts, fetchKardex]);
 
   const [searchQuery, setSearchQuery] = useState(initialSearchQuery || '');
   const [movementTypeFilter, setMovementTypeFilter] = useState<string>('TODOS');
@@ -56,12 +86,12 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
 
   // Adjustment Modal State
   const [adjustmentModalOpen, setAdjustmentModalOpen] = useState(false);
-  const [selectedProductId, setSelectedProductId] = useState<string>(products[0]?.id || '');
+  const [selectedProductId, setSelectedProductId] = useState<string>('');
   const [selectedVariantId, setSelectedVariantId] = useState<string>('');
   const [adjustmentType, setAdjustmentType] = useState<'ENTRADA' | 'SALIDA' | 'AJUSTE'>('ENTRADA');
   const [adjustmentQuantity, setAdjustmentQuantity] = useState<number | string>(1);
   const [adjustmentReason, setAdjustmentReason] = useState('Reabastecimiento de proveedor');
-  const [loading, setLoading] = useState(false);
+  const [savingAdjustment, setSavingAdjustment] = useState(false);
 
   const selectedProduct = (products || []).find((p) => p && p.id === selectedProductId);
   const selectedProductVariants = selectedProduct?.variantes || [];
@@ -110,40 +140,55 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
 
   const handleSaveAdjustment = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (savingAdjustment) return; // previene doble submit
     if (!currentUser || !selectedProduct || !selectedVariant) return;
 
     const numQty = typeof adjustmentQuantity === 'number' ? adjustmentQuantity : parseInt(adjustmentQuantity, 10);
-    if (!Number.isFinite(numQty) || numQty <= 0) {
-      showToast('Cantidad Inválida', 'La cantidad debe ser un número entero mayor a 0.', 'error');
+    if (!Number.isFinite(numQty) || numQty === 0) {
+      showToast('Cantidad Inválida', 'La cantidad debe ser un número entero distinto de cero.', 'error');
       return;
     }
+    // FASE 3.7C: ENTRADA/SALIDA siempre fuerzan el signo correspondiente
+    // (magnitud positiva introducida por el usuario); AJUSTE (conteo)
+    // respeta el signo que el usuario ya haya introducido, porque una
+    // corrección de conteo puede ser tanto positiva como negativa.
+    let cantidadAjuste: number;
+    if (adjustmentType === 'ENTRADA') cantidadAjuste = Math.abs(numQty);
+    else if (adjustmentType === 'SALIDA') cantidadAjuste = -Math.abs(numQty);
+    else cantidadAjuste = numQty;
+
     if (!adjustmentReason.trim()) {
       showToast('Motivo Requerido', 'Debe ingresar un motivo o justificación.', 'error');
       return;
     }
 
-    setLoading(true);
+    setSavingAdjustment(true);
 
-    const delta = adjustmentType === 'SALIDA' ? -adjustmentQuantity : adjustmentQuantity;
-    const res = await apiService.adjustInventory({
-      productoId: selectedProduct.id,
+    // FASE 3.7C: inventory.adjust real (InventoryController.handleAdjustStock).
+    // Se envía un DELTA, nunca un stock absoluto -- el backend calcula el
+    // nuevo stock a partir del valor real leído bajo LockService. No se
+    // actualiza el stock visualmente hasta tener la confirmación real del
+    // backend (sin actualización optimista).
+    const res = await inventoryApi.adjust({
       varianteId: selectedVariant.id,
-      cantidad: delta,
+      cantidadAjuste,
       tipo: adjustmentType,
-      motivo: adjustmentReason,
-      usuarioId: currentUser.id,
-      usuarioNombre: `${currentUser.nombre} ${currentUser.apellido}`,
+      motivo: adjustmentReason.trim(),
     });
 
-    setLoading(false);
+    setSavingAdjustment(false);
 
     if (res.success) {
       showToast('Ajuste Registrado', res.message, 'exito');
-      setProducts(storageService.getProducts());
-      setMovements(storageService.getMovements());
       setAdjustmentModalOpen(false);
+      // CORREGIR AUDITORÍA: invalida el DataStore central de productos --
+      // Catálogo, POS y Compras ven el nuevo stock de inmediato, sin
+      // logout/login ni F5.
+      await Promise.all([refreshProducts({ force: true }), fetchKardex()]);
     } else {
       showToast('Error', res.message, 'error');
+      // No se modifica el stock mostrado: sigue siendo el último real
+      // confirmado por el backend, nunca un valor optimista.
     }
   };
 
@@ -183,8 +228,22 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
         <div className="flex items-center gap-2.5">
           <button
             type="button"
+            onClick={() => {
+              refreshProducts({ force: true });
+              fetchKardex();
+            }}
+            disabled={productsLoading || kardexLoading}
+            className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-white border border-[#E4DDD2] text-xs font-semibold text-[#2F2A25] hover:bg-[#F6F1E8] transition shadow-2xs disabled:opacity-50"
+            title="Volver a consultar el backend real"
+          >
+            <RefreshCcw className={`w-4 h-4 text-[#756E65] ${productsLoading || kardexLoading ? 'animate-spin' : ''}`} />
+            <span>{productsLoading || kardexLoading ? 'Actualizando...' : 'Actualizar'}</span>
+          </button>
+          <button
+            type="button"
             onClick={handleExportKardexCSV}
-            className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-white border border-[#E4DDD2] text-xs font-semibold text-[#2F2A25] hover:bg-[#F6F1E8] transition shadow-2xs"
+            disabled={movements.length === 0}
+            className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-white border border-[#E4DDD2] text-xs font-semibold text-[#2F2A25] hover:bg-[#F6F1E8] transition shadow-2xs disabled:opacity-50"
           >
             <Download className="w-4 h-4 text-[#756E65]" />
             <span>Exportar Kardex</span>
@@ -196,9 +255,13 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
               onClick={() => {
                 setSelectedProductId(products[0]?.id || '');
                 setSelectedVariantId(products[0]?.variantes?.[0]?.id || '');
+                setAdjustmentType('ENTRADA');
+                setAdjustmentQuantity(1);
+                setAdjustmentReason('Reabastecimiento de proveedor');
                 setAdjustmentModalOpen(true);
               }}
-              className="flex items-center gap-2 px-4 py-2 rounded-xl bg-[#2F2A25] text-white text-xs font-bold hover:bg-[#403932] transition shadow-xs"
+              disabled={products.length === 0}
+              className="flex items-center gap-2 px-4 py-2 rounded-xl bg-[#2F2A25] text-white text-xs font-bold hover:bg-[#403932] transition shadow-xs disabled:opacity-50"
             >
               <Plus className="w-4 h-4 text-[#E8DCC8]" />
               <span>Ajustar Stock / Entrada</span>
@@ -206,6 +269,41 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
           )}
         </div>
       </div>
+
+      {/* Errores reales del backend -- nunca se sustituyen por datos demo/locales */}
+      {productsError && (
+        <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            <span>
+              No se pudo cargar el catálogo real de productos: {productsError}
+              {productsStale && ' (se muestra la última información disponible, puede no estar actualizada)'}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => refreshProducts({ force: true })}
+            className="px-3 py-1.5 rounded-lg bg-rose-700 text-white font-bold text-[11px] shrink-0"
+          >
+            Reintentar
+          </button>
+        </div>
+      )}
+      {kardexError && (
+        <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            <span>No se pudo cargar el Kardex real: {kardexError}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => fetchKardex()}
+            className="px-3 py-1.5 rounded-lg bg-rose-700 text-white font-bold text-[11px] shrink-0"
+          >
+            Reintentar
+          </button>
+        </div>
+      )}
 
       {/* Tabs */}
       <div className="flex bg-[#F6F1E8] border border-[#E4DDD2] p-1 rounded-2xl w-fit text-xs font-bold">
@@ -254,6 +352,17 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
       {/* TAB 1: STOCK ACTUAL POR VARIANTES */}
       {activeTab === 'STOCK_ACTUAL' && (
         <div className="bg-white rounded-3xl border border-[#E4DDD2] overflow-hidden shadow-xs">
+          {productsLoading && products.length === 0 ? (
+            <div className="text-center py-14 space-y-2 text-[#756E65]">
+              <RefreshCcw className="w-7 h-7 opacity-40 mx-auto animate-spin" />
+              <p className="font-semibold text-xs">Consultando catálogo real en el backend...</p>
+            </div>
+          ) : !productsLoading && !productsError && products.length === 0 ? (
+            <div className="text-center py-14 space-y-2 text-[#756E65]">
+              <Package className="w-8 h-8 opacity-40 mx-auto" />
+              <p className="font-semibold text-xs text-[#2F2A25]">Todavía no hay productos en Google Sheets.</p>
+            </div>
+          ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-xs text-left">
               <thead className="bg-[#F6F1E8] text-[#2F2A25] border-b border-[#E4DDD2] uppercase text-[10px] tracking-wider font-bold">
@@ -296,13 +405,15 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                         </td>
                       )}
                       <td className="py-3 px-4 text-center">
-                        <button
-                          type="button"
-                          onClick={() => handleOpenAdjustmentFor(prod, v)}
-                          className="px-2.5 py-1 rounded-lg bg-[#FAF8F4] border border-[#E4DDD2] text-[11px] font-bold text-[#2F2A25] hover:bg-[#F6F1E8]"
-                        >
-                          Ajustar
-                        </button>
+                        {hasPermission('inventario.ajustar') && (
+                          <button
+                            type="button"
+                            onClick={() => handleOpenAdjustmentFor(prod, v)}
+                            className="px-2.5 py-1 rounded-lg bg-[#FAF8F4] border border-[#E4DDD2] text-[11px] font-bold text-[#2F2A25] hover:bg-[#F6F1E8]"
+                          >
+                            Ajustar
+                          </button>
+                        )}
                       </td>
                     </tr>
                   ))
@@ -310,6 +421,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
               </tbody>
             </table>
           </div>
+          )}
         </div>
       )}
 
@@ -348,20 +460,22 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                       {product.stockMinimo || 4} uds
                     </td>
                     <td className="py-3 px-4 text-center">
-                      <button
-                        type="button"
-                        onClick={() => handleOpenAdjustmentFor(product, variant)}
-                        className="px-3 py-1 rounded-xl bg-[#2F2A25] text-white text-[11px] font-bold hover:bg-[#403932]"
-                      >
-                        + Reabastecer Entrada
-                      </button>
+                      {hasPermission('inventario.ajustar') && (
+                        <button
+                          type="button"
+                          onClick={() => handleOpenAdjustmentFor(product, variant)}
+                          className="px-3 py-1 rounded-xl bg-[#2F2A25] text-white text-[11px] font-bold hover:bg-[#403932]"
+                        >
+                          + Reabastecer Entrada
+                        </button>
+                      )}
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
 
-            {(lowStockVariants || []).length === 0 && (
+            {!productsLoading && (lowStockVariants || []).length === 0 && (
               <div className="text-center py-12 text-emerald-800 space-y-2">
                 <CheckCircle2 className="w-8 h-8 mx-auto text-emerald-600" />
                 <p className="font-bold text-xs">Todos los niveles de inventario se encuentran óptimos.</p>
@@ -401,6 +515,16 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
           </div>
 
           <div className="bg-white rounded-3xl border border-[#E4DDD2] overflow-hidden shadow-xs">
+            {kardexLoading && movements.length === 0 ? (
+              <div className="text-center py-14 space-y-2 text-[#756E65]">
+                <RefreshCcw className="w-7 h-7 opacity-40 mx-auto animate-spin" />
+                <p className="font-semibold text-xs">Consultando Kardex real en el backend...</p>
+              </div>
+            ) : !kardexLoading && !kardexError && movements.length === 0 ? (
+              <div className="text-center py-14 text-[#756E65] text-xs">
+                Todavía no hay movimientos de Kardex registrados en Google Sheets.
+              </div>
+            ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-xs text-left">
                 <thead className="bg-[#F6F1E8] text-[#2F2A25] border-b border-[#E4DDD2] uppercase text-[10px] tracking-wider font-bold">
@@ -416,7 +540,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                 </thead>
                 <tbody className="divide-y divide-[#E4DDD2]/60">
                   {(filteredMovements || []).map((m) => {
-                    const isPositive = m.tipo === 'ENTRADA' || m.tipo === 'DEVOLUCION';
+                    const isPositive = (m.cantidad || 0) > 0;
                     return (
                       <tr key={m.id} className="hover:bg-[#FAF8F4]/80 transition">
                         <td className="py-3 px-4 text-[#756E65]">{formatDateTime(m.fecha)}</td>
@@ -425,7 +549,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                             className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
                               m.tipo === 'VENTA'
                                 ? 'bg-blue-50 text-blue-800 border-blue-200'
-                                : m.tipo === 'ENTRADA'
+                                : m.tipo === 'ENTRADA' || m.tipo === 'COMPRA'
                                 ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
                                 : m.tipo === 'DEVOLUCION'
                                 ? 'bg-purple-50 text-purple-800 border-purple-200'
@@ -443,7 +567,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                         </td>
                         <td className="py-3 px-4 text-center font-bold">
                           <span className={isPositive ? 'text-emerald-700' : 'text-rose-700'}>
-                            {isPositive ? `+${m.cantidad}` : `-${m.cantidad}`}
+                            {isPositive ? `+${m.cantidad}` : m.cantidad}
                           </span>
                         </td>
                         <td className="py-3 px-4 text-center font-mono text-[11px] text-[#756E65]">
@@ -457,12 +581,13 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                 </tbody>
               </table>
 
-              {(filteredMovements || []).length === 0 && (
+              {movements.length > 0 && (filteredMovements || []).length === 0 && (
                 <div className="text-center py-12 text-[#756E65] text-xs">
                   No hay movimientos registrados con los filtros aplicados.
                 </div>
               )}
             </div>
+            )}
           </div>
         </div>
       )}
@@ -478,7 +603,8 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
               <button
                 type="button"
                 onClick={() => setAdjustmentModalOpen(false)}
-                className="text-[#756E65] p-1"
+                disabled={savingAdjustment}
+                className="text-[#756E65] p-1 disabled:opacity-50"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -494,6 +620,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                     const p = (products || []).find((pr) => pr.id === e.target.value);
                     setSelectedVariantId(p?.variantes?.[0]?.id || '');
                   }}
+                  disabled={savingAdjustment}
                   className="w-full px-3 py-2 rounded-xl border border-[#E4DDD2] bg-white font-semibold"
                 >
                   {(products || []).map((p) => (
@@ -509,6 +636,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                 <select
                   value={selectedVariantId}
                   onChange={(e) => setSelectedVariantId(e.target.value)}
+                  disabled={savingAdjustment}
                   className="w-full px-3 py-2 rounded-xl border border-[#E4DDD2] bg-white font-semibold"
                 >
                   {(selectedProduct?.variantes || []).map((v) => (
@@ -525,27 +653,32 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                   <select
                     value={adjustmentType}
                     onChange={(e) => setAdjustmentType(e.target.value as any)}
+                    disabled={savingAdjustment}
                     className="w-full px-3 py-2 rounded-xl border border-[#E4DDD2] bg-white font-bold"
                   >
                     <option value="ENTRADA">Entrada / Compra (+)</option>
                     <option value="SALIDA">Salida / Merma (-)</option>
-                    <option value="AJUSTE">Ajuste Conteo</option>
+                    <option value="AJUSTE">Ajuste Conteo (+/-)</option>
                   </select>
                 </div>
 
                 <div>
-                  <label className="block font-bold text-[#2F2A25] mb-1">Cantidad de Unidades:</label>
+                  <label className="block font-bold text-[#2F2A25] mb-1">
+                    {adjustmentType === 'AJUSTE' ? 'Cantidad (+/-):' : 'Cantidad de Unidades:'}
+                  </label>
                   <input
                     type="number"
-                    min="0"
+                    min={adjustmentType === 'AJUSTE' ? undefined : 1}
                     step="1"
                     inputMode="numeric"
-                    placeholder="1"
+                    placeholder={adjustmentType === 'AJUSTE' ? 'Ej. -3 o 3' : '1'}
                     value={adjustmentQuantity === '' ? '' : adjustmentQuantity}
+                    disabled={savingAdjustment}
                     onChange={(e) => {
                       const val = e.target.value;
-                      if (val === '') setAdjustmentQuantity('');
-                      else {
+                      if (val === '' || val === '-') {
+                        setAdjustmentQuantity(val);
+                      } else {
                         const num = parseInt(val, 10);
                         setAdjustmentQuantity(isNaN(num) ? '' : val);
                       }
@@ -562,6 +695,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                   required
                   value={adjustmentReason}
                   onChange={(e) => setAdjustmentReason(e.target.value)}
+                  disabled={savingAdjustment}
                   placeholder="Ej. Conteo físico semanal / Mercancía de taller"
                   className="w-full px-3 py-2 rounded-xl border border-[#E4DDD2] bg-white"
                 />
@@ -571,16 +705,17 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                 <button
                   type="button"
                   onClick={() => setAdjustmentModalOpen(false)}
-                  className="flex-1 py-2 rounded-xl bg-white border border-[#E4DDD2] text-xs font-semibold text-[#756E65]"
+                  disabled={savingAdjustment}
+                  className="flex-1 py-2 rounded-xl bg-white border border-[#E4DDD2] text-xs font-semibold text-[#756E65] disabled:opacity-50"
                 >
                   Cancelar
                 </button>
                 <button
                   type="submit"
-                  disabled={loading}
-                  className="flex-1 py-2 rounded-xl bg-[#2F2A25] text-xs font-bold text-white shadow-md hover:bg-[#403932]"
+                  disabled={savingAdjustment || !selectedVariant}
+                  className="flex-1 py-2 rounded-xl bg-[#2F2A25] text-xs font-bold text-white shadow-md hover:bg-[#403932] disabled:bg-zinc-300"
                 >
-                  {loading ? 'Aplicando...' : 'Aplicar al Kardex'}
+                  {savingAdjustment ? 'Aplicando...' : 'Aplicar al Kardex'}
                 </button>
               </div>
             </form>

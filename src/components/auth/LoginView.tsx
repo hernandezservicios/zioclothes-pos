@@ -1,45 +1,54 @@
 import React, { useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
-import { useToast } from '../../context/ToastContext';
-import { storageService } from '../../services/storageService';
 import { sounds } from '../../utils/soundEffects';
 import { Lock, User as UserIcon, Sparkles, ShieldCheck, ArrowRight } from 'lucide-react';
 
 export const LoginView: React.FC = () => {
   const { login, settings } = useAuth();
-  const { showToast } = useToast();
 
   const [username, setUsername] = useState('admin');
-  const [password, setPassword] = useState('admin123');
+  // FASE 3.7G-FIX: el campo de contraseña ya no precarga la contraseña
+  // real del admin sembrado -- el usuario debe escribirla manualmente.
+  // No se tocó `username` (no es una credencial secreta) ni los botones
+  // de "Acceso Rápido para Demostración" (acción explícita y visible del
+  // usuario, no un valor precargado en silencio) -- ver reporte de esta
+  // fase, quedan documentados pero fuera del alcance pedido.
+  const [password, setPassword] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
   const [loading, setLoading] = useState(false);
 
-  const users = storageService.getUsers();
-
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg('');
     setLoading(true);
 
-    const success = login(username.trim().toLowerCase(), password);
+    // FASE 3.6: login ahora es real (async) contra el backend -- ya no
+    // asume éxito antes de conocer la respuesta.
+    const success = await login(username.trim().toLowerCase(), password);
     setLoading(false);
 
     if (success) {
       sounds.playSuccess();
-      showToast('Bienvenido a ZIO CLOTHES', `Sesión iniciada correctamente`, 'exito');
     } else {
       sounds.playError();
       setErrorMsg('Usuario o contraseña incorrectos');
-      showToast('Error de Acceso', 'Credenciales no válidas', 'error');
     }
+    // El toast de éxito/error ya lo muestra AuthContext.login con el
+    // mensaje real del backend -- no se duplica aquí.
   };
 
-  const handleQuickLogin = (u: string, p: string) => {
+  const handleQuickLogin = async (u: string, p: string) => {
     setUsername(u);
     setPassword(p);
-    login(u, p);
-    sounds.playSuccess();
-    showToast('Bienvenido a ZIO CLOTHES', `Acceso rápido como ${u}`, 'exito');
+    setLoading(true);
+    const success = await login(u, p);
+    setLoading(false);
+    if (success) {
+      sounds.playSuccess();
+    } else {
+      sounds.playError();
+      setErrorMsg('Usuario o contraseña incorrectos');
+    }
   };
 
   return (
@@ -133,10 +142,10 @@ export const LoginView: React.FC = () => {
 
               <button
                 type="button"
-                onClick={() => handleQuickLogin('encargado', 'encargado123')}
+                onClick={() => handleQuickLogin('gerente', 'gerente123')}
                 className="p-2 rounded-xl bg-[#FAF8F4] border border-[#E4DDD2] text-center hover:bg-[#F6F1E8] transition"
               >
-                <p className="font-bold text-[11px] text-[#2F2A25]">Encargado</p>
+                <p className="font-bold text-[11px] text-[#2F2A25]">Gerente</p>
                 <span className="text-[9px] text-[#756E65]">Tienda & Caja</span>
               </button>
 
