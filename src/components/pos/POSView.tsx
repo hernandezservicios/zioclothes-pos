@@ -27,6 +27,22 @@ import {
   CreditCard,
 } from 'lucide-react';
 
+/**
+ * FIX P0 (buscador POS / pantalla en blanco): compara un campo del
+ * catálogo contra el texto buscado sin asumir que ese campo sea
+ * realmente un string en runtime -- antes, expresiones como
+ * `campo && campo.toLowerCase()` lanzaban TypeError si `campo` llegaba
+ * como `number` (posible si Google Sheets guarda un SKU/código de
+ * barras/talla como celda numérica). Segunda capa de defensa: aunque
+ * productsApi.ts ya normaliza estos campos a texto en el mapeo, el
+ * buscador no depende únicamente de eso para no volver a romperse ante
+ * cualquier dato externo inesperado. Mismo comportamiento que antes
+ * para valores ya-string: case-insensitive, vacío/ausente nunca coincide.
+ */
+function normalizeSearchField(value: unknown): string {
+  return value === null || value === undefined ? '' : String(value).toLowerCase();
+}
+
 export const POSView: React.FC = () => {
   const { settings, currentUser } = useAuth();
   const { showToast } = useToast();
@@ -134,16 +150,16 @@ export const POSView: React.FC = () => {
       const q = searchQuery.toLowerCase().trim();
       const matchesSearch =
         !q ||
-        (p.nombre && p.nombre.toLowerCase().includes(q)) ||
-        (p.sku && p.sku.toLowerCase().includes(q)) ||
-        (p.codigoBarras && p.codigoBarras.toLowerCase().includes(q)) ||
-        (p.marca && p.marca.toLowerCase().includes(q)) ||
+        normalizeSearchField(p.nombre).includes(q) ||
+        normalizeSearchField(p.sku).includes(q) ||
+        normalizeSearchField(p.codigoBarras).includes(q) ||
+        normalizeSearchField(p.marca).includes(q) ||
         (p.variantes || []).some(
           (v) =>
-            (v.sku && v.sku.toLowerCase().includes(q)) ||
-            (v.codigoBarras && v.codigoBarras.toLowerCase().includes(q)) ||
-            (v.color && v.color.toLowerCase().includes(q)) ||
-            (v.talla && v.talla.toLowerCase().includes(q))
+            normalizeSearchField(v.sku).includes(q) ||
+            normalizeSearchField(v.codigoBarras).includes(q) ||
+            normalizeSearchField(v.color).includes(q) ||
+            normalizeSearchField(v.talla).includes(q)
         );
       return matchesCat && matchesSearch;
     });
@@ -168,8 +184,8 @@ export const POSView: React.FC = () => {
       // Check variant exact barcode or SKU first
       const vMatch = prodVariants.find(
         (vr) =>
-          (vr.codigoBarras && vr.codigoBarras.toLowerCase() === queryLower) ||
-          (vr.sku && vr.sku.toLowerCase() === queryLower)
+          normalizeSearchField(vr.codigoBarras) === queryLower ||
+          normalizeSearchField(vr.sku) === queryLower
       );
       if (vMatch) {
         foundProduct = prod;
@@ -179,8 +195,8 @@ export const POSView: React.FC = () => {
 
       // Check product exact barcode or SKU
       if (
-        (prod.codigoBarras && prod.codigoBarras.toLowerCase() === queryLower) ||
-        (prod.sku && prod.sku.toLowerCase() === queryLower)
+        normalizeSearchField(prod.codigoBarras) === queryLower ||
+        normalizeSearchField(prod.sku) === queryLower
       ) {
         foundProduct = prod;
         foundVariant = prodVariants.find((v) => v.stock > 0) || prodVariants[0];
@@ -192,8 +208,8 @@ export const POSView: React.FC = () => {
       // If matched the general product barcode and product has multiple active variants, open selector modal
       if (
         (foundProduct.variantes || []).length > 1 &&
-        foundProduct.codigoBarras?.toLowerCase() === queryLower &&
-        !foundProduct.variantes.some((v) => v.codigoBarras?.toLowerCase() === queryLower)
+        normalizeSearchField(foundProduct.codigoBarras) === queryLower &&
+        !foundProduct.variantes.some((v) => normalizeSearchField(v.codigoBarras) === queryLower)
       ) {
         setSelectedProductForVariant(foundProduct);
         sounds.playBeep();

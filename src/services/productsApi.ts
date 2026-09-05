@@ -11,14 +11,29 @@ import { Product, ProductVariant, Category, Size, Color, Supplier } from '../typ
 import { storageService } from './storageService';
 import { apiService, ApiResponse } from './apiService';
 
+/**
+ * FIX P0 (buscador POS / pantalla en blanco): Google Sheets puede devolver
+ * un campo declarado como `string` en los tipos (sku, código de barras,
+ * talla, color, nombre, marca) como un `number` real si esa celda se
+ * guardó/tecleó como numérica -- el tipo TypeScript nunca lo garantiza en
+ * runtime. Sin esto, POSView.tsx llamaba `.toLowerCase()` sobre un
+ * `number`, lanzaba TypeError durante el render y, al no existir
+ * ErrorBoundary, React desmontaba toda la aplicación. `null`/`undefined`
+ * se normalizan a cadena vacía, igual que el `|| ''` que ya usaban varios
+ * de estos campos.
+ */
+function toText(value: any): string {
+  return value === null || value === undefined ? '' : String(value);
+}
+
 export function mapVariant(raw: any): ProductVariant {
   return {
     id: raw.id,
     productoId: raw.productoId,
-    sku: raw.sku,
-    codigoBarras: raw.codigoBarras || '',
-    color: raw.color,
-    talla: raw.talla,
+    sku: toText(raw.sku),
+    codigoBarras: toText(raw.codigoBarras),
+    color: toText(raw.color),
+    talla: toText(raw.talla),
     costo: Number(raw.costo) || 0,
     precio: Number(raw.precio) || 0,
     stock: Number(raw.stock) || 0,
@@ -34,13 +49,13 @@ export function mapVariant(raw: any): ProductVariant {
 export function mapProduct(raw: any): Product {
   return {
     id: raw.id,
-    sku: raw.sku,
-    codigoBarras: raw.codigoBarras || '',
-    nombre: raw.nombre,
+    sku: toText(raw.sku),
+    codigoBarras: toText(raw.codigoBarras),
+    nombre: toText(raw.nombre),
     descripcion: raw.descripcion || '',
     categoriaId: raw.categoriaId,
     categoriaNombre: raw.categoriaNombre || '',
-    marca: raw.marca || '',
+    marca: toText(raw.marca),
     proveedorId: raw.proveedorId || undefined,
     costo: Number(raw.costo) || 0,
     precio: Number(raw.precio) || 0,
