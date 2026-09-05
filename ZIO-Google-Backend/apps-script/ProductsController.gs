@@ -5,6 +5,18 @@
  * categories, sizes, colors, and suppliers.
  */
 
+/**
+ * FASE FINAL (multi-cuenta de fotos): nombre de Script Property donde se
+ * persiste el ID de la carpeta de Drive de esta instalación, siguiendo el
+ * mismo patrón ya usado por SPREADSHEET_ID en Config.gs (PropertiesService,
+ * exclusivo del backend, nunca en Sheets/Product/frontend). El nombre de
+ * carpeta de abajo solo se usa para la detección INICIAL de una instalación
+ * que todavía no tiene ID configurado -- una vez encontrado o creado, el ID
+ * queda guardado y las subidas futuras nunca vuelven a buscar por nombre.
+ */
+const PRODUCT_IMAGES_FOLDER_PROPERTY = 'PRODUCT_IMAGES_FOLDER_ID';
+const PRODUCT_IMAGES_FOLDER_NAME = 'POS - Imagenes de Productos';
+
 const ProductsController = {
   /**
    * Returns complete catalog with nested variants.
@@ -324,16 +336,106 @@ const ProductsController = {
   },
 
   /**
-   * Reutiliza la carpeta de Drive dedicada a fotos de productos si ya
-   * existe (búsqueda exacta por nombre) -- nunca crea una carpeta
-   * duplicada en cada subida.
+   * FASE FINAL (multi-cuenta de fotos): resuelve la carpeta de Drive de
+   * esta instalación de forma portable entre cuentas de Google distintas.
+   * Nunca depende para siempre de una búsqueda por nombre ni crea una
+   * carpeta nueva en cada subida -- sigue esta cadena exacta:
+   *
+   *   1. Si existe PRODUCT_IMAGES_FOLDER_ID en Script Properties, abrir esa
+   *      carpeta con DriveApp.getFolderById() y confirmar que sigue siendo
+   *      accesible (getFolderById lanza excepción si el ID ya no existe o
+   *      pertenece a otra cuenta/fue borrado). Si es accesible, usarla --
+   *      esta es la ÚNICA vía que deben tomar prácticamente todas las
+   *      subidas después de la primera.
+   *   2. Si NO hay ID configurado (instalación nueva) o el ID guardado dejó
+   *      de ser válido, buscar por nombre exacto ('POS - Imagenes de
+   *      Productos') SOLO dentro del Drive de la cuenta que ejecuta este
+   *      script -- DriveApp siempre opera sobre el Drive del ejecutor, así
+   *      que esta búsqueda nunca cruza cuentas ni instalaciones ajenas.
+   *   3. Si la búsqueda por nombre encuentra la carpeta, se reutiliza. Si
+   *      no la encuentra, se crea una única vez.
+   *   4. En ambos casos del paso 3, el ID resultante se persiste de
+   *      inmediato en PRODUCT_IMAGES_FOLDER_ID -- así el paso 2 (búsqueda
+   *      por nombre) nunca se vuelve a ejecutar para esta instalación.
+   *
+   * El nombre de carpeta ('POS - Imagenes de Productos') es entonces
+   * exclusivamente un mecanismo de detección/arranque inicial, nunca la
+   * fuente de verdad en operación normal.
    */
   getOrCreateProductImagesFolder() {
-    const FOLDER_NAME = 'POS - Imagenes de Productos';
-    const existing = DriveApp.getFoldersByName(FOLDER_NAME);
-    if (existing.hasNext()) {
-      return existing.next();
+    const props = PropertiesService.getScriptProperties();
+    const storedId = props.getProperty(PRODUCT_IMAGES_FOLDER_PROPERTY);
+
+    if (storedId) {
+      try {
+        const folder = DriveApp.getFolderById(storedId);
+        // Tocar el objeto confirma que el ID sigue siendo válido y
+        // accesible por la cuenta actual antes de confiar en él.
+        folder.getName();
+        return folder;
+      } catch (e) {
+        Logger.log(
+          `[ProductsController] PRODUCT_IMAGES_FOLDER_ID guardado (${storedId}) ya no es accesible (${e.message}). Se buscará/creará de nuevo por nombre.`
+        );
+        // No relanza el error: cae al flujo de detección por nombre de
+        // abajo en vez de dejar la subida de imagen totalmente rota.
+      }
     }
-    return DriveApp.createFolder(FOLDER_NAME);
+
+    const existing = DriveApp.getFoldersByName(PRODUCT_IMAGES_FOLDER_NAME);
+    const folder = existing.hasNext() ? existing.next() : DriveApp.createFolder(PRODUCT_IMAGES_FOLDER_NAME);
+
+    props.setProperty(PRODUCT_IMAGES_FOLDER_PROPERTY, folder.getId());
+    return folder;
+  },
+
+  /**
+   * FASE FINAL (multi-cuenta de fotos): función administrativa OPCIONAL
+   * para verificar/inicializar explícitamente la configuración de Drive de
+   * esta instalación (por ejemplo, justo después de copiar este proyecto de
+   * Apps Script a una cuenta de Google nueva), sin depender de que alguien
+   * suba una fotografía primero.
+   *
+   * No es parte del flujo HTTP (no tiene una acción en Main.gs/doPost) --
+   * se ejecuta manualmente desde el editor de Apps Script (menú Ejecutar >
+   * initializeProductImageStorage), igual que ya se hace hoy con
+   * setSpreadsheetId() en Config.gs. No es obligatoria: la primera subida
+   * real de una imagen (handleUploadImage -> getOrCreateProductImagesFolder)
+   * ejecuta exactamente la misma resolución de forma automática y perezosa
+   * si esta función nunca se corrió a mano.
+   *
+   * @returns {Object} Información clara de lo que se hizo/encontró.
+   */
+  initializeProductImageStorage() {
+    const props = PropertiesService.getScriptProperties();
+    const existingId = props.getProperty(PRODUCT_IMAGES_FOLDER_PROPERTY);
+
+    const folder = this.getOrCreateProductImagesFolder();
+
+    const result = {
+      success: true,
+      folderId: folder.getId(),
+      folderName: folder.getName(),
+      folderUrl: folder.getUrl(),
+      wasAlreadyConfigured: !!existingId,
+      message: existingId
+        ? `Ya existía ${PRODUCT_IMAGES_FOLDER_PROPERTY}=${existingId} configurado para esta instalación; se verificó que sigue siendo accesible.`
+        : `Instalación nueva: se configuró ${PRODUCT_IMAGES_FOLDER_PROPERTY}=${folder.getId()} (carpeta "${folder.getName()}").`
+    };
+
+    Logger.log(`[ProductsController.initializeProductImageStorage] ${JSON.stringify(result)}`);
+    return result;
   }
 };
+
+/**
+ * Wrapper de nivel superior para que `initializeProductImageStorage` sea
+ * seleccionable en el menú Ejecutar del editor de Apps Script (el selector
+ * de funciones de ese menú solo lista funciones globales, no métodos
+ * dentro de un objeto como ProductsController) -- mismo patrón que ya usa
+ * setSpreadsheetId() en Config.gs para configuración administrativa
+ * ejecutada manualmente una vez por instalación.
+ */
+function initializeProductImageStorage() {
+  return ProductsController.initializeProductImageStorage();
+}
