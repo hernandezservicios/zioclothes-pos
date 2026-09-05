@@ -51,29 +51,34 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   const { showToast } = useToast();
 
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethodType>('EFECTIVO');
-  const [efectivoRecibido, setEfectivoRecibido] = useState<number | string>(0);
+  // FIX P0 (inputs de montos sin 0 precargado): inician en '' -- no en 0 --
+  // para que el cajero escriba el monto directamente sin borrar un cero
+  // primero. El tipo (number | string) no cambia: los onChange de estos
+  // campos ya soportaban '' desde antes (ver más abajo), solo el valor
+  // inicial/de reseteo estaba en 0.
+  const [efectivoRecibido, setEfectivoRecibido] = useState<number | string>('');
   const [referenciaTarjeta, setReferenciaTarjeta] = useState<string>('');
   const [referenciaTransferencia, setReferenciaTransferencia] = useState<string>('');
   const [diasPlazo, setDiasPlazo] = useState<number>(selectedCustomer?.diasCreditoPorDefecto || 30);
   const [observacionesCredito, setObservacionesCredito] = useState<string>('');
 
-  // Mixed payment states (all start at 0)
-  const [splitCash, setSplitCash] = useState<number | string>(0);
-  const [splitCard, setSplitCard] = useState<number | string>(0);
-  const [splitTransfer, setSplitTransfer] = useState<number | string>(0);
-  const [splitCredit, setSplitCredit] = useState<number | string>(0);
+  // Mixed payment states (all start empty, not at 0 -- ver comentario arriba)
+  const [splitCash, setSplitCash] = useState<number | string>('');
+  const [splitCard, setSplitCard] = useState<number | string>('');
+  const [splitTransfer, setSplitTransfer] = useState<number | string>('');
+  const [splitCredit, setSplitCredit] = useState<number | string>('');
 
   const [loading, setLoading] = useState(false);
 
   React.useEffect(() => {
-    setEfectivoRecibido(0);
+    setEfectivoRecibido('');
     setReferenciaTarjeta('');
     setReferenciaTransferencia('');
     setObservacionesCredito('');
-    setSplitCash(0);
-    setSplitCard(0);
-    setSplitTransfer(0);
-    setSplitCredit(0);
+    setSplitCash('');
+    setSplitCard('');
+    setSplitTransfer('');
+    setSplitCredit('');
   }, [selectedCustomer?.id, total]);
 
   // FASE 3.6D (Parte 6) / FASE 3.7B (Sección 11): la deuda actual y el
@@ -372,10 +377,10 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                 type="button"
                 onClick={() => {
                   setPaymentMethod('MIXTO');
-                  setSplitCash(0);
-                  setSplitCard(0);
-                  setSplitTransfer(0);
-                  setSplitCredit(0);
+                  setSplitCash('');
+                  setSplitCard('');
+                  setSplitTransfer('');
+                  setSplitCredit('');
                 }}
                 className={`p-2.5 rounded-2xl border text-xs font-bold flex flex-col items-center gap-1.5 transition col-span-2 sm:col-span-1 ${
                   paymentMethod === 'MIXTO'

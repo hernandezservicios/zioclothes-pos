@@ -42,15 +42,18 @@ export const CashView: React.FC = () => {
   const [receiptSession, setReceiptSession] = useState<CashSession | null>(null);
 
   // Open Form State
-  const [montoInicial, setMontoInicial] = useState<number | string>(0);
+  // FIX P0 (inputs de montos sin 0 precargado): inician en '' -- no en 0
+  // -- para que el usuario escriba el monto directamente. Los onChange de
+  // estos campos ya soportaban '' desde antes.
+  const [montoInicial, setMontoInicial] = useState<number | string>('');
 
   // Close Form State
-  const [montoCierreReal, setMontoCierreReal] = useState<number | string>(0);
+  const [montoCierreReal, setMontoCierreReal] = useState<number | string>('');
   const [notasCierre, setNotasCierre] = useState<string>('');
 
   // Cash Movement Form State (Ingreso / Retiro)
   const [movementType, setMovementType] = useState<'ENTRADA' | 'SALIDA'>('SALIDA');
-  const [movementAmount, setMovementAmount] = useState<number | string>(0);
+  const [movementAmount, setMovementAmount] = useState<number | string>('');
   const [movementReason, setMovementReason] = useState('');
 
   const [loading, setLoading] = useState(false);
@@ -188,7 +191,7 @@ export const CashView: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => {
-                    setMovementAmount(0);
+                    setMovementAmount('');
                     setMovementReason('');
                     setMovementType('SALIDA');
                     setMovementModalOpen(true);
@@ -203,7 +206,7 @@ export const CashView: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => {
-                    setMontoCierreReal(0);
+                    setMontoCierreReal('');
                     setNotasCierre('');
                     setCloseModalOpen(true);
                   }}
@@ -219,7 +222,7 @@ export const CashView: React.FC = () => {
               <button
                 type="button"
                 onClick={() => {
-                  setMontoInicial(0);
+                  setMontoInicial('');
                   setOpenModalOpen(true);
                 }}
                 className="flex items-center gap-2 px-4 py-2 rounded-xl bg-[#2F2A25] hover:bg-[#403932] text-white text-xs font-bold transition shadow-xs"
@@ -254,7 +257,7 @@ export const CashView: React.FC = () => {
               <button
                 type="button"
                 onClick={() => {
-                  setMontoCierreReal(0);
+                  setMontoCierreReal('');
                   setNotasCierre('');
                   setCloseModalOpen(true);
                 }}
@@ -401,7 +404,13 @@ export const CashView: React.FC = () => {
           {hasPermission('caja.abrir') && (
             <button
               type="button"
-              onClick={() => setOpenModalOpen(true)}
+              onClick={() => {
+                // FIX P0: unifica con el otro botón de apertura -- antes
+                // este no reseteaba montoInicial antes de abrir el modal,
+                // a diferencia del botón del header.
+                setMontoInicial('');
+                setOpenModalOpen(true);
+              }}
               className="px-6 py-2.5 rounded-2xl bg-[#2F2A25] text-white text-xs font-bold hover:bg-[#403932] transition shadow-md inline-flex items-center gap-2"
             >
               <Unlock className="w-4 h-4 text-[#E8DCC8]" />

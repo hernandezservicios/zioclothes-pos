@@ -31,7 +31,10 @@ export const InstallmentModal: React.FC<InstallmentModalProps> = ({
   const { currentUser, settings, activeCashSession } = useAuth();
   const { showToast } = useToast();
 
-  const [montoAbonado, setMontoAbonado] = useState<number | string>(0);
+  // FIX P0 (inputs de montos sin 0 precargado): inicia en '' -- no en 0 --
+  // para que el cajero escriba el monto directamente. El onChange de este
+  // campo ya soportaba '' desde antes.
+  const [montoAbonado, setMontoAbonado] = useState<number | string>('');
   const [metodoPago, setMetodoPago] = useState<PaymentMethodType>('EFECTIVO');
   const [referencia, setReferencia] = useState<string>('');
   const [notas, setNotas] = useState<string>('');
@@ -40,7 +43,7 @@ export const InstallmentModal: React.FC<InstallmentModalProps> = ({
   const [paperWidth, setPaperWidth] = useState<'80mm' | '58mm'>('80mm');
 
   React.useEffect(() => {
-    setMontoAbonado(0);
+    setMontoAbonado('');
     setReferencia('');
     setNotas('');
     setMetodoPago('EFECTIVO');

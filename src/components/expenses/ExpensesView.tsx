@@ -57,7 +57,10 @@ export const ExpensesView: React.FC = () => {
 
   // Form Fields
   const [categoriaId, setCategoriaId] = useState(categories[0]?.id || '');
-  const [monto, setMonto] = useState<number | string>(0);
+  // FIX P0 (inputs de montos sin 0 precargado): inicia en '' -- no en 0 --
+  // para que el usuario escriba el monto directamente. El onChange ya
+  // soportaba '' desde antes.
+  const [monto, setMonto] = useState<number | string>('');
   const [descripcion, setDescripcion] = useState('');
   const [proveedor, setProveedor] = useState('');
   const [metodoPago, setMetodoPago] = useState<'EFECTIVO' | 'TARJETA' | 'TRANSFERENCIA'>('EFECTIVO');
@@ -125,7 +128,7 @@ export const ExpensesView: React.FC = () => {
       setDescripcion('');
       setProveedor('');
       setComprobante('');
-      setMonto(0);
+      setMonto('');
       // CORREGIR AUDITORÍA: invalida el DataStore central de gastos --
       // ReportsView refleja el nuevo gasto de inmediato, sin logout/login
       // ni F5.
@@ -198,7 +201,7 @@ export const ExpensesView: React.FC = () => {
               type="button"
               onClick={() => {
                 setCategoriaId(categories[0]?.id || '');
-                setMonto(0);
+                setMonto('');
                 setDescripcion('');
                 setProveedor('');
                 setMetodoPago('EFECTIVO');
