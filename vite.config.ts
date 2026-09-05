@@ -48,10 +48,32 @@ export default defineConfig(() => {
               // síntoma "Unexpected token '<'" reportado en la auditoría.
               // Las llamadas al backend real de la app SIEMPRE deben ir a
               // la red; nunca deben tratarse como una caché genérica.
+              //
+              // AUDITORÍA 2 (fotos de productos -- imágenes de Drive rotas
+              // solo con Service Worker activo): este mismo catch-all
+              // también capturaba, sin que nadie lo excluyera nunca, las
+              // fotos de productos servidas desde Drive
+              // (drive.google.com/thumbnail, y el redirect final hacia
+              // lh3.googleusercontent.com). Esas URLs SIEMPRE redirigen
+              // antes de llegar a la imagen real (confirmado con curl:
+              // 302/303 -> 200 image/png) -- y la Cache Storage API
+              // rechaza (TypeError) guardar una respuesta que resultó de
+              // seguir una redirección, lo que hacía fallar la carga de la
+              // imagen únicamente cuando el Service Worker la interceptaba
+              // (nunca fuera de él, por eso curl sí funcionaba). Se excluyen
+              // aquí explícitamente para que el navegador las pida
+              // directamente a la red, igual que ya se hacía con Apps
+              // Script -- el resto de este catch-all (NetworkFirst /
+              // api-cache) sigue exactamente igual para cualquier otra URL.
               urlPattern: ({ url }) => {
                 const host = url.hostname;
                 const isAppsScript = host === 'script.google.com' || host === 'script.googleusercontent.com';
-                return !isAppsScript && /^https?:$/.test(url.protocol);
+                const isGoogleDriveImageHost =
+                  host === 'drive.google.com' ||
+                  host === 'drive.usercontent.google.com' ||
+                  host === 'googleusercontent.com' ||
+                  host.endsWith('.googleusercontent.com');
+                return !isAppsScript && !isGoogleDriveImageHost && /^https?:$/.test(url.protocol);
               },
               handler: 'NetworkFirst',
               options: {
