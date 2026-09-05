@@ -6,6 +6,46 @@
 }
 
 @media print {
+  /* FIX (impresión de recibos/facturas): las reglas de abajo ya ocultaban
+     el Navbar/Sidebar (nav, aside, #sidebar, #navbar) y reseteaban el
+     contenedor del modal (.fixed.inset-0), pero nada ocultaba <main> --
+     el contenedor de App.tsx que envuelve la vista activa completa (POS,
+     Dashboard, etc.). Como el modal del recibo es un descendiente DOM de
+     <main> (no un hermano), no se puede simplemente ocultar <main> sin
+     ocultar también el recibo que está dentro. Se usa en cambio el patrón
+     estándar de "aislar un único elemento imprimible": ocultar TODO por
+     visibilidad y luego volver a mostrar únicamente el ticket/voucher
+     correspondiente y sus descendientes. No cambia tamaños, tipografía,
+     colores ni estructura del recibo -- solo decide qué se pinta en la
+     hoja impresa.
+  */
+  body * {
+    visibility: hidden !important;
+  }
+
+  .receipt-ticket,
+  .receipt-ticket *,
+  #thermal-receipt-content,
+  #thermal-receipt-content *,
+  #installment-thermal-receipt-modal,
+  #installment-thermal-receipt-modal *,
+  #abono-thermal-voucher,
+  #abono-thermal-voucher *,
+  #thermal-shift-closure-voucher,
+  #thermal-shift-closure-voucher * {
+    visibility: visible !important;
+  }
+
+  .receipt-ticket,
+  #thermal-receipt-content,
+  #installment-thermal-receipt-modal,
+  #abono-thermal-voucher,
+  #thermal-shift-closure-voucher {
+    position: absolute !important;
+    left: 0 !important;
+    top: 0 !important;
+  }
+
   html, body {
     width: 80mm !important;
     max-width: 80mm !important;
