@@ -219,5 +219,121 @@ const ProductsController = {
       colors: DbHelper.getAllRows('Colores'),
       suppliers: DbHelper.getAllRows('Proveedores')
     };
+  },
+
+  /**
+   * FIX (fotos de productos -- auditoría aprobada): sube una imagen real a
+   * Google Drive y devuelve una URL utilizable directamente en <img src>.
+   * Reemplaza el flujo anterior, que guardaba el Base64 completo de la
+   * imagen directamente en la celda `imagen_url` de la hoja `Productos` --
+   * eso excedía el límite real de Google Sheets (~50,000 caracteres por
+   * celda) para cualquier fotografía real, y NUNCA debe repetirse:
+   * `imagen_url` solo almacena una URL corta o una cadena vacía.
+   *
+   * Contrato: recibe `data.imageDataUrl`, un Data URL completo tal como lo
+   * produce `FileReader.readAsDataURL()` en el navegador
+   * (`data:image/<tipo>;base64,<contenido>`). El Base64 viaja en el body
+   * de esta única petición HTTP (que Apps Script sí soporta sin problema
+   * para archivos de hasta varios MB) -- nunca se escribe en Sheets.
+   *
+   * Requiere el mismo permiso que ya protege la creación/edición de
+   * productos (`productos.crear` o `productos.editar`) -- no se inventa
+   * un permiso nuevo que ningún rol tendría sembrado en Roles_Permisos.
+   */
+  handleUploadImage(data, user) {
+    if (
+      !Security.hasPermission(user, 'productos.crear') &&
+      !Security.hasPermission(user, 'productos.editar')
+    ) {
+      throw new Error('FORBIDDEN: No tiene permiso para subir imágenes de productos.');
+    }
+
+    if (!data || typeof data.imageDataUrl !== 'string' || !data.imageDataUrl.trim()) {
+      throw new Error('VALIDATION_ERROR: Debe proporcionar la imagen a subir.');
+    }
+
+    // Extrae MIME type real y contenido Base64 del Data URL. Se valida
+    // explícitamente que el MIME sea de imagen -- nunca se confía
+    // ciegamente en lo que el cliente afirme sin verificarlo aquí también.
+    const match = /^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/.exec(data.imageDataUrl.trim());
+    if (!match) {
+      throw new Error('VALIDATION_ERROR: El archivo proporcionado no es una imagen Base64 válida.');
+    }
+
+    const mimeType = match[1].toLowerCase();
+    const base64Data = match[2];
+    const ALLOWED_MIME_TYPES = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'image/gif'];
+    if (ALLOWED_MIME_TYPES.indexOf(mimeType) === -1) {
+      throw new Error(`VALIDATION_ERROR: Formato de imagen no soportado (${mimeType}). Use JPG, PNG, WEBP o GIF.`);
+    }
+
+    let bytes;
+    try {
+      bytes = Utilities.base64Decode(base64Data);
+    } catch (e) {
+      throw new Error('VALIDATION_ERROR: No se pudo decodificar el contenido de la imagen.');
+    }
+
+    // Mismo límite ya comunicado y validado en el frontend (10MB) --
+    // defensa adicional del lado del servidor, no un cambio de ese límite.
+    const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+    if (bytes.length > MAX_IMAGE_BYTES) {
+      throw new Error('VALIDATION_ERROR: La imagen supera el tamaño máximo permitido de 10MB.');
+    }
+
+    const extensionByMime = {
+      'image/jpeg': 'jpg',
+      'image/jpg': 'jpg',
+      'image/png': 'png',
+      'image/webp': 'webp',
+      'image/gif': 'gif'
+    };
+    const extension = extensionByMime[mimeType] || 'jpg';
+    const fileName = `producto_${Utilities.getUuid()}.${extension}`;
+
+    const blob = Utilities.newBlob(bytes, mimeType, fileName);
+    const folder = this.getOrCreateProductImagesFolder();
+    const file = folder.createFile(blob);
+
+    // La fotografía es contenido de catálogo (no información sensible) --
+    // se comparte como "cualquiera con el enlace puede ver" para que el
+    // POS/Catálogo puedan mostrarla en <img src> sin autenticación.
+    file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+
+    const fileId = file.getId();
+    // Formato de URL de Drive directamente cargable como <img src> --
+    // la URL de "vista" normal de Drive (file.getUrl()) sirve una página
+    // HTML, no la imagen cruda, y NO funciona dentro de un <img>.
+    const imageUrl = `https://drive.google.com/uc?export=view&id=${fileId}`;
+
+    AuditController.log(
+      user,
+      'PRODUCT_IMAGE_UPLOADED',
+      'PRODUCTOS',
+      'ProductImage',
+      fileId,
+      `Imagen de producto subida a Google Drive (${fileName}, ${(bytes.length / 1024).toFixed(0)}KB)`
+    );
+
+    return {
+      success: true,
+      message: 'Imagen subida exitosamente a Google Drive.',
+      imageUrl: imageUrl,
+      fileId: fileId
+    };
+  },
+
+  /**
+   * Reutiliza la carpeta de Drive dedicada a fotos de productos si ya
+   * existe (búsqueda exacta por nombre) -- nunca crea una carpeta
+   * duplicada en cada subida.
+   */
+  getOrCreateProductImagesFolder() {
+    const FOLDER_NAME = 'POS - Imagenes de Productos';
+    const existing = DriveApp.getFoldersByName(FOLDER_NAME);
+    if (existing.hasNext()) {
+      return existing.next();
+    }
+    return DriveApp.createFolder(FOLDER_NAME);
   }
 };

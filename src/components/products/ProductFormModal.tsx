@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Product, ProductVariant, Category, Size, Color } from '../../types';
 import { useToast } from '../../context/ToastContext';
+import { productsApi } from '../../services/productsApi';
 import { formatCurrency } from '../../utils/formatters';
 import {
   X,
@@ -83,6 +84,16 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
   const [isDragging, setIsDragging] = useState(false);
   const cameraInputRef = useRef<HTMLInputElement>(null);
   const galleryInputRef = useRef<HTMLInputElement>(null);
+  // FIX (fotos de productos -- auditoría aprobada): `imagenUrl` sigue
+  // siendo el estado de PREVISUALIZACIÓN (Base64 mientras se está
+  // editando, o la URL real ya guardada al abrir para editar) -- eso no
+  // cambia. `selectedImageFile` es la pieza nueva: solo se pone en
+  // no-null cuando el usuario elige/cambia un archivo EN ESTA sesión del
+  // formulario. Al guardar, es lo único que decide si hace falta subir
+  // una imagen nueva a Drive antes de products.save, o si se reutiliza
+  // la URL que ya existía sin volver a subir nada.
+  const [selectedImageFile, setSelectedImageFile] = useState<File | null>(null);
+  const [uploadingImage, setUploadingImage] = useState(false);
 
   // FASE 3.6B: tallas/colores disponibles = los reales del backend
   // (initialSizes/initialColors, prop). El add/edit/delete de este panel
@@ -134,6 +145,11 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
     setEditingSizeId(null);
     setEditingColorId(null);
     setShowCatalogManager(false);
+    // FIX (fotos de productos): abrir el formulario (crear o editar)
+    // nunca significa "el usuario acaba de elegir un archivo nuevo" --
+    // se resetea explícitamente para que un guardado sin tocar la foto
+    // nunca dispare una subida a Drive innecesaria.
+    setSelectedImageFile(null);
 
     if (editingProduct) {
       setNombre(editingProduct.nombre || '');
@@ -228,12 +244,18 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
       return;
     }
 
-    // Read and create preview data URL
+    // Read and create preview data URL -- sin cambios en este mecanismo,
+    // la previsualización sigue funcionando exactamente igual que antes.
     const reader = new FileReader();
     reader.onload = (event) => {
       if (event.target?.result) {
         const resultStr = event.target.result as string;
         setImagenUrl(resultStr);
+        // FIX (fotos de productos): marca que HAY un archivo nuevo
+        // pendiente de subir -- esto es lo único nuevo aquí. Se guarda
+        // junto con el Base64 (no en vez de él) porque handleSubmit sigue
+        // necesitando ese Base64 para subirlo a Drive.
+        setSelectedImageFile(file);
         showToast('Imagen Cargada', 'Previsualización lista para el producto.', 'exito');
       }
     };
@@ -263,6 +285,11 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
 
   const handleRemoveImage = () => {
     setImagenUrl('');
+    // FIX (fotos de productos): al eliminar explícitamente, también se
+    // limpia el archivo pendiente -- al guardar, esto envía imagenUrl
+    // vacío directamente a products.save, sin intentar subir nada
+    // (satisface FASE 5: "Eliminar imagen" -> imagenUrl vacío).
+    setSelectedImageFile(null);
     setImageError(null);
     if (cameraInputRef.current) cameraInputRef.current.value = '';
     if (galleryInputRef.current) galleryInputRef.current.value = '';
@@ -608,7 +635,7 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
   // ==========================================
   // FORM SUBMISSION
   // ==========================================
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
     if (!nombre.trim()) {
@@ -635,6 +662,33 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
       return;
     }
 
+    // FIX (fotos de productos -- auditoría aprobada): si el usuario NO
+    // seleccionó/cambió ninguna foto en esta sesión del formulario,
+    // `imagenUrl` ya contiene lo correcto tal cual (la URL real existente
+    // al editar, o '' si nunca hubo/se eliminó) -- se envía directamente,
+    // sin ninguna llamada de red adicional. Solo si `selectedImageFile`
+    // está presente (foto nueva o reemplazada) se sube primero a Drive y
+    // se sustituye el Base64 temporal por la URL real ANTES de guardar el
+    // producto. Nunca se envía Base64 a products.save.
+    let finalImagenUrl = imagenUrl.trim();
+
+    if (selectedImageFile) {
+      setUploadingImage(true);
+      const uploadRes = await productsApi.uploadImage(finalImagenUrl);
+      setUploadingImage(false);
+
+      if (!uploadRes.success || !uploadRes.data) {
+        showToast(
+          'Error al Subir Imagen',
+          uploadRes.message || 'No se pudo subir la fotografía a Google Drive.',
+          'error'
+        );
+        return; // El formulario permanece abierto para reintentar -- el producto NO se guarda con Base64 ni con una URL inventada.
+      }
+
+      finalImagenUrl = uploadRes.data.imageUrl;
+    }
+
     const finalMainBarcode = codigoBarras.trim() || `746${Math.floor(100000000 + Math.random() * 900000000)}`;
 
     onSave({
@@ -645,7 +699,7 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
       marca: marca.trim() || 'ZIO',
       costo: numCosto,
       precio: numPrecio,
-      imagenUrl: imagenUrl.trim(),
+      imagenUrl: finalImagenUrl,
       stockMinimo: Number.isFinite(numStockMin) && numStockMin >= 0 ? numStockMin : 5,
       variantes: variantes.map((v) => ({
         ...v,
@@ -1699,19 +1753,21 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
             <button
               type="button"
               onClick={onClose}
-              disabled={saving}
+              disabled={saving || uploadingImage}
               className="py-3 px-4 rounded-xl bg-white border border-[#E4DDD2] text-xs font-bold text-[#756E65] hover:bg-[#F6F1E8] hover:text-[#2F2A25] transition cursor-pointer disabled:opacity-50"
             >
               Cancelar
             </button>
             <button
               type="submit"
-              disabled={saving}
+              disabled={saving || uploadingImage}
               className="flex-1 py-3 px-4 rounded-xl bg-[#2F2A25] text-xs font-bold text-[#FAF8F4] shadow-md hover:bg-[#403932] transition flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
             >
               <Check className="w-4 h-4 text-[#E8DCC8]" />
               <span>
-                {saving
+                {uploadingImage
+                  ? 'Subiendo imagen a Google Drive...'
+                  : saving
                   ? 'Guardando en Google Sheets...'
                   : editingProduct
                   ? 'Guardar Cambios de la Prenda'

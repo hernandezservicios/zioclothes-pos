@@ -159,6 +159,9 @@ function doPost(e) {
       case 'products.listAuxiliaries':
         result = ProductsController.handleListAuxiliaries();
         break;
+      case 'products.uploadImage':
+        result = ProductsController.handleUploadImage(data, currentUser);
+        break;
 
       // --- CUSTOMERS ---
       case 'customers.list':

@@ -154,6 +154,47 @@ class ProductsApi {
 
     return { success: true, message: res.data.message };
   }
+
+  /**
+   * FIX (fotos de productos -- auditoría aprobada): sube una imagen real a
+   * Google Drive (`products.uploadImage`, ver ProductsController.gs) y
+   * devuelve la URL resultante. `imageDataUrl` es el Data URL Base64
+   * completo tal como lo produce `FileReader.readAsDataURL()` -- ese
+   * Base64 viaja únicamente en el body de esta petición, nunca se guarda
+   * en Google Sheets. `ProductFormModal` es quien decide cuándo llamar
+   * esto (solo si el usuario seleccionó/cambió una foto), nunca en cada
+   * guardado.
+   */
+  public async uploadImage(imageDataUrl: string): Promise<ApiResponse<{ imageUrl: string }>> {
+    const token = this.token();
+    if (!token) {
+      return {
+        success: false,
+        message: 'No hay una sesión activa. Inicie sesión nuevamente antes de subir la imagen.',
+        errorCode: 'AUTH_REQUIRED',
+      };
+    }
+
+    const res = await apiService.syncWithGoogleAppsScript('products.uploadImage', { imageDataUrl }, token);
+    if (!res.success) {
+      return { success: false, message: res.message, errorCode: res.errorCode };
+    }
+
+    const raw = res.data || {};
+    if (!raw.imageUrl) {
+      return {
+        success: false,
+        message: 'El backend confirmó la subida pero no devolvió una URL de imagen válida.',
+        errorCode: 'INVALID_BACKEND_RESPONSE',
+      };
+    }
+
+    return {
+      success: true,
+      message: res.message || 'Imagen subida exitosamente.',
+      data: { imageUrl: raw.imageUrl },
+    };
+  }
 }
 
 export const productsApi = new ProductsApi();
