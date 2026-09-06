@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { Sale, ReturnRecord } from '../../types';
+import React, { useState, useEffect, useMemo } from 'react';
+import { Sale } from '../../types';
 import { returnsApi } from '../../services/returnsApi';
 import { useAuth } from '../../context/AuthContext';
 import { useDataStore } from '../../context/DataStoreContext';
@@ -14,10 +14,11 @@ export const ReturnsView: React.FC = () => {
   // FASE 3.7F / CORREGIR AUDITORÍA: ventas reales leídas del DataStore
   // central (misma colección compartida con SalesView/Dashboard/Reportes
   // -- antes cada una pedía sales.list por su cuenta, ver informe de
-  // auditoría) y devoluciones reales vía returnsApi.list()
-  // (ReturnsController.handleListReturns -> Google Sheets real). Este
-  // dominio (`returns`) no está duplicado en ninguna otra vista, así que
-  // sigue siendo propio de este componente.
+  // auditoría). FASE 10 (auditoría E2E): `returns` pasa a ser TAMBIÉN un
+  // dominio compartido del DataStore (antes era exclusivo de esta vista,
+  // con su propio useState/fetch local) -- Dashboard y Reportes ahora
+  // también lo consumen para calcular "ventas netas" restando lo
+  // realmente devuelto, en vez de cada uno inventar su propio filtro.
   const {
     sales,
     salesLoading,
@@ -28,28 +29,16 @@ export const ReturnsView: React.FC = () => {
     refreshCredits,
     refreshCreditNotes,
     refreshCustomers,
+    returns,
+    returnsLoading,
+    returnsError,
+    refreshReturns,
   } = useDataStore();
-
-  const [returns, setReturns] = useState<ReturnRecord[]>([]);
-  const [returnsLoading, setReturnsLoading] = useState(true);
-  const [returnsError, setReturnsError] = useState<string | null>(null);
-
-  const fetchReturns = useCallback(async () => {
-    setReturnsLoading(true);
-    setReturnsError(null);
-    const res = await returnsApi.list();
-    if (res.success) {
-      setReturns(res.data || []);
-    } else {
-      setReturnsError(res.message || 'No se pudo obtener el historial real de devoluciones.');
-    }
-    setReturnsLoading(false);
-  }, []);
 
   useEffect(() => {
     refreshSales();
-    fetchReturns();
-  }, [refreshSales, fetchReturns]);
+    refreshReturns();
+  }, [refreshSales, refreshReturns]);
 
   const [searchSaleCode, setSearchSaleCode] = useState('');
   const [foundSale, setFoundSale] = useState<Sale | null>(null);
@@ -177,7 +166,7 @@ export const ReturnsView: React.FC = () => {
       // invalida creditNotes si se emitió un Crédito a Favor/Nota de
       // Crédito real.
       await Promise.all([
-        fetchReturns(),
+        refreshReturns({ force: true }),
         refreshSales({ force: true }),
         refreshProducts({ force: true }),
         refreshCredits({ force: true }),
@@ -210,7 +199,7 @@ export const ReturnsView: React.FC = () => {
           type="button"
           onClick={() => {
             refreshSales({ force: true });
-            fetchReturns();
+            refreshReturns({ force: true });
           }}
           disabled={salesLoading || returnsLoading}
           className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-white border border-[#E4DDD2] text-xs font-semibold text-[#2F2A25] hover:bg-[#F6F1E8] transition shadow-2xs disabled:opacity-50"
@@ -242,7 +231,7 @@ export const ReturnsView: React.FC = () => {
             <AlertTriangle className="w-4 h-4 shrink-0" />
             <span>No se pudo cargar el historial real de devoluciones: {returnsError}</span>
           </div>
-          <button type="button" onClick={() => fetchReturns()} className="px-3 py-1.5 rounded-lg bg-rose-700 text-white font-bold text-[11px] shrink-0">
+          <button type="button" onClick={() => refreshReturns({ force: true })} className="px-3 py-1.5 rounded-lg bg-rose-700 text-white font-bold text-[11px] shrink-0">
             Reintentar
           </button>
         </div>

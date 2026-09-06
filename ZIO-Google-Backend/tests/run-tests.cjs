@@ -4154,6 +4154,184 @@ test('PERMISSIONS_MIGRATION_REQUIRES_ADMIN_ROLES_PERMISSION', () => {
   assert(String(res.error || '').indexOf('FORBIDDEN') === 0, res.error);
 });
 
+/* ================================================================
+   FASE 10 -- AUDITORÍA E2E: cash.addMovement (CashController.gs)
+   NO tenía ninguna prueba automatizada antes de esta fase. Se agregan
+   pruebas de correctitud básica y, sobre todo, una prueba de atomicidad
+   real que demuestra el hallazgo de esta fase: antes del fix, un fallo
+   entre la actualización de Cajas y la inserción en Caja_Movimientos
+   dejaba el acumulado de la caja incrementado SIN ningún movimiento que
+   lo respalde -- ahora ambas escrituras están protegidas por el mismo
+   motor de compensación (DbHelper.beginTx/recordUpdate/recordInsert/
+   rollback) que ya usa el resto del sistema.
+   ================================================================ */
+
+test('CASH_ADD_MOVEMENT_INGRESO_UPDATES_SESSION_AND_CREATES_MOVEMENT', () => {
+  const openRes = doPostRaw('cash.open', { montoInicial: 1000 }, adminToken);
+  assert(openRes.success === true, JSON.stringify(openRes));
+  const cajaId = openRes.session.id;
+
+  const res = doPostRaw('cash.addMovement', { tipo: 'INGRESO', monto: 250, motivo: 'Depósito de vuelto inicial' }, adminToken);
+  assert(res.success === true, JSON.stringify(res));
+
+  const caja = runInContext(`DbHelper.findById('Cajas', '${cajaId}')`);
+  assertEqual(Number(caja.ingresos_manuales), 250);
+
+  const movimientos = runInContext(`DbHelper.findRows('Caja_Movimientos', m => m.caja_sesion_id === '${cajaId}' && m.tipo === 'INGRESO')`);
+  assertEqual(movimientos.length, 1, 'debe existir exactamente un movimiento INGRESO respaldando el acumulado');
+  assertEqual(Number(movimientos[0].monto), 250);
+
+  doPostRaw('cash.close', { efectivoRealContado: 1250 }, adminToken);
+});
+
+test('CASH_ADD_MOVEMENT_RETIRO_UPDATES_SESSION_AND_CREATES_MOVEMENT', () => {
+  const openRes = doPostRaw('cash.open', { montoInicial: 1000 }, adminToken);
+  assert(openRes.success === true, JSON.stringify(openRes));
+  const cajaId = openRes.session.id;
+
+  const res = doPostRaw('cash.addMovement', { tipo: 'RETIRO', monto: 400, motivo: 'Depósito bancario parcial' }, adminToken);
+  assert(res.success === true, JSON.stringify(res));
+
+  const caja = runInContext(`DbHelper.findById('Cajas', '${cajaId}')`);
+  assertEqual(Number(caja.retiros_manuales), 400);
+
+  const movimientos = runInContext(`DbHelper.findRows('Caja_Movimientos', m => m.caja_sesion_id === '${cajaId}' && m.tipo === 'RETIRO')`);
+  assertEqual(movimientos.length, 1);
+  assertEqual(Number(movimientos[0].monto), 400);
+
+  doPostRaw('cash.close', { efectivoRealContado: 600 }, adminToken);
+});
+
+test('CASH_ADD_MOVEMENT_REJECTS_INVALID_TIPO_WITHOUT_TOUCHING_CAJA', () => {
+  const openRes = doPostRaw('cash.open', { montoInicial: 1000 }, adminToken);
+  assert(openRes.success === true, JSON.stringify(openRes));
+  const cajaId = openRes.session.id;
+
+  const res = doPostRaw('cash.addMovement', { tipo: 'TRANSFERENCIA_INVALIDA', monto: 100, motivo: 'Tipo inválido' }, adminToken);
+  assert(res.success === false, 'un tipo distinto de INGRESO/RETIRO debe rechazarse');
+  assert(String(res.error || '').indexOf('VALIDATION_ERROR') === 0, res.error);
+
+  const caja = runInContext(`DbHelper.findById('Cajas', '${cajaId}')`);
+  assertEqual(Number(caja.ingresos_manuales), 0, 'un intento rechazado nunca debe alterar el acumulado de la caja');
+  assertEqual(Number(caja.retiros_manuales), 0);
+
+  doPostRaw('cash.close', { efectivoRealContado: 1000 }, adminToken);
+});
+
+test('CASH_ADD_MOVEMENT_ROLLS_BACK_CAJA_ACCUMULATOR_IF_MOVEMENT_INSERT_FAILS', () => {
+  // Reproduce exactamente el hallazgo de esta fase: se fuerza deliberadamente
+  // un fallo en la escritura de Caja_Movimientos (la SEGUNDA escritura, la
+  // que antes del fix no tenía protección de rollback) y se comprueba que
+  // el acumulado de Cajas -- ya modificado por la PRIMERA escritura -- se
+  // restaura a su valor original en vez de quedar incrementado a medias.
+  const openRes = doPostRaw('cash.open', { montoInicial: 1000 }, adminToken);
+  assert(openRes.success === true, JSON.stringify(openRes));
+  const cajaId = openRes.session.id;
+
+  runInContext(`
+    (function() {
+      if (!DbHelper.__originalInsertRow) DbHelper.__originalInsertRow = DbHelper.insertRow;
+      DbHelper.insertRow = function(sheetName, obj) {
+        if (sheetName === 'Caja_Movimientos' && obj.motivo === '__FASE10_FORZAR_FALLO__') {
+          throw new Error('SIMULATED_FAILURE_FASE10: fallo forzado para probar rollback.');
+        }
+        return DbHelper.__originalInsertRow.call(DbHelper, sheetName, obj);
+      };
+    })();
+  `);
+
+  let res;
+  try {
+    res = doPostRaw('cash.addMovement', { tipo: 'INGRESO', monto: 500, motivo: '__FASE10_FORZAR_FALLO__' }, adminToken);
+  } finally {
+    // Se restaura SIEMPRE el método real, incluso si la aserción de abajo fallara.
+    runInContext(`DbHelper.insertRow = DbHelper.__originalInsertRow;`);
+  }
+
+  assert(res.success === false, 'la operación debe fallar cuando la inserción del movimiento falla');
+  assert(String(res.error || '').indexOf('SIMULATED_FAILURE_FASE10') !== -1, res.error);
+
+  const caja = runInContext(`DbHelper.findById('Cajas', '${cajaId}')`);
+  assertEqual(Number(caja.ingresos_manuales), 0, 'el acumulado de ingresos_manuales debe quedar restaurado a su valor original tras el rollback -- NUNCA a medias');
+
+  const movimientos = runInContext(`DbHelper.findRows('Caja_Movimientos', m => m.caja_sesion_id === '${cajaId}')`);
+  assertEqual(movimientos.length, 0, 'no debe quedar ningún movimiento parcial registrado');
+
+  doPostRaw('cash.close', { efectivoRealContado: 1000 }, adminToken);
+});
+
+/* ================================================================
+   FASE 10 -- AUDITORÍA E2E: sales.void debe revertir una aplicación de
+   Crédito a Favor/Nota de Crédito (hallazgo real: antes de esta fase,
+   anular una venta que había consumido un crédito a favor NUNCA
+   restauraba su saldo -- el cliente perdía ese valor para siempre aunque
+   la venta que lo usó ya no existiera).
+   ================================================================ */
+
+test('SALE_VOID_REVERSES_FULL_CREDIT_NOTE_APPLICATION', () => {
+  const emitido = issueCreditNoteForTest(); // saldo 1180
+  const saleRes = doPostRaw('sales.create', buildValidSaleData({
+    clienteId: 'CLI-T01', clienteNombre: 'Cliente Test',
+    pagos: [{ metodo: 'CREDITO_FAVOR', monto: 1180 }],
+    creditoFavorAplicado: { id: emitido.id, monto: 1180 }
+  }), adminToken);
+  assert(saleRes.success === true, JSON.stringify(saleRes));
+  assertEqual(saleRes.creditoFavorAplicado.estado, 'APLICADA');
+
+  const creditoAntes = runInContext(`DbHelper.findById('Creditos_Favor', '${emitido.id}')`);
+  assertEqual(Number(creditoAntes.saldo_disponible), 0);
+
+  const voidRes = doPostRaw('sales.void', { saleId: saleRes.saleId, motivo: 'Prueba de reversión de crédito a favor' }, adminToken);
+  assert(voidRes.success === true, JSON.stringify(voidRes));
+
+  const creditoDespues = runInContext(`DbHelper.findById('Creditos_Favor', '${emitido.id}')`);
+  assertEqual(Number(creditoDespues.saldo_disponible), 1180, 'el saldo del crédito debe restaurarse por completo al anular la venta que lo consumió');
+  assertEqual(Number(creditoDespues.monto_aplicado), 0);
+  assertEqual(creditoDespues.estado, 'EMITIDA', 'debe volver a EMITIDA -- ya no tiene ninguna aplicación activa');
+
+  const aplicaciones = runInContext(`DbHelper.findRows('Creditos_Favor_Aplicaciones', a => a.credito_favor_id === '${emitido.id}')`);
+  assertEqual(aplicaciones.length, 2, 'debe quedar la aplicación original MÁS la reversión -- nunca se borra ni se edita la original');
+  const montos = aplicaciones.map(a => Number(a.monto)).sort((a, b) => a - b);
+  assertEqual(JSON.stringify(montos), JSON.stringify([-1180, 1180]), 'la reversión debe quedar registrada como un monto negativo, trazable por separado de la aplicación original');
+});
+
+test('SALE_VOID_REVERSES_ONLY_ITS_OWN_CREDIT_NOTE_APPLICATION', () => {
+  // Un crédito aplicado PARCIALMENTE a DOS ventas distintas -- anular una
+  // de ellas debe revertir SOLO esa porción, sin afectar la otra.
+  const emitido = issueCreditNoteForTest(); // saldo 1180
+  const sale1 = doPostRaw('sales.create', buildValidSaleData({
+    clienteId: 'CLI-T01', clienteNombre: 'Cliente Test',
+    metodoPago: 'MIXTO',
+    pagos: [{ metodo: 'CREDITO_FAVOR', monto: 500 }, { metodo: 'EFECTIVO', monto: 680 }],
+    creditoFavorAplicado: { id: emitido.id, monto: 500 }
+  }), adminToken);
+  assert(sale1.success === true, JSON.stringify(sale1));
+
+  const sale2 = doPostRaw('sales.create', buildValidSaleData({
+    clienteId: 'CLI-T01', clienteNombre: 'Cliente Test',
+    metodoPago: 'MIXTO',
+    pagos: [{ metodo: 'CREDITO_FAVOR', monto: 300 }, { metodo: 'EFECTIVO', monto: 880 }],
+    creditoFavorAplicado: { id: emitido.id, monto: 300 }
+  }), adminToken);
+  assert(sale2.success === true, JSON.stringify(sale2));
+
+  const creditoAntes = runInContext(`DbHelper.findById('Creditos_Favor', '${emitido.id}')`);
+  assertEqual(Number(creditoAntes.saldo_disponible), 380); // 1180 - 500 - 300
+  assertEqual(creditoAntes.estado, 'PARCIALMENTE_APLICADA');
+
+  const voidRes = doPostRaw('sales.void', { saleId: sale1.saleId, motivo: 'Anular solo la primera venta' }, adminToken);
+  assert(voidRes.success === true, JSON.stringify(voidRes));
+
+  const creditoDespues = runInContext(`DbHelper.findById('Creditos_Favor', '${emitido.id}')`);
+  assertEqual(Number(creditoDespues.saldo_disponible), 880, 'debe restaurarse SOLO la porción de la venta anulada (380 + 500)');
+  assertEqual(Number(creditoDespues.monto_aplicado), 300, 'la aplicación de la venta 2 (todavía activa) debe permanecer intacta');
+  assertEqual(creditoDespues.estado, 'PARCIALMENTE_APLICADA', 'sigue parcialmente aplicada por la venta 2, que no fue anulada');
+
+  const aplicacionesVenta2 = runInContext(`DbHelper.findRows('Creditos_Favor_Aplicaciones', a => a.venta_id === '${sale2.saleId}')`);
+  assertEqual(aplicacionesVenta2.length, 1, 'la aplicación de la venta NO anulada nunca debe tocarse');
+  assertEqual(Number(aplicacionesVenta2[0].monto), 300);
+});
+
 /* ------------------------------------------------------------
    REPORTE
    ------------------------------------------------------------ */

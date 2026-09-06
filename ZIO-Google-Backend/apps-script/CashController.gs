@@ -223,6 +223,19 @@ const CashController = {
 
   /**
    * Manual cash movement (INGRESO or RETIRO)
+   *
+   * FASE 10 (auditoría E2E, hallazgo real -- "estados parciales"): esta
+   * función escribía en DOS hojas (Cajas.ingresos_manuales/retiros_manuales
+   * y Caja_Movimientos) SIN el motor de compensación (DbHelper.beginTx/
+   * recordUpdate/recordInsert/rollback) que sí usan el resto de las
+   * operaciones de dos o más escrituras de este backend (SalesController,
+   * ReturnsController, CreditNotesController, ExpensesController...). Si
+   * la segunda escritura (insertRow en Caja_Movimientos) fallara por
+   * cualquier motivo, el acumulado de la caja ya habría quedado
+   * incrementado SIN ningún movimiento que lo respalde en el historial --
+   * un estado parcial e inconsistente, exactamente el tipo de bug que esta
+   * fase pide buscar. Se aplica el mismo patrón ya establecido en el resto
+   * del sistema.
    */
   handleAddMovement(data, user) {
     Security.requirePermission(user, 'caja.movimientos');
@@ -237,56 +250,65 @@ const CashController = {
     }
 
     return LockServiceHelper.runWithLock(CONFIG.LOCK_TIMEOUT_MS, () => {
-      const active = DbHelper.findRows('Cajas', s => s.estado === 'ABIERTA')[0];
-      if (!active) {
-        throw new Error('NOT_FOUND: No hay ningún turno de caja abierto para registrar movimientos.');
+      const tx = DbHelper.beginTx();
+      try {
+        const active = DbHelper.findRows('Cajas', s => s.estado === 'ABIERTA')[0];
+        if (!active) {
+          throw new Error('NOT_FOUND: No hay ningún turno de caja abierto para registrar movimientos.');
+        }
+
+        const tipo = data.tipo.toUpperCase();
+        if (tipo !== 'INGRESO' && tipo !== 'RETIRO') {
+          throw new Error('VALIDATION_ERROR: El tipo debe ser INGRESO o RETIRO.');
+        }
+
+        const cmovId = Sequences.getNext('CMOV');
+        const nowStr = getNowFormatted();
+
+        // Update session accumulated values
+        if (tipo === 'INGRESO') {
+          const currentIng = Number(active.ingresos_manuales) || 0;
+          DbHelper.recordUpdate(tx, 'Cajas', active.id, { ingresos_manuales: active.ingresos_manuales });
+          DbHelper.updateRowById('Cajas', active.id, { ingresos_manuales: currentIng + monto });
+        } else {
+          const currentRet = Number(active.retiros_manuales) || 0;
+          DbHelper.recordUpdate(tx, 'Cajas', active.id, { retiros_manuales: active.retiros_manuales });
+          DbHelper.updateRowById('Cajas', active.id, { retiros_manuales: currentRet + monto });
+        }
+
+        // Insert movement
+        DbHelper.insertRow('Caja_Movimientos', {
+          id: cmovId,
+          caja_sesion_id: active.id,
+          tipo: tipo,
+          monto: monto,
+          motivo: data.motivo.trim(),
+          categoria_gasto: '',
+          referencia: data.referencia || '',
+          usuario_id: user ? user.id : 'USR-001',
+          usuario_nombre: user ? `${user.nombre} ${user.apellido || ''}`.trim() : 'Cajero',
+          fecha: nowStr,
+          estado: 'ACTIVO'
+        });
+        DbHelper.recordInsert(tx, 'Caja_Movimientos', cmovId);
+
+        AuditController.log(
+          user,
+          `CASH_${tipo}`,
+          'CAJA',
+          'CashMovement',
+          cmovId,
+          `${tipo} manual de RD$${monto.toLocaleString()} en caja: ${data.motivo}`
+        );
+
+        return {
+          success: true,
+          message: `${tipo} de RD$${monto.toLocaleString()} registrado exitosamente en la caja activa.`
+        };
+      } catch (err) {
+        DbHelper.rollback(tx, err);
+        throw err;
       }
-
-      const tipo = data.tipo.toUpperCase();
-      if (tipo !== 'INGRESO' && tipo !== 'RETIRO') {
-        throw new Error('VALIDATION_ERROR: El tipo debe ser INGRESO o RETIRO.');
-      }
-
-      const cmovId = Sequences.getNext('CMOV');
-      const nowStr = getNowFormatted();
-
-      // Update session accumulated values
-      if (tipo === 'INGRESO') {
-        const currentIng = Number(active.ingresos_manuales) || 0;
-        DbHelper.updateRowById('Cajas', active.id, { ingresos_manuales: currentIng + monto });
-      } else {
-        const currentRet = Number(active.retiros_manuales) || 0;
-        DbHelper.updateRowById('Cajas', active.id, { retiros_manuales: currentRet + monto });
-      }
-
-      // Insert movement
-      DbHelper.insertRow('Caja_Movimientos', {
-        id: cmovId,
-        caja_sesion_id: active.id,
-        tipo: tipo,
-        monto: monto,
-        motivo: data.motivo.trim(),
-        categoria_gasto: '',
-        referencia: data.referencia || '',
-        usuario_id: user ? user.id : 'USR-001',
-        usuario_nombre: user ? `${user.nombre} ${user.apellido || ''}`.trim() : 'Cajero',
-        fecha: nowStr,
-        estado: 'ACTIVO'
-      });
-
-      AuditController.log(
-        user,
-        `CASH_${tipo}`,
-        'CAJA',
-        'CashMovement',
-        cmovId,
-        `${tipo} manual de RD$${monto.toLocaleString()} en caja: ${data.motivo}`
-      );
-
-      return {
-        success: true,
-        message: `${tipo} de RD$${monto.toLocaleString()} registrado exitosamente en la caja activa.`
-      };
     });
   }
 };

@@ -602,7 +602,10 @@ const SalesController = {
 
   /**
    * ATOMIC VOID SALE (Anulación de Factura)
-   * Restores stock, marks sale as ANULADA, registers Kardex DEVOLUCION, cancels Credit if unpaid.
+   * Restores stock, marks sale as ANULADA, registers Kardex DEVOLUCION,
+   * cancels the associated Credito (cuenta por cobrar) if unpaid, and
+   * (FASE 10) reverses cualquier aplicación de Crédito a Favor/Nota de
+   * Crédito que esta venta hubiera consumido, restaurando su saldo.
    */
   handleVoidSale(data, user) {
     Security.requirePermission(user, 'ventas.anular');
@@ -678,6 +681,66 @@ const SalesController = {
               observaciones: `${credit.observaciones || ''} | Anulado por revocación de venta ${sale.numero_venta}`
             });
           }
+        }
+
+        // Step 2b (FASE 10 -- auditoría E2E, hallazgo real): si esta venta
+        // consumió un Crédito a Favor/Nota de Crédito
+        // (CreditNotesController.applyToSaleWithinTx_, ver
+        // Creditos_Favor_Aplicaciones), anular la venta NUNCA revertía esa
+        // aplicación -- el saldo del cliente quedaba consumido para
+        // siempre aunque la venta que lo usó ya no existiera. Se restaura
+        // el saldo del/de los crédito(s) aplicado(s) a esta venta, y se
+        // registra la reversión como una NUEVA fila en
+        // Creditos_Favor_Aplicaciones con monto NEGATIVO (nunca se edita
+        // ni se borra la aplicación original -- mismo principio de
+        // histórico append-only que ya usa esta hoja) para que el rastro
+        // completo (aplicación original + reversión) quede visible.
+        const creditNoteApplications = DbHelper.findRows('Creditos_Favor_Aplicaciones', a => a.venta_id === data.saleId);
+        for (const application of creditNoteApplications) {
+          const creditNote = DbHelper.findById('Creditos_Favor', application.credito_favor_id);
+          if (!creditNote || creditNote.estado === 'ANULADA') continue;
+
+          const montoAplicadoOriginal = roundMoney(Number(application.monto) || 0);
+          if (montoAplicadoOriginal <= 0) continue;
+
+          const nuevoSaldo = roundMoney((Number(creditNote.saldo_disponible) || 0) + montoAplicadoOriginal);
+          const nuevoMontoAplicado = roundMoney(Math.max(0, (Number(creditNote.monto_aplicado) || 0) - montoAplicadoOriginal));
+          const nuevoEstadoCredito = nuevoMontoAplicado <= 0 ? 'EMITIDA' : 'PARCIALMENTE_APLICADA';
+
+          DbHelper.recordUpdate(tx, 'Creditos_Favor', creditNote.id, {
+            monto_aplicado: creditNote.monto_aplicado,
+            saldo_disponible: creditNote.saldo_disponible,
+            estado: creditNote.estado,
+            actualizado_en: creditNote.actualizado_en
+          });
+          DbHelper.updateRowById('Creditos_Favor', creditNote.id, {
+            monto_aplicado: nuevoMontoAplicado,
+            saldo_disponible: nuevoSaldo,
+            estado: nuevoEstadoCredito,
+            actualizado_en: nowStr
+          });
+
+          const reversalId = Sequences.getNext('CFAPP');
+          DbHelper.insertRow('Creditos_Favor_Aplicaciones', {
+            id: reversalId,
+            credito_favor_id: creditNote.id,
+            venta_id: data.saleId,
+            numero_venta: sale.numero_venta,
+            monto: -montoAplicadoOriginal,
+            fecha: nowStr,
+            usuario_id: user ? user.id : 'USR-001',
+            usuario_nombre: user ? `${user.nombre} ${user.apellido || ''}`.trim() : 'Sistema'
+          });
+          DbHelper.recordInsert(tx, 'Creditos_Favor_Aplicaciones', reversalId);
+
+          AuditController.log(
+            user,
+            'CREDIT_NOTE_APPLICATION_REVERSED',
+            'CREDITOS_FAVOR',
+            'CreditNote',
+            creditNote.id,
+            `Aplicación de RD$${montoAplicadoOriginal.toLocaleString()} a la venta ${sale.numero_venta} revertida por anulación de venta. Saldo restaurado a RD$${nuevoSaldo.toLocaleString()}.`
+          );
         }
 
         // Step 3: Mark Sale as ANULADA

@@ -63,6 +63,18 @@ export const ReportsView: React.FC = () => {
     expensesLoading,
     expensesError,
     refreshExpenses,
+    // FASE 10 (auditoría E2E -- hallazgo real, "ventas netas"): antes este
+    // reporte filtraba `s.estado === 'COMPLETADA'`, lo que descartaba POR
+    // COMPLETO cualquier venta con una devolución parcial/total
+    // (DEVUELTA_PARCIAL/DEVUELTA_TOTAL) -- incluyendo la parte de esa
+    // venta que NUNCA se devolvió. Eso SUBESTIMABA "Ventas Totales", en
+    // sentido contrario al Dashboard (que SOBRESTIMABA al no restar nada
+    // de lo devuelto) -- ambas pantallas mostraban números distintos e
+    // incorrectos para el mismo concepto. Se corrige igual que en
+    // DashboardView.tsx: se incluyen esas ventas en el bruto y se resta lo
+    // realmente devuelto (returns.list), nunca se descarta la venta entera.
+    returns: rawReturns,
+    refreshReturns,
   } = useDataStore();
 
   useEffect(() => {
@@ -70,22 +82,37 @@ export const ReportsView: React.FC = () => {
     refreshCredits();
     refreshCreditNotes();
     refreshExpenses();
-  }, [refreshSales, refreshCredits, refreshCreditNotes, refreshExpenses]);
+    refreshReturns();
+  }, [refreshSales, refreshCredits, refreshCreditNotes, refreshExpenses, refreshReturns]);
 
-  const sales = (rawSales || []).filter((s) => s && s.estado === 'COMPLETADA');
+  const sales = (rawSales || []).filter((s) => s && s.estado !== 'ANULADA');
+  const returnsList = rawReturns || [];
   const expenses = rawExpenses || [];
   const credits = rawCredits || [];
   const installments = (rawCredits || []).flatMap((c) => c.abonos || []).filter((i) => i && i.estado !== 'ANULADO');
 
   // Metrics Calculation
-  const totalSalesRevenue = sales.reduce((acc, s) => acc + (s.total || 0), 0);
+  const totalSalesRevenueBruto = sales.reduce((acc, s) => acc + (s.total || 0), 0);
   // FASE 3.7A: antes, cuando faltaba costoUnitario en un item, se asumía
   // un margen del 50% (item.precioUnitario * 0.5) -- un dato financiero
   // inventado. sales.list ya devuelve costoTotal real por venta (calculado
   // autoritativamente en el backend al crear la venta desde el costo real
   // de la variante), así que se usa directamente sin recalcular ni asumir
   // nada a nivel de item.
-  const totalCOGS = sales.reduce((acc, s) => acc + (s.costoTotal || 0), 0);
+  const totalCOGSBruto = sales.reduce((acc, s) => acc + (s.costoTotal || 0), 0);
+
+  // Devoluciones reales (todo el historial, mismo alcance "sin filtro de
+  // período" que ya tenía el resto de este reporte -- ver `timeRange`,
+  // declarado pero nunca aplicado a ningún cálculo de esta pantalla,
+  // documentado como hallazgo separado en el informe de auditoría).
+  const totalDevueltoMonto = returnsList.reduce((acc, r) => acc + (r.montoDevuelto || 0), 0);
+  const totalDevueltoCosto = returnsList.reduce(
+    (acc, r) => acc + (r.items || []).reduce((s, it) => s + (it.costoUnitario || 0) * (it.cantidad || 0), 0),
+    0
+  );
+
+  const totalSalesRevenue = Math.max(0, totalSalesRevenueBruto - totalDevueltoMonto);
+  const totalCOGS = Math.max(0, totalCOGSBruto - totalDevueltoCosto);
 
   const grossProfit = totalSalesRevenue - totalCOGS;
   const grossMargin = totalSalesRevenue > 0 ? (grossProfit / totalSalesRevenue) * 100 : 0;
@@ -141,8 +168,10 @@ export const ReportsView: React.FC = () => {
 
   const handleExportFullFinancialReport = () => {
     const reportRows = [
-      { Concepto: 'Ingresos Totales por Ventas', Monto: totalSalesRevenue },
-      { Concepto: 'Costo de Mercancía Vendida (COGS)', Monto: -totalCOGS },
+      { Concepto: 'Ventas Brutas', Monto: totalSalesRevenueBruto },
+      { Concepto: 'Devoluciones (monto devuelto)', Monto: -totalDevueltoMonto },
+      { Concepto: 'Ingresos Totales por Ventas (neto de devoluciones)', Monto: totalSalesRevenue },
+      { Concepto: 'Costo de Mercancía Vendida (COGS, neto de devoluciones)', Monto: -totalCOGS },
       { Concepto: 'Ganancia Bruta', Monto: grossProfit },
       { Concepto: 'Margen Bruto (%)', Monto: `${grossMargin.toFixed(2)}%` },
       { Concepto: 'Gastos Operativos Registrados', Monto: -totalExpenses },
@@ -221,7 +250,9 @@ export const ReportsView: React.FC = () => {
           <p className="text-xl font-serif font-bold text-[#2F2A25] mt-1">
             {salesLoading ? '...' : formatCurrency(totalSalesRevenue, settings.simboloMoneda)}
           </p>
-          <span className="text-[10px] text-emerald-700 font-semibold">{sales.length} transacciones</span>
+          <span className="text-[10px] text-emerald-700 font-semibold">
+            {sales.length} transacciones{totalDevueltoMonto > 0 ? ` · neto de ${formatCurrency(totalDevueltoMonto, settings.simboloMoneda)} devuelto` : ''}
+          </span>
         </div>
 
         {hasPermission('costos.ver') && (

@@ -10,7 +10,7 @@ import {
 } from 'recharts';
 import { useAuth } from '../../context/AuthContext';
 import { useDataStore } from '../../context/DataStoreContext';
-import { formatCurrency } from '../../utils/formatters';
+import { formatCurrency, matchesReportPeriod } from '../../utils/formatters';
 import { toDisplayableImageUrl } from '../../utils/imageUrl';
 import {
   TrendingUp,
@@ -64,6 +64,15 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
     refreshCustomers,
     expenses,
     refreshExpenses,
+    // FASE 10 (auditoría E2E -- "ventas netas"): devoluciones reales, para
+    // restarlas de las ventas brutas (ver más abajo). Antes este dashboard
+    // sumaba `sale.total` de TODA venta no anulada, incluyendo ventas con
+    // devolución total/parcial (estado DEVUELTA_TOTAL/DEVUELTA_PARCIAL) --
+    // ese `total` nunca se reduce cuando se devuelve mercancía (la
+    // devolución es un registro aparte en Devoluciones), así que "Ventas
+    // de Hoy/Mes" quedaba SOBRESTIMADO por el monto de todo lo devuelto.
+    returns: returnsData,
+    refreshReturns,
   } = useDataStore();
 
   useEffect(() => {
@@ -72,11 +81,13 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
     refreshProducts();
     refreshCustomers();
     refreshExpenses();
-  }, [refreshSales, refreshCredits, refreshProducts, refreshCustomers, refreshExpenses]);
+    refreshReturns();
+  }, [refreshSales, refreshCredits, refreshProducts, refreshCustomers, refreshExpenses, refreshReturns]);
 
   // activeCash viene de AuthContext (cash.getActiveSession real), no del
   // DataStore -- la caja sigue fuera de alcance de esta fase (ver informe).
   const sales = (salesData || []).filter((s) => s && s.estado !== 'ANULADA');
+  const returnsList = returnsData || [];
   const credits = creditsData || [];
   const installments = (creditsData || [])
     .flatMap((c) => c.abonos || [])
@@ -84,20 +95,47 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
   const activeCash = activeCashSession;
 
   // 1. KPI Calculations
-  const todayStr = new Date().toISOString().substring(0, 10);
-  const currentMonthStr = new Date().toISOString().substring(0, 7);
-
-  const salesToday = (sales || [])
-    .filter((s) => s && s.fecha && s.fecha.startsWith(todayStr))
+  // FASE 10.1 (cierre de auditoría -- "no usar UTC de forma que cambie el
+  // día comercial"): se usa `matchesReportPeriod` (utils/formatters.ts),
+  // la MISMA función que ahora usa ReportsView.tsx para su selector
+  // HOY/SEMANA/MES/TODO -- calcula el día/mes SIEMPRE en la zona horaria
+  // del negocio (America/Santo_Domingo, vía Intl.DateTimeFormat), nunca
+  // en UTC ni en la hora del navegador. Antes (Fase 10) se usaba
+  // `getFullYear()`/`getMonth()` del navegador -- corregía el bug de
+  // `toISOString()`, pero seguía dependiendo del reloj/zona horaria del
+  // EQUIPO, no del negocio. Reutilizar la misma función aquí garantiza
+  // que Dashboard y Reportes apliquen EXACTAMENTE la misma regla de
+  // fecha para el mismo concepto de período (nunca dos fórmulas
+  // distintas para "hoy"/"este mes").
+  const salesTodayBruto = (sales || [])
+    .filter((s) => s && matchesReportPeriod(s.fecha, 'HOY'))
     .reduce((acc, s) => acc + (s.total || 0), 0);
 
-  const salesMonth = (sales || [])
-    .filter((s) => s && s.fecha && s.fecha.startsWith(currentMonthStr))
+  const salesMonthBruto = (sales || [])
+    .filter((s) => s && matchesReportPeriod(s.fecha, 'MES'))
     .reduce((acc, s) => acc + (s.total || 0), 0);
 
-  const cogsMonth = (sales || [])
-    .filter((s) => s && s.fecha && s.fecha.startsWith(currentMonthStr))
+  const cogsMonthBruto = (sales || [])
+    .filter((s) => s && matchesReportPeriod(s.fecha, 'MES'))
     .reduce((acc, s) => acc + (s.costoTotal || 0), 0);
+
+  // Devoluciones reales del período -- se resta tanto el monto devuelto
+  // (revenue) como el costo de la mercancía devuelta (para que la
+  // ganancia bruta también quede neta, no solo la venta).
+  const devolucionesMontoHoy = returnsList
+    .filter((r) => r && matchesReportPeriod(r.fecha, 'HOY'))
+    .reduce((acc, r) => acc + (r.montoDevuelto || 0), 0);
+
+  const devolucionesDelMes = returnsList.filter((r) => r && matchesReportPeriod(r.fecha, 'MES'));
+  const devolucionesMontoMes = devolucionesDelMes.reduce((acc, r) => acc + (r.montoDevuelto || 0), 0);
+  const devolucionesCostoMes = devolucionesDelMes.reduce(
+    (acc, r) => acc + (r.items || []).reduce((s, it) => s + (it.costoUnitario || 0) * (it.cantidad || 0), 0),
+    0
+  );
+
+  const salesToday = Math.max(0, salesTodayBruto - devolucionesMontoHoy);
+  const salesMonth = Math.max(0, salesMonthBruto - devolucionesMontoMes);
+  const cogsMonth = Math.max(0, cogsMonthBruto - devolucionesCostoMes);
 
   const grossProfitMonth = salesMonth - cogsMonth;
 
@@ -385,7 +423,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
             <h3 className="text-lg sm:text-xl font-bold text-[#2F2A25]">
               {salesLoading ? '...' : formatCurrency(salesMonth, settings.simboloMoneda)}
             </h3>
-            <span className="text-[10px] text-[#756E65]">Mes actual</span>
+            <span className="text-[10px] text-[#756E65]">
+              Mes actual{devolucionesMontoMes > 0 ? ` (neto de ${formatCurrency(devolucionesMontoMes, settings.simboloMoneda)} devuelto)` : ''}
+            </span>
           </div>
         </div>
 

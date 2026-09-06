@@ -1,5 +1,5 @@
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
-import { Product, Category, Size, Color, Supplier, Sale, AccountReceivable, Expense, CreditNote } from '../types';
+import { Product, Category, Size, Color, Supplier, Sale, AccountReceivable, Expense, CreditNote, ReturnRecord } from '../types';
 import { storageService } from '../services/storageService';
 import { productsApi, mapProduct, mapSize, mapColor } from '../services/productsApi';
 import { customersApi, CustomerWithCredit, mapCustomer } from '../services/customersApi';
@@ -7,6 +7,7 @@ import { salesApi } from '../services/salesApi';
 import { creditsApi } from '../services/creditsApi';
 import { creditNotesApi } from '../services/creditNotesApi';
 import { expensesApi } from '../services/expensesApi';
+import { returnsApi } from '../services/returnsApi';
 
 /**
  * CORREGIR AUDITORÍA (fase de arquitectura de datos) — DataStore central.
@@ -52,6 +53,7 @@ const SALES_TTL_MS = 20_000;
 const CREDITS_TTL_MS = 20_000;
 const CREDIT_NOTES_TTL_MS = 20_000;
 const EXPENSES_TTL_MS = 30_000;
+const RETURNS_TTL_MS = 20_000;
 
 export interface BootstrapBundle {
   products?: any[];
@@ -104,12 +106,19 @@ interface DataStoreContextType {
   expensesError: string | null;
   expensesStale: boolean;
 
+  /** FASE 10 (auditoría E2E -- "ventas netas"): historial real de devoluciones (returns.list), compartido para que Dashboard/Reportes puedan restar lo devuelto de las ventas brutas en vez de cada uno inventar su propio filtro. */
+  returns: ReturnRecord[];
+  returnsLoading: boolean;
+  returnsError: string | null;
+  returnsStale: boolean;
+
   refreshProducts: (opts?: RefreshOptions) => Promise<boolean>;
   refreshCustomers: (opts?: RefreshOptions) => Promise<boolean>;
   refreshSales: (opts?: RefreshOptions) => Promise<boolean>;
   refreshCredits: (opts?: RefreshOptions) => Promise<boolean>;
   refreshCreditNotes: (opts?: RefreshOptions) => Promise<boolean>;
   refreshExpenses: (opts?: RefreshOptions) => Promise<boolean>;
+  refreshReturns: (opts?: RefreshOptions) => Promise<boolean>;
 
   /**
    * Hidrata el DataStore con el MISMO viaje de red que ya hizo
@@ -179,6 +188,13 @@ export const DataStoreProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const [expensesStale, setExpensesStale] = useState(false);
   const expensesLastFetch = useRef(0);
   const expensesGen = useRef(0);
+
+  const [returns, setReturns] = useState<ReturnRecord[]>([]);
+  const [returnsLoading, setReturnsLoading] = useState(false);
+  const [returnsError, setReturnsError] = useState<string | null>(null);
+  const [returnsStale, setReturnsStale] = useState(false);
+  const returnsLastFetch = useRef(0);
+  const returnsGen = useRef(0);
 
   // Espejo imperativo de products/customers -- ver getProducts()/getCustomers().
   const productsRef = useRef<Product[]>(products);
@@ -360,6 +376,37 @@ export const DataStoreProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // FASE 10 (auditoría E2E): historial real de devoluciones (returns.list,
+  // ReturnsController.handleListReturns), compartido igual que sales/
+  // credits/expenses -- antes solo ReturnsView.tsx lo pedía por su cuenta;
+  // ahora Dashboard/Reportes también pueden restar lo devuelto de las
+  // ventas brutas sin duplicar la llamada de red ni inventar su propio
+  // filtro de devoluciones.
+  const refreshReturns = useCallback(async (opts?: RefreshOptions): Promise<boolean> => {
+    const now = Date.now();
+    if (!opts?.force && now - returnsLastFetch.current < RETURNS_TTL_MS) return true;
+    const myGen = ++returnsGen.current;
+    setReturnsLoading(true);
+
+    const res = await returnsApi.list();
+    if (myGen !== returnsGen.current) return false;
+
+    if (!res.success) {
+      setReturnsError(res.message || 'No se pudo obtener el historial de devoluciones desde el backend.');
+      setReturnsStale((returns || []).length > 0);
+      setReturnsLoading(false);
+      return false;
+    }
+
+    setReturns(res.data || []);
+    setReturnsError(null);
+    setReturnsStale(false);
+    returnsLastFetch.current = now;
+    setReturnsLoading(false);
+    return true;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const hydrateFromBootstrap = useCallback((bundle: BootstrapBundle) => {
     const now = Date.now();
     if (Array.isArray(bundle.products)) {
@@ -438,6 +485,11 @@ export const DataStoreProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     setExpensesError(null);
     setExpensesStale(false);
     expensesLastFetch.current = 0;
+
+    setReturns([]);
+    setReturnsError(null);
+    setReturnsStale(false);
+    returnsLastFetch.current = 0;
   }, []);
 
   return (
@@ -471,12 +523,17 @@ export const DataStoreProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         expensesLoading,
         expensesError,
         expensesStale,
+        returns,
+        returnsLoading,
+        returnsError,
+        returnsStale,
         refreshProducts,
         refreshCustomers,
         refreshSales,
         refreshCredits,
         refreshCreditNotes,
         refreshExpenses,
+        refreshReturns,
         hydrateFromBootstrap,
         clear,
         getProducts,
