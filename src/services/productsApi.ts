@@ -41,6 +41,35 @@ export function mapVariant(raw: any): ProductVariant {
   };
 }
 
+/**
+ * FASE 9 (causa raíz de "s.trim is not a function" en ProductFormModal --
+ * generación de matriz de variantes): el mismo problema que ya documenta
+ * `toText()` arriba (Google Sheets puede devolver una celda que "parece
+ * número" -- ej. una talla "38" -- como `number` real, no como el `string`
+ * que declara el tipo) también afecta a `Tallas.nombre`/`Colores.nombre`,
+ * el catálogo de opciones que alimenta `ProductFormModal` vía
+ * `products.listAuxiliaries`. El FIX P0 original solo se aplicó a
+ * `mapProduct`/`mapVariant` (usados por `products.list`) -- nunca se
+ * extendió a este endpoint, que hasta ahora devolvía `raw.sizes`/
+ * `raw.colors` sin pasar por ningún mapeo. Se reutiliza exactamente el
+ * mismo `toText()` ya establecido, sin inventar una normalización nueva.
+ */
+export function mapSize(raw: any): Size {
+  return {
+    id: raw.id,
+    nombre: toText(raw.nombre),
+    orden: Number(raw.orden) || 0,
+  };
+}
+
+export function mapColor(raw: any): Color {
+  return {
+    id: raw.id,
+    nombre: toText(raw.nombre),
+    hex: toText(raw.hex),
+  };
+}
+
 // CORREGIR AUDITORÍA: exportado para que DataStoreContext.hydrateFromBootstrap
 // pueda aplicar exactamente la misma transformación de campos que ya usa
 // productsApi.list(), en vez de duplicar la lógica o guardar el bundle
@@ -111,8 +140,8 @@ class ProductsApi {
       message: 'OK',
       data: {
         categories: Array.isArray(raw.categories) ? raw.categories : [],
-        sizes: Array.isArray(raw.sizes) ? raw.sizes : [],
-        colors: Array.isArray(raw.colors) ? raw.colors : [],
+        sizes: Array.isArray(raw.sizes) ? raw.sizes.map(mapSize) : [],
+        colors: Array.isArray(raw.colors) ? raw.colors.map(mapColor) : [],
         suppliers: Array.isArray(raw.suppliers) ? raw.suppliers : [],
       },
     };

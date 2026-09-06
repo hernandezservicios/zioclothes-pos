@@ -22,6 +22,24 @@ import {
   Barcode,
 } from 'lucide-react';
 
+/**
+ * FASE 9 (causa raíz de "s.trim is not a function" al generar la matriz de
+ * variantes): el origen real ya se corrigió en productsApi.ts
+ * (mapSize/mapColor) y en DataStoreContext.hydrateFromBootstrap -- Tallas/
+ * Colores del backend real siempre deberían llegar aquí como string ya
+ * limpio. Esta función es la última capa de defensa de toda la cadena
+ * (nunca se asume que `selectedSizes`/`selectedColors` ya son 100%
+ * seguros solo porque el tipo declarado es `string[]`): strings se
+ * recortan, números se convierten a texto, y `null`/`undefined`/una
+ * estructura inesperada (ej. un objeto) se descartan como cadena vacía --
+ * NUNCA se convierten silenciosamente a "[object Object]".
+ */
+function normalizeVariantOptionName(value: unknown): string {
+  if (typeof value === 'string') return value.trim();
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value).trim();
+  return '';
+}
+
 interface ProductFormModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -566,12 +584,25 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
   // MATRIX COMBINATION GENERATOR (TALLA × COLOR)
   // ==========================================
   const handleGenerateMatrix = () => {
-    if (selectedSizes.length === 0) {
-      showToast('Tallas Requeridas', 'Seleccione al menos 1 talla activa haciendo clic en las opciones.', 'error');
+    // FASE 9: normaliza (trim / number->string), descarta valores vacíos y
+    // elimina duplicados ANTES de validar y generar -- nunca se itera
+    // directamente sobre `selectedSizes`/`selectedColors` crudos (ver
+    // normalizeVariantOptionName arriba). Esto es lo que corrige de raíz
+    // el TypeError `s.trim is not a function`: `s`/`c` ya son siempre
+    // strings limpios en este punto, nunca el valor original sin normalizar.
+    const cleanSizes: string[] = Array.from(
+      new Set(selectedSizes.map((s) => normalizeVariantOptionName(s)).filter((s): s is string => s !== ''))
+    );
+    const cleanColors: string[] = Array.from(
+      new Set(selectedColors.map((c) => normalizeVariantOptionName(c)).filter((c): c is string => c !== ''))
+    );
+
+    if (cleanSizes.length === 0) {
+      showToast('Tallas Requeridas', 'Agrega al menos una opción de talla para generar las variantes.', 'error');
       return;
     }
-    if (selectedColors.length === 0) {
-      showToast('Colores Requeridos', 'Seleccione al menos 1 color activo haciendo clic en las opciones.', 'error');
+    if (cleanColors.length === 0) {
+      showToast('Colores Requeridos', 'Agrega al menos una opción de color para generar las variantes.', 'error');
       return;
     }
 
@@ -581,13 +612,11 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
     const initialStock = Number.isFinite(numBulkStock) && numBulkStock >= 0 ? numBulkStock : 6;
 
     const newVars: ProductVariant[] = [];
-    selectedSizes.forEach((s) => {
-      selectedColors.forEach((c) => {
-        const cleanSize = s.trim();
-        const cleanColor = c.trim();
+    cleanSizes.forEach((cleanSize) => {
+      cleanColors.forEach((cleanColor) => {
         const cleanSizeCode = cleanSize.replace(/[^a-zA-Z0-9]/g, '').toUpperCase() || 'SZ';
         const cleanColorCode = cleanColor.replace(/[^a-zA-Z0-9]/g, '').substring(0, 3).toUpperCase() || 'COL';
-        
+
         // Preserve stock and barcodes if this combination already existed
         const existing = (variantes || []).find((v) => v.talla === cleanSize && v.color === cleanColor);
 
@@ -624,7 +653,7 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
     });
 
     setVariantes(newVars);
-    showToast('Combinaciones Generadas', `Se generaron ${newVars.length} variantes (${selectedSizes.length} tallas × ${selectedColors.length} colores)`, 'exito');
+    showToast('Combinaciones Generadas', `Se generaron ${newVars.length} variantes (${cleanSizes.length} tallas × ${cleanColors.length} colores)`, 'exito');
   };
 
   const handleApplyBulkStock = () => {

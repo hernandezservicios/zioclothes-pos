@@ -1,7 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { Product, Category, Size, Color, Supplier, Sale, AccountReceivable, Expense, CreditNote } from '../types';
 import { storageService } from '../services/storageService';
-import { productsApi, mapProduct } from '../services/productsApi';
+import { productsApi, mapProduct, mapSize, mapColor } from '../services/productsApi';
 import { customersApi, CustomerWithCredit, mapCustomer } from '../services/customersApi';
 import { salesApi } from '../services/salesApi';
 import { creditsApi } from '../services/creditsApi';
@@ -375,12 +375,20 @@ export const DataStoreProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       storageService.saveCategories(bundle.categories);
     }
     if (Array.isArray(bundle.sizes)) {
-      setSizes(bundle.sizes);
-      storageService.saveSizes(bundle.sizes);
+      // FASE 9 (causa raíz de "s.trim is not a function" en la generación
+      // de matriz de variantes): mismo mapeo que ya aplica productsApi.
+      // listAuxiliaries() -- system.getBootstrapData reutiliza la MISMA
+      // fuente cruda (ProductsController.handleListAuxiliaries) y
+      // necesita la misma normalización antes de guardarse en el
+      // DataStore/localStorage.
+      const mappedSizes = bundle.sizes.map(mapSize);
+      setSizes(mappedSizes);
+      storageService.saveSizes(mappedSizes);
     }
     if (Array.isArray(bundle.colors)) {
-      setColors(bundle.colors);
-      storageService.saveColors(bundle.colors);
+      const mappedColors = bundle.colors.map(mapColor);
+      setColors(mappedColors);
+      storageService.saveColors(mappedColors);
     }
     if (Array.isArray(bundle.suppliers)) {
       setSuppliers(bundle.suppliers);
