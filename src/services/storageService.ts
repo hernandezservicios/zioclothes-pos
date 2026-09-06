@@ -92,6 +92,18 @@ const STORAGE_KEYS = {
   // usan la misma función de agregar al carrito; esta clave solo decide
   // cómo se dibuja esa lista.
   POS_PRODUCT_VIEW: 'zio_pos_product_view',
+  // FASE (sistema global de alertas y notificaciones): marca de
+  // leída/no-leída de las notificaciones del centro de notificaciones
+  // (campanita del Navbar). Las notificaciones EN SÍ nunca se persisten
+  // aquí ni en ningún lado nuevo -- se derivan en vivo de DataStore
+  // (Créditos/Ventas/Productos, ya reales) en NotificationContext.tsx;
+  // esta clave solo recuerda, por navegador (mismo criterio ya usado por
+  // CURRENT_VIEW/POS_PRODUCT_VIEW, sin espacio por usuario), qué ids de
+  // notificación ya vio esta terminal. Se poda automáticamente a solo los
+  // ids todavía vigentes cada vez que se guarda (ver
+  // NotificationContext.tsx) para no crecer sin límite con entidades ya
+  // resueltas (crédito pagado, stock repuesto, etc.).
+  READ_NOTIFICATION_IDS: 'zio_read_notification_ids',
 };
 
 class StorageService {
@@ -297,6 +309,17 @@ class StorageService {
   }
   public saveCurrentView(view: string): void {
     this.set(STORAGE_KEYS.CURRENT_VIEW, view);
+  }
+
+  // FASE (sistema global de alertas y notificaciones): ver comentario de
+  // STORAGE_KEYS.READ_NOTIFICATION_IDS arriba -- solo el estado de
+  // lectura, nunca las notificaciones mismas (esas se derivan en vivo).
+  public getReadNotificationIds(): string[] {
+    const stored = this.get<string[]>(STORAGE_KEYS.READ_NOTIFICATION_IDS, []);
+    return Array.isArray(stored) ? stored.filter((id): id is string => typeof id === 'string') : [];
+  }
+  public saveReadNotificationIds(ids: string[]): void {
+    this.set(STORAGE_KEYS.READ_NOTIFICATION_IDS, ids);
   }
 
   // FASE UX POS (Requerimiento 4 -- persistencia de la preferencia de

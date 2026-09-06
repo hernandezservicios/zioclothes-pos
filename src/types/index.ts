@@ -706,3 +706,45 @@ export interface ToastNotification {
   mensaje: string;
   duracion?: number;
 }
+
+/**
+ * FASE (sistema global de alertas y notificaciones): modelo central del
+ * panel de notificaciones (campanita del Navbar) -- distinto de
+ * `ToastNotification` (mensajes temporales de una sola acción, ej.
+ * "Producto guardado exitosamente"). Nombres adaptados a las
+ * convenciones ya existentes en este archivo (`titulo`/`mensaje` como
+ * ToastNotification; `severidad` reutiliza EXACTAMENTE los mismos 4
+ * valores que `ToastNotification.tipo`, en vez de inventar un segundo
+ * vocabulario de severidad).
+ *
+ * Nunca se persiste en Google Sheets ni en un backend nuevo -- se
+ * deriva en vivo de datos reales ya existentes en DataStoreContext
+ * (Créditos/Ventas/Productos, ver NotificationContext.tsx). Lo único que
+ * se persiste localmente (localStorage, mismo mecanismo que
+ * CURRENT_VIEW/POS_PRODUCT_VIEW) es el conjunto de ids ya leídos.
+ */
+export type AppNotificationType = 'CREDITO_VENCIDO' | 'VENTA_PENDIENTE' | 'STOCK_BAJO' | 'SISTEMA';
+
+export interface AppNotification {
+  /** Id determinístico y estable: `${tipo}:${entityId}` -- nunca aleatorio, para deduplicar entre recálculos (ver Parte 10 de la fase). */
+  id: string;
+  tipo: AppNotificationType;
+  titulo: string;
+  mensaje: string;
+  severidad: ToastNotification['tipo'];
+  createdAt: string;
+  read: boolean;
+  entityType?: string;
+  entityId?: string;
+  /**
+   * Vista a la que navegar al hacer clic -- string suelto (no `AppView`,
+   * definido en App.tsx) para evitar una dependencia circular
+   * types -> App.tsx; ya coincide con la firma real de
+   * `handleNavigate(view: string, filter?: string)` en App.tsx, que
+   * siempre ha aceptado un string suelto.
+   */
+  targetView?: string;
+  /** Filtro a aplicar en la vista destino, ej. 'VENCIDA'/'STOCK_BAJO' -- mismo parámetro `filter` que ya usa handleNavigate/DashboardView.onNavigate. */
+  navigationFilter?: string;
+  metadata?: Record<string, unknown>;
+}

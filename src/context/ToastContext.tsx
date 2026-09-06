@@ -30,8 +30,22 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   return (
     <ToastContext.Provider value={{ showToast }}>
       {children}
-      {/* Toast Render Container */}
-      <div id="toast-container" className="fixed bottom-5 right-5 z-50 flex flex-col gap-2.5 max-w-sm w-full pointer-events-none px-4 sm:px-0">
+      {/* Toast Render Container
+          FASE (sistema global de alertas y notificaciones, Parte 2):
+          TODAS las alertas temporales del sistema deben aparecer en la
+          esquina SUPERIOR derecha, nunca abajo -- este es el único
+          sistema de Toast que existe en el proyecto (auditado: sin
+          sonner/react-hot-toast/AlertDialog paralelos), así que basta
+          con reposicionar este contenedor global, sin crear uno nuevo.
+          `top-20` (en vez de `top-5`) deja despejado el Navbar
+          `sticky top-0 z-30` (~64px de alto) en vez de superponerse a
+          él; se mantiene `z-50`, el mismo nivel que ya usan los modales
+          existentes (nunca se sube más alto: el orden en el DOM -- este
+          contenedor se monta al final del árbol, dentro de
+          ToastProvider, que envuelve toda la app -- ya garantiza que
+          pinte por encima de cualquier modal/dropdown/tabla abierta sin
+          necesidad de un z-index mayor). */}
+      <div id="toast-container" className="fixed top-20 right-5 z-50 flex flex-col gap-2.5 max-w-sm w-full pointer-events-none px-4 sm:px-0">
         {toasts.map((toast) => {
           let bgClass = 'bg-[#FAF8F4] border-[#E4DDD2] text-[#2F2A25]';
           let icon = <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />;

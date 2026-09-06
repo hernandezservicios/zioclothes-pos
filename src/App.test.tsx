@@ -27,6 +27,12 @@ vi.mock('./services/storageService', () => ({
   storageService: {
     getCurrentView: vi.fn(() => null),
     saveCurrentView: vi.fn(),
+    // FASE (sistema global de alertas y notificaciones): App.tsx ahora
+    // también monta NotificationProvider (real, no mockeado aquí -- solo
+    // sus datos de origen, DataStoreContext/AuthContext, están
+    // mockeados), que llama a estos dos métodos.
+    getReadNotificationIds: vi.fn(() => []),
+    saveReadNotificationIds: vi.fn(),
   },
 }));
 

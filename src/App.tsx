@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { DataStoreProvider } from './context/DataStoreContext';
 import { ToastProvider } from './context/ToastContext';
+import { NotificationProvider } from './context/NotificationContext';
 import { storageService } from './services/storageService';
 import { LoginView } from './components/auth/LoginView';
 import { Navbar } from './components/layout/Navbar';
@@ -317,7 +318,14 @@ export default function App() {
           DataStore central sincronizado en esos mismos puntos. */}
       <DataStoreProvider>
         <AuthProvider>
-          <MainAppContent />
+          {/* FASE (sistema global de alertas y notificaciones):
+              NotificationProvider necesita useDataStore() (Créditos/
+              Productos reales) y useAuth() (permisos) -- por eso vive
+              DENTRO de ambos, envolviendo MainAppContent (donde vive
+              Navbar, que renderiza la campanita). */}
+          <NotificationProvider>
+            <MainAppContent />
+          </NotificationProvider>
         </AuthProvider>
       </DataStoreProvider>
     </ToastProvider>

@@ -2,6 +2,7 @@ import React from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { formatCurrency } from '../../utils/formatters';
 import { toDisplayableImageUrl } from '../../utils/imageUrl';
+import { NotificationBell } from './NotificationBell';
 import {
   ShoppingBag,
   Wallet,
@@ -115,6 +116,9 @@ export const Navbar: React.FC<NavbarProps> = ({
             <span className="sm:hidden">POS</span>
           </button>
         )}
+
+        {/* Notificaciones */}
+        <NotificationBell onNavigate={onNavigate} />
 
         {/* User Badge & Logout */}
         <div className="flex items-center gap-2 pl-2 border-l border-[#E4DDD2]">
