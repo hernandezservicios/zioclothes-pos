@@ -96,6 +96,49 @@ const CashController = {
   },
 
   /**
+   * FASE A — BACKUP PROFESIONAL (auditoría "Copia de Seguridad"):
+   * endpoint READ-ONLY nuevo. Ninguna acción existente devolvía el
+   * historial COMPLETO de Caja_Movimientos -- handleGetActiveSession
+   * solo trae los movimientos de la sesión ABIERTA, y handleListSessions
+   * no incluye movimientos en absoluto. Sin esto, un backup nunca podía
+   * incluir los movimientos manuales (ingresos/retiros) de sesiones ya
+   * cerradas.
+   *
+   * Solo lee -- no usa LockService (mismo criterio que el resto de los
+   * handleList* de este archivo, que tampoco lo usan: ninguno escribe).
+   * A diferencia de handleListSessions/handleGetActiveSession (que no
+   * exigen ningún permiso específico hoy, solo sesión válida), aquí SÍ
+   * se exige explícitamente 'caja.ver' -- decisión deliberada de esta
+   * fase: esta acción expone el historial financiero COMPLETO de TODAS
+   * las sesiones (no solo el balance de la sesión activa), un alcance
+   * más sensible que amerita el permiso ya existente para "consultar
+   * caja", en vez de replicar la ausencia de chequeo de sus hermanas.
+   */
+  handleListMovements(data, user) {
+    Security.requirePermission(user, 'caja.ver');
+
+    const movements = DbHelper.getAllRows('Caja_Movimientos');
+    movements.sort((a, b) => String(b.fecha || '').localeCompare(String(a.fecha || '')));
+
+    return {
+      success: true,
+      movements: movements.map(m => ({
+        id: m.id,
+        cajaSesionId: m.caja_sesion_id,
+        tipo: m.tipo,
+        monto: Number(m.monto) || 0,
+        motivo: m.motivo || '',
+        categoriaGasto: m.categoria_gasto || undefined,
+        referencia: m.referencia || undefined,
+        usuarioId: m.usuario_id,
+        usuarioNombre: m.usuario_nombre,
+        fecha: m.fecha,
+        estado: m.estado || 'ACTIVO'
+      }))
+    };
+  },
+
+  /**
    * ATOMIC CASH OPEN
    */
   handleOpenSession(data, user) {

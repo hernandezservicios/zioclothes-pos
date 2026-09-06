@@ -10,6 +10,14 @@ const CONFIG = {
   TIMEZONE: 'America/Santo_Domingo',
   SESSION_TTL_HOURS: 12,
   LOCK_TIMEOUT_MS: 15000,
+  // FASE B (RESTAURACIÓN REAL): una restauración puede escribir miles de
+  // filas en varias hojas -- 15 segundos (el timeout normal de negocio)
+  // es insuficiente para esperar a ADQUIRIR el lock si otra operación
+  // crítica está en curso. Esto NO es cuánto tiempo puede DURAR la
+  // restauración una vez adquirido el lock (eso lo limita Apps Script
+  // mismo, ver RestoreController.gs) -- es solo cuánto espera antes de
+  // rendirse si el lock ya está tomado.
+  RESTORE_LOCK_TIMEOUT_MS: 30000,
   DEFAULT_CURRENCY: 'RD$',
   DEFAULT_TAX_RATE: 18,
 };

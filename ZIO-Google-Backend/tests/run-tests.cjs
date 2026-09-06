@@ -100,6 +100,29 @@ class MockSheet {
   setFrozenRows() { return this; }
   autoResizeColumns() { return this; }
   getSheetName() { return this.name; }
+  // FASE B (RESTAURACIÓN REAL): mocks nuevos, necesarios para la
+  // estrategia de staging/swap por hojas (RestoreController.gs) --
+  // ninguna prueba anterior a esta fase los necesitaba. Reflejan el
+  // comportamiento real de Apps Script lo suficiente para probar la
+  // lógica de restauración sin tocar un Spreadsheet real:
+  //  - copyTo(destSpreadsheet): copia profunda de los datos a una hoja
+  //    nueva dentro del spreadsheet destino, con un nombre autogenerado
+  //    (igual que Sheet.copyTo real, que genera "Copy of X").
+  //  - setName(newName): renombra la hoja EN EL MISMO objeto Spreadsheet
+  //    que la contiene, actualizando su índice sheetsByName (si no se
+  //    actualizara el índice, DbHelper.getSheet con el nombre viejo o
+  //    nuevo devolvería resultados incoherentes).
+  copyTo(destSpreadsheet) {
+    const copy = new MockSheet(`Copy of ${this.name}`);
+    copy.data = this.data.map(row => (row ? row.slice() : row));
+    destSpreadsheet._registerSheet(copy);
+    return copy;
+  }
+  setName(newName) {
+    if (this._owner) this._owner._renameSheet(this, newName);
+    this.name = newName;
+    return this;
+  }
 }
 
 class MockSpreadsheet {
@@ -107,10 +130,24 @@ class MockSpreadsheet {
   getSheetByName(name) { return this.sheetsByName[name] || null; }
   insertSheet(name) {
     const s = new MockSheet(name);
-    this.sheetsByName[name] = s;
+    this._registerSheet(s);
     return s;
   }
   getName() { return 'ZIO CLOTHES -- SPREADSHEET DE PRUEBA (harness)'; }
+  // FASE B: registro/borrado/renombrado de hojas -- ver comentario de
+  // MockSheet.copyTo/setName arriba.
+  _registerSheet(sheet) {
+    sheet._owner = this;
+    this.sheetsByName[sheet.name] = sheet;
+  }
+  _renameSheet(sheet, newName) {
+    if (this.sheetsByName[sheet.name] === sheet) delete this.sheetsByName[sheet.name];
+    this.sheetsByName[newName] = sheet;
+  }
+  deleteSheet(sheet) {
+    if (this.sheetsByName[sheet.name] === sheet) delete this.sheetsByName[sheet.name];
+  }
+  getSheets() { return Object.values(this.sheetsByName); }
 }
 
 /* ------------------------------------------------------------
@@ -344,6 +381,11 @@ const loadOrder = [
   // cual ya se cumple con cualquier posición (todos los .gs comparten un
   // único scope global concatenado); se coloca aquí por cercanía temática.
   'CreditNotesController.gs',
+  // FASE B (RESTAURACIÓN REAL): RestoreController.gs referencia
+  // DbHelper/Sequences/Security/AuditController/CONFIG -- todos ya
+  // cargados arriba (un único scope global concatenado, igual que
+  // CreditNotesController.gs).
+  'RestoreController.gs',
   'SeedSetup.gs', 'Main.gs'
 ];
 
@@ -4799,6 +4841,433 @@ test('PURCHASES_CREATE_REJECTS_NONEXISTENT_VARIANT_ATOMICALLY', () => {
 
   const variant = runInContext("DbHelper.findById('Variantes', 'VAR-T01')");
   assertEqual(Number(variant.stock), 5, 'ninguna línea debe aplicarse -- ni siquiera la primera, que sí era válida');
+});
+
+/* ================================================================
+   FASE A -- BACKUP PROFESIONAL: cash.listMovements (CashController.gs)
+   Endpoint READ-ONLY nuevo de esta fase. Ninguna acción existente
+   devolvía Caja_Movimientos completo -- handleGetActiveSession solo trae
+   los de la sesión ABIERTA, handleListSessions no incluye movimientos.
+   Se agrega cobertura de: (1) que realmente devuelve movimientos de
+   sesiones YA CERRADAS, no solo de la activa, (2) que exige el permiso
+   'caja.ver' explícitamente, y (3) que los montos son numéricos reales.
+   ================================================================ */
+
+test('CASH_LIST_MOVEMENTS_RETURNS_MOVEMENTS_FROM_CLOSED_SESSIONS_NOT_JUST_ACTIVE', () => {
+  const openA = doPostRaw('cash.open', { montoInicial: 1000 }, adminToken);
+  assert(openA.success === true, JSON.stringify(openA));
+  const cajaAId = openA.session.id;
+  const addA = doPostRaw('cash.addMovement', { tipo: 'INGRESO', monto: 111, motivo: 'FASE_A_SESION_CERRADA' }, adminToken);
+  assert(addA.success === true, JSON.stringify(addA));
+  doPostRaw('cash.close', { efectivoRealContado: 1111 }, adminToken);
+
+  const openB = doPostRaw('cash.open', { montoInicial: 500 }, adminToken);
+  assert(openB.success === true, JSON.stringify(openB));
+  const cajaBId = openB.session.id;
+  const addB = doPostRaw('cash.addMovement', { tipo: 'RETIRO', monto: 222, motivo: 'FASE_A_SESION_ACTIVA' }, adminToken);
+  assert(addB.success === true, JSON.stringify(addB));
+
+  const res = doPostRaw('cash.listMovements', {}, adminToken);
+  assert(res.success === true, JSON.stringify(res));
+  assert(Array.isArray(res.movements), 'debe devolver un arreglo de movimientos');
+
+  const fromClosedSession = res.movements.find(m => m.cajaSesionId === cajaAId && m.motivo === 'FASE_A_SESION_CERRADA');
+  const fromActiveSession = res.movements.find(m => m.cajaSesionId === cajaBId && m.motivo === 'FASE_A_SESION_ACTIVA');
+  assert(!!fromClosedSession, 'debe incluir movimientos de una sesión YA CERRADA -- no solo de la activa');
+  assert(!!fromActiveSession, 'debe incluir también el movimiento de la sesión activa');
+  assertEqual(Number(fromClosedSession.monto), 111);
+  assertEqual(Number(fromActiveSession.monto), 222);
+
+  doPostRaw('cash.close', { efectivoRealContado: 278 }, adminToken);
+});
+
+test('CASH_LIST_MOVEMENTS_RETURNS_REAL_NUMBER_TYPES_FOR_MONTO', () => {
+  const res = doPostRaw('cash.listMovements', {}, adminToken);
+  assert(res.success === true, JSON.stringify(res));
+  res.movements.forEach(m => {
+    assert(typeof m.monto === 'number' && !isNaN(m.monto), `monto debe ser number real, no "${typeof m.monto}" (${m.monto})`);
+  });
+});
+
+test('CASH_LIST_MOVEMENTS_REJECTS_WITHOUT_CAJA_VER_PERMISSION', () => {
+  // VENDEDOR (seed real, ver AUTH_SAVE_USER_CREATES_VALID_USER_WITHOUT_EXPOSING_PASSWORD)
+  // no tiene 'caja.ver' en su lista de permisos -- a diferencia de
+  // cash.listSessions/cash.getActiveSession (que no exigen ningún
+  // permiso específico hoy), este endpoint nuevo sí lo exige.
+  const vendedorLogin = login('empleado.prueba', 'ClaveReal123');
+  assert(vendedorLogin.success === true, JSON.stringify(vendedorLogin));
+
+  const res = doPostRaw('cash.listMovements', {}, vendedorLogin.sessionToken);
+  assert(res.success === false, 'VENDEDOR no debe poder leer el historial completo de movimientos de caja');
+  assert(String(res.error || '').indexOf('FORBIDDEN') === 0, 'debe rechazar con FORBIDDEN: ' + res.error);
+});
+
+/* ================================================================
+   FASE B -- RESTAURACIÓN REAL: system.previewRestoreBackup / system.restoreBackup
+   (RestoreController.gs). Endpoints completamente nuevos de esta fase --
+   el backend NUNCA confía en la validación ya hecha por el frontend, así
+   que se re-valida todo desde cero aquí también.
+   ================================================================ */
+
+// Backup mínimo pero COMPLETAMENTE autoconsistente: cada referencia
+// (variante->producto, venta->cliente/caja, cxc->venta, devolución->venta,
+// vale->devolución, movimiento->sesión, kardex->producto/variante) resuelve
+// dentro del propio backup, tal como exige restoreValidateRelationships_.
+function buildValidRestoreBackup_(overrides) {
+  const base = {
+    settings: { simboloMoneda: 'RD$', nombreNegocio: 'ZIO RESTORE TEST' },
+    categories: [{ id: 'CAT-R01', nombre: 'Restore Cat', descripcion: '', estado: 'ACTIVO' }],
+    sizes: [{ id: 'TALLA-R01', nombre: 'M', orden: 1 }],
+    colors: [{ id: 'COLOR-R01', nombre: 'Azul', hex: '#0000FF' }],
+    products: [{
+      id: 'PRD-900001', sku: 'SKU-R01', codigoBarras: '', nombre: 'Producto Restore', descripcion: '',
+      categoriaId: 'CAT-R01', categoriaNombre: 'Restore Cat', marca: 'ZIO', costo: 100, precio: 200,
+      impuesto: 18, stockMinimo: 3, estado: 'ACTIVO',
+      variantes: [{ id: 'VAR-900001', productoId: 'PRD-900001', sku: 'SKU-R01-A', codigoBarras: '', color: 'Azul', talla: 'M', costo: 100, precio: 200, stock: 10, estado: 'ACTIVO' }]
+    }],
+    customers: [{ id: 'CLI-900001', nombre: 'Cliente', apellido: 'Restore', documento: '001-0000000-1', telefono: '809-000-0000', correo: '', direccion: '', ciudad: '', estado: 'ACTIVO', limiteCredito: 5000, diasCreditoPorDefecto: 30 }],
+    cashSessions: [{ id: 'CAJA-900001', codigoCaja: 'C1', cajaNombre: 'Principal', cajeroId: 'USR-001', cajeroNombre: 'Admin', montoInicial: 1000, fechaApertura: '2026-01-01 08:00:00', estado: 'CERRADA', ventasEfectivo: 0, abonosEfectivo: 0, ingresosManuales: 0, retirosManuales: 0, gastos: 0, devolucionesEfectivo: 0, efectivoEsperado: 1000 }],
+    purchases: [{ id: 'COM-900001', numeroCompra: 'COM-000001', proveedorId: '', proveedor: 'Prov Test', numeroFacturaProveedor: '', total: 500, formaPago: 'EFECTIVO', estado: 'COMPLETADA', usuarioId: 'USR-001', usuarioNombre: 'Admin', fecha: '2026-01-01 09:00:00', notas: '', items: [] }],
+    sales: [{
+      id: 'VEN-900001', numeroVenta: 'VEN-000001', clienteId: 'CLI-900001', clienteNombre: 'Cliente Restore', clienteDocumento: '',
+      vendedorId: 'USR-001', vendedorNombre: 'Admin', cajaSesionId: 'CAJA-900001', subtotal: 169.49, descuentoTotal: 0,
+      impuestoTotal: 30.51, total: 200, costoTotal: 100, metodoPago: 'EFECTIVO', estado: 'COMPLETADA', esCredito: false,
+      fecha: '2026-01-01 10:00:00',
+      pagos: [{ metodo: 'EFECTIVO', monto: 200 }],
+      items: [{ id: 'ITM-900001', ventaId: 'VEN-900001', productoId: 'PRD-900001', varianteId: 'VAR-900001', nombreProducto: 'Producto Restore', sku: 'SKU-R01-A', talla: 'M', color: 'Azul', cantidad: 1, costoUnitario: 100, precioUnitario: 169.49, descuentoPorcentaje: 0, descuentoMonto: 0, subtotal: 169.49, impuestoMonto: 30.51, total: 200 }]
+    }],
+    credits: [{
+      id: 'CRED-900001', numeroCredito: 'CRED-000001', clienteId: 'CLI-900001', clienteNombre: 'Cliente Restore', clienteTelefono: '', clienteDocumento: '',
+      ventaId: 'VEN-900001', numeroVenta: 'VEN-000001', montoOriginal: 100, montoPagado: 50, saldoPendiente: 50,
+      fechaCreacion: '2026-01-01 10:00:00', fechaVencimiento: '2026-02-01 10:00:00', diasPlazo: 30, estado: 'PARCIAL', observaciones: '', creadoPor: 'USR-001',
+      abonos: [{ id: 'ABO-900001', numeroRecibo: 'ABO-000001', cuentaCobrarId: 'CRED-900001', clienteId: 'CLI-900001', clienteNombre: 'Cliente Restore', ventaId: 'VEN-900001', numeroVenta: 'VEN-000001', saldoAnterior: 100, montoAbonado: 50, saldoRestante: 50, metodoPago: 'EFECTIVO', referencia: '', cajaSesionId: 'CAJA-900001', usuarioId: 'USR-001', usuarioNombre: 'Admin', observaciones: '', fecha: '2026-01-02 10:00:00', estado: 'ACTIVO' }]
+    }],
+    returns: [{ id: 'DEV-900001', numeroDevolucion: 'DEV-000001', ventaId: 'VEN-900001', numeroVenta: 'VEN-000001', clienteId: 'CLI-900001', clienteNombre: 'Cliente Restore', montoDevuelto: 50, tipoReembolso: 'CREDITO_FAVOR', motivo: 'Prueba de restore', usuarioId: 'USR-001', usuarioNombre: 'Admin', fecha: '2026-01-03 10:00:00', items: [] }],
+    creditNotes: [{
+      id: 'VALE-900001', numero: 'VALE-000001', tipo: 'VALE_TIENDA', clienteId: 'CLI-900001', clienteNombre: 'Cliente Restore',
+      devolucionId: 'DEV-900001', ventaOrigenId: 'VEN-900001', montoOriginal: 50, montoAplicado: 0, saldoDisponible: 50, estado: 'EMITIDA',
+      usuarioId: 'USR-001', usuarioNombre: 'Admin', fechaCreacion: '2026-01-03 10:05:00', actualizadoEn: '2026-01-03 10:05:00',
+      aplicaciones: []
+    }],
+    expenses: [{ id: 'GAS-900001', numeroGasto: 'GAS-000001', categoria: 'SERVICIOS', descripcion: 'Luz', proveedor: '', monto: 30, metodoPago: 'EFECTIVO', comprobante: '', cajaSesionId: 'CAJA-900001', usuarioId: 'USR-001', usuarioNombre: 'Admin', fecha: '2026-01-01 11:00:00', pagadoConCajaActiva: true }],
+    cashMovements: [{ id: 'CMOV-900001', cajaSesionId: 'CAJA-900001', tipo: 'INGRESO', monto: 20, motivo: 'Vuelto inicial', usuarioId: 'USR-001', usuarioNombre: 'Admin', fecha: '2026-01-01 08:05:00', estado: 'ACTIVO' }],
+    kardex: [{ id: 'MOV-900001', productoId: 'PRD-900001', productoNombre: 'Producto Restore', varianteId: 'VAR-900001', sku: 'SKU-R01-A', talla: 'M', color: 'Azul', cantidad: 10, tipo: 'ENTRADA', stockAnterior: 0, stockNuevo: 10, motivo: 'Restore test', referencia: '', usuarioId: 'USR-001', usuarioNombre: 'Admin', fecha: '2026-01-01 09:05:00' }]
+  };
+  const data = Object.assign({}, base, overrides && overrides.data);
+  return {
+    backupVersion: 2,
+    format: 'zio-pos-backup',
+    createdAt: '2026-01-05T00:00:00.000Z',
+    timezone: 'America/Santo_Domingo',
+    appVersion: '2.0.0-PROD',
+    source: 'live-backend',
+    complete: true,
+    entities: [],
+    totalRecords: 0,
+    omitted: [],
+    warnings: [],
+    data: data
+  };
+}
+
+test('RESTORE_PREVIEW_VALID_BACKUP_RETURNS_VALID_TRUE_WITHOUT_WRITING_ANYTHING', () => {
+  const backup = buildValidRestoreBackup_();
+  const before = runInContext(`DbHelper.getAllRows('Productos').length`);
+
+  const res = doPostRaw('system.previewRestoreBackup', { backup: backup }, adminToken);
+  assert(res.success === true, JSON.stringify(res));
+  assert(res.valid === true, JSON.stringify(res));
+  assertEqual(res.totalRecords, 14, 'debe contar exactamente 14 registros (1 por cada entidad crítica del backup de prueba)');
+
+  const after = runInContext(`DbHelper.getAllRows('Productos').length`);
+  assertEqual(after, before, 'preview NUNCA debe escribir nada -- Productos debe tener el mismo conteo antes y después');
+  const previewedProduct = runInContext(`DbHelper.findById('Productos', 'PRD-900001')`);
+  assert(!previewedProduct, 'el producto del backup de PRUEBA no debe existir todavía tras un preview');
+});
+
+test('RESTORE_PREVIEW_REJECTS_INCOMPLETE_BACKUP', () => {
+  const backup = buildValidRestoreBackup_();
+  backup.complete = false;
+  const res = doPostRaw('system.previewRestoreBackup', { backup: backup }, adminToken);
+  assert(res.success === true, JSON.stringify(res));
+  assert(res.valid === false, 'un backup con complete:false debe rechazarse');
+  assert(res.errors.some(e => /completo/i.test(e)), JSON.stringify(res.errors));
+});
+
+test('RESTORE_PREVIEW_REJECTS_INCOMPATIBLE_BACKUP_VERSION', () => {
+  const backup = buildValidRestoreBackup_();
+  backup.backupVersion = 1;
+  const res = doPostRaw('system.previewRestoreBackup', { backup: backup }, adminToken);
+  assert(res.valid === false, 'backupVersion 1 debe rechazarse (esta fase solo restaura backupVersion 2)');
+  assert(res.errors.some(e => /backupVersion/i.test(e)), JSON.stringify(res.errors));
+});
+
+test('RESTORE_PREVIEW_REJECTS_MISSING_CRITICAL_ENTITY', () => {
+  const backup = buildValidRestoreBackup_();
+  delete backup.data.sales;
+  const res = doPostRaw('system.previewRestoreBackup', { backup: backup }, adminToken);
+  assert(res.valid === false, 'debe rechazar si falta una entidad crítica (sales)');
+  assert(res.errors.some(e => /sales/.test(e)), JSON.stringify(res.errors));
+});
+
+test('RESTORE_PREVIEW_REJECTS_VARIANT_REFERENCING_NONEXISTENT_PRODUCT', () => {
+  const backup = buildValidRestoreBackup_();
+  backup.data.products[0].variantes[0].productoId = 'PRD-NO-EXISTE-999';
+  const res = doPostRaw('system.previewRestoreBackup', { backup: backup }, adminToken);
+  assert(res.valid === false, 'una variante que referencia un producto inexistente debe abortar la validación');
+  assert(res.errors.some(e => /Variante/.test(e) && /products/.test(e)), JSON.stringify(res.errors));
+});
+
+test('RESTORE_PREVIEW_REJECTS_SALE_REFERENCING_NONEXISTENT_CUSTOMER', () => {
+  const backup = buildValidRestoreBackup_();
+  backup.data.sales[0].clienteId = 'CLI-NO-EXISTE-999';
+  const res = doPostRaw('system.previewRestoreBackup', { backup: backup }, adminToken);
+  assert(res.valid === false);
+  assert(res.errors.some(e => /Venta/.test(e) && /customers/.test(e)), JSON.stringify(res.errors));
+});
+
+test('RESTORE_PREVIEW_REJECTS_SALE_WITH_MALFORMED_PAGO', () => {
+  const backup = buildValidRestoreBackup_();
+  backup.data.sales[0].pagos = [{ metodo: '', monto: 200 }];
+  const res = doPostRaw('system.previewRestoreBackup', { backup: backup }, adminToken);
+  assert(res.valid === false, 'un pago sin método válido debe rechazarse');
+});
+
+test('RESTORE_PREVIEW_REJECTS_CREDIT_NOTE_APPLICATION_REFERENCING_NONEXISTENT_SALE', () => {
+  const backup = buildValidRestoreBackup_();
+  backup.data.creditNotes[0].aplicaciones = [{ id: 'CFAPP-900001', creditoFavorId: 'VALE-900001', ventaId: 'VEN-NO-EXISTE-999', monto: 10, fecha: '2026-01-04' }];
+  const res = doPostRaw('system.previewRestoreBackup', { backup: backup }, adminToken);
+  assert(res.valid === false, 'una aplicación de crédito que referencia una venta inexistente debe abortar');
+  assert(res.errors.some(e => /Aplicaci/.test(e) && /sales/.test(e)), JSON.stringify(res.errors));
+});
+
+test('RESTORE_PREVIEW_REJECTS_CASH_MOVEMENT_WITHOUT_SESSION', () => {
+  const backup = buildValidRestoreBackup_();
+  backup.data.cashMovements[0].cajaSesionId = '';
+  const res = doPostRaw('system.previewRestoreBackup', { backup: backup }, adminToken);
+  assert(res.valid === false, 'un movimiento de caja sin sesión debe rechazarse');
+});
+
+test('RESTORE_PREVIEW_REJECTS_CASH_MOVEMENT_REFERENCING_NONEXISTENT_SESSION', () => {
+  const backup = buildValidRestoreBackup_();
+  backup.data.cashMovements[0].cajaSesionId = 'CAJA-NO-EXISTE-999';
+  const res = doPostRaw('system.previewRestoreBackup', { backup: backup }, adminToken);
+  assert(res.valid === false, 'un movimiento de caja con sesión inexistente debe rechazarse');
+});
+
+test('RESTORE_PREVIEW_REJECTS_KARDEX_REFERENCING_NONEXISTENT_VARIANT', () => {
+  const backup = buildValidRestoreBackup_();
+  backup.data.kardex[0].varianteId = 'VAR-NO-EXISTE-999';
+  const res = doPostRaw('system.previewRestoreBackup', { backup: backup }, adminToken);
+  assert(res.valid === false, 'un movimiento de Kardex que referencia una variante inexistente debe abortar');
+});
+
+test('RESTORE_REQUIRES_ADMIN_CONFIGURACION_PERMISSION', () => {
+  // VENDEDOR (seed real) no tiene 'admin.configuracion'.
+  const vendedorLogin = login('empleado.prueba', 'ClaveReal123');
+  assert(vendedorLogin.success === true, JSON.stringify(vendedorLogin));
+
+  const backup = buildValidRestoreBackup_();
+  const previewRes = doPostRaw('system.previewRestoreBackup', { backup: backup }, vendedorLogin.sessionToken);
+  assert(previewRes.success === false, 'debe rechazar el preview sin admin.configuracion');
+  assert(String(previewRes.error || '').indexOf('FORBIDDEN') === 0, previewRes.error);
+
+  const restoreRes = doPostRaw('system.restoreBackup', { backup: backup }, vendedorLogin.sessionToken);
+  assert(restoreRes.success === false, 'debe rechazar la restauración real sin admin.configuracion');
+  assert(String(restoreRes.error || '').indexOf('FORBIDDEN') === 0, restoreRes.error);
+
+  const stillMissing = runInContext(`DbHelper.findById('Productos', 'PRD-900001')`);
+  assert(!stillMissing, 'ningún dato debe haberse escrito tras un intento rechazado por permisos');
+});
+
+test('RESTORE_REAL_VALID_BACKUP_REPLACES_STATE_AND_RECALCULATES_SEQUENCES', () => {
+  // Estado ANTES: un producto/categoría que NO forma parte del backup a
+  // restaurar (para probar que desaparece -- "restaurar estado" reemplaza,
+  // no mezcla). Se usa el fixture ya establecido de todo el archivo
+  // (CAT-T01/VAR-T01) para no inventar una fixture nueva.
+  const beforeCategory = runInContext(`DbHelper.findById('Categorias', 'CAT-T01')`);
+  assert(!!beforeCategory, 'fixture compartida CAT-T01 debe existir antes del restore (precondición del test)');
+
+  const backup = buildValidRestoreBackup_();
+  const res = doPostRaw('system.restoreBackup', { backup: backup }, adminToken);
+  assert(res.success === true, JSON.stringify(res));
+  assertEqual(res.totalRecords, 14);
+
+  // Test obligatorio #16: los registros del backup aparecen correctamente.
+  const restoredProduct = runInContext(`DbHelper.findById('Productos', 'PRD-900001')`);
+  assert(!!restoredProduct, 'el producto restaurado debe existir');
+  assertEqual(restoredProduct.nombre, 'Producto Restore');
+  assertEqual(Number(restoredProduct.precio), 200);
+
+  const restoredVariant = runInContext(`DbHelper.findById('Variantes', 'VAR-900001')`);
+  assert(!!restoredVariant, 'la variante restaurada debe existir');
+  assertEqual(Number(restoredVariant.stock), 10);
+
+  const restoredSale = runInContext(`DbHelper.findById('Ventas', 'VEN-900001')`);
+  assert(!!restoredSale, 'la venta restaurada debe existir');
+  const restoredPagos = JSON.parse(restoredSale.pagos_json);
+  assertEqual(restoredPagos.length, 1);
+  assertEqual(Number(restoredPagos[0].monto), 200);
+
+  const restoredItems = runInContext(`DbHelper.findRows('Venta_Items', it => it.venta_id === 'VEN-900001')`);
+  assertEqual(restoredItems.length, 1, 'Venta_Items debe conservar la relación con la venta restaurada');
+
+  const restoredAbono = runInContext(`DbHelper.findById('Abonos', 'ABO-900001')`);
+  assert(!!restoredAbono, 'el abono restaurado debe existir, vinculado a su CxC');
+  assertEqual(restoredAbono.cuenta_cobrar_id, 'CRED-900001');
+
+  const restoredCreditNote = runInContext(`DbHelper.findById('Creditos_Favor', 'VALE-900001')`);
+  assert(!!restoredCreditNote, 'el vale restaurado debe existir');
+  assertEqual(restoredCreditNote.devolucion_id, 'DEV-900001');
+
+  const restoredMovement = runInContext(`DbHelper.findById('Caja_Movimientos', 'CMOV-900001')`);
+  assert(!!restoredMovement, 'el movimiento de caja restaurado debe existir');
+  assertEqual(restoredMovement.caja_sesion_id, 'CAJA-900001');
+
+  // Test obligatorio #15: lo que NO está en el backup desaparece -- la
+  // categoría de fixture compartida de TODO el archivo ya no debe existir
+  // (fue reemplazada, no mezclada).
+  const categoryAfter = runInContext(`DbHelper.findById('Categorias', 'CAT-T01')`);
+  assert(!categoryAfter, 'una categoría que NO está en el backup restaurado debe desaparecer -- el restore reemplaza el estado, no lo mezcla');
+
+  // Test obligatorio #18/19: Sequences se recalculó -- el siguiente
+  // producto creado NUNCA debe colisionar con PRD-900001.
+  assert(Array.isArray(res.sequencesRecalculated) && res.sequencesRecalculated.length > 0, JSON.stringify(res));
+  const prdSeq = res.sequencesRecalculated.find(s => s.prefix === 'PRD');
+  assert(!!prdSeq && prdSeq.after >= 900002, `Sequences.PRD debe quedar en al menos 900002, quedó en ${prdSeq && prdSeq.after}`);
+});
+
+test('RESTORE_RECALCULATES_SEQUENCES_WITHOUT_COLLISION', () => {
+  // Continúa directamente del estado dejado por el test anterior (mismo
+  // proceso, misma hoja restaurada) -- crear un producto nuevo real
+  // JAMÁS debe colisionar con PRD-900001 ya restaurado.
+  const res = doPostRaw('products.save', {
+    sku: 'SKU-POST-RESTORE', nombre: 'Producto Después de Restore', categoriaId: 'CAT-R01',
+    marca: 'ZIO', costo: 10, precio: 20, impuesto: 18, stockMinimo: 1,
+    variantes: [{ color: 'Negro', talla: 'L', costo: 10, precio: 20, stock: 1 }]
+  }, adminToken);
+  assert(res.success === true, JSON.stringify(res));
+
+  const newId = res.productId;
+  assert(newId !== 'PRD-900001', 'el nuevo producto jamás debe colisionar con el ID ya restaurado');
+  const newNum = Number(String(newId).split('-')[1]);
+  assert(newNum > 900001, `el siguiente ID de producto (${newId}) debe ser mayor que el máximo restaurado (900001)`);
+});
+
+test('RESTORE_ROLLBACK_ON_MID_SWAP_FAILURE_LEAVES_PREVIOUS_STATE_INTACT', () => {
+  // Línea base EXACTA antes de este intento (ya reemplazada por
+  // RESTORE_REAL_VALID_BACKUP... de arriba) -- se compara byte a byte
+  // después del rollback, en vez de asumir cuál era el contenido
+  // original. Esto evita el error de comparar contra un ID de fixture
+  // que coincida por casualidad entre tests.
+  const categoriasBefore = runInContext(`JSON.stringify(DbHelper.getAllRows('Categorias'))`);
+  const beforeProduct = runInContext(`DbHelper.findById('Productos', 'PRD-900001')`);
+  assert(!!beforeProduct, 'precondición: el producto restaurado en el test anterior debe seguir presente');
+  const beforeCount = runInContext(`DbHelper.getAllRows('Ventas').length`);
+
+  // Backup DISTINTO al de la línea base (categoría nueva CAT-ROLLBACK-01)
+  // -- así una fuga del rollback es detectable sin ambigüedad.
+  const backup = buildValidRestoreBackup_();
+  backup.data.categories = [{ id: 'CAT-ROLLBACK-01', nombre: 'NO Debe Sobrevivir', descripcion: '', estado: 'ACTIVO' }];
+  backup.data.products[0].categoriaId = 'CAT-ROLLBACK-01';
+
+  const originalDeleteSheet = mockSpreadsheet.deleteSheet.bind(mockSpreadsheet);
+  let triggered = false;
+  mockSpreadsheet.deleteSheet = function (sheet) {
+    if (!triggered && sheet.name === 'Ventas') {
+      triggered = true;
+      throw new Error('__FASE_B_FORZAR_FALLO_SWAP__');
+    }
+    return originalDeleteSheet(sheet);
+  };
+
+  let res;
+  try {
+    res = doPostRaw('system.restoreBackup', { backup: backup }, adminToken);
+  } finally {
+    mockSpreadsheet.deleteSheet = originalDeleteSheet;
+  }
+
+  assert(triggered, 'la prueba debe forzar realmente el fallo a mitad del swap (si esto falla, el mock no se activó)');
+  assert(res.success === false, 'la restauración debe reportarse como fallida: ' + JSON.stringify(res));
+  assert(res.rolledBack === true, 'debe indicar explícitamente que se aplicó rollback: ' + JSON.stringify(res));
+
+  // Categorias/Productos/Variantes/Clientes/Cajas/Compras ya habían sido
+  // intercambiadas ANTES de que 'Ventas' fallara (van antes en el orden
+  // de restauración) -- deben haber vuelto exactamente a su estado
+  // anterior, no quedar a medio camino.
+  const categoryAfterRollback = runInContext(`DbHelper.findById('Categorias', 'CAT-ROLLBACK-01')`);
+  assert(!categoryAfterRollback, 'la categoría del backup fallido NO debe quedar aplicada tras el rollback');
+
+  const categoriasAfter = runInContext(`JSON.stringify(DbHelper.getAllRows('Categorias'))`);
+  assertEqual(categoriasAfter, categoriasBefore, 'Categorias debe quedar EXACTAMENTE igual a como estaba antes de este intento fallido');
+
+  const productStillThere = runInContext(`DbHelper.findById('Productos', 'PRD-900001')`);
+  assert(!!productStillThere, 'el producto que existía ANTES de este intento fallido debe seguir intacto tras el rollback');
+
+  // Ventas nunca llegó a tocarse (el fallo ocurrió ANTES de completar su
+  // propio swap) -- debe seguir teniendo exactamente el mismo conteo.
+  const afterCount = runInContext(`DbHelper.getAllRows('Ventas').length`);
+  assertEqual(afterCount, beforeCount, 'Ventas no debe haber cambiado de tamaño tras un rollback completo');
+
+  // No deben quedar hojas de andamiaje huérfanas.
+  // Solo las hojas "__STAGE_" (de staging) NUNCA deben sobrevivir, en
+  // éxito o en fallo -- siempre se renombran (éxito) o se borran
+  // (rollback). Las "__PRERESTORE_" de un ÉXITO anterior en esta misma
+  // corrida de pruebas (ej. RESTORE_REAL_VALID_BACKUP... de arriba) se
+  // dejan a propósito como red de seguridad manual -- no son una fuga de
+  // ESTE rollback, así que no se verifican aquí (ver diseño documentado
+  // al inicio de RestoreController.gs).
+  const leftoverStageSheets = runInContext(`getSpreadsheet().getSheets().map(s => s.getSheetName()).filter(n => n.indexOf('__STAGE_') !== -1)`);
+  assertEqual(leftoverStageSheets.length, 0, 'no deben quedar hojas de staging huérfanas tras el rollback: ' + JSON.stringify(leftoverStageSheets));
+});
+
+test('RESTORE_AUDIT_LOGS_SUCCESS_AND_FAILURE', () => {
+  const backup = buildValidRestoreBackup_();
+  backup.data.customers[0].id = 'CLI-AUDIT-TEST';
+  backup.data.sales[0].clienteId = 'CLI-AUDIT-TEST';
+  backup.data.credits[0].clienteId = 'CLI-AUDIT-TEST';
+  backup.data.returns[0].clienteId = 'CLI-AUDIT-TEST';
+  backup.data.creditNotes[0].clienteId = 'CLI-AUDIT-TEST';
+
+  const res = doPostRaw('system.restoreBackup', { backup: backup }, adminToken);
+  assert(res.success === true, JSON.stringify(res));
+
+  const successLogs = runInContext(`DbHelper.findRows('Auditoria', a => a.accion === 'RESTORE_BACKUP')`);
+  assert(successLogs.length > 0, 'debe existir al menos un registro de auditoría RESTORE_BACKUP');
+  const lastLog = successLogs[successLogs.length - 1];
+  assert(lastLog.detalle.indexOf('"totalRecords"') !== -1, 'el detalle debe incluir totalRecords');
+  assert(lastLog.detalle.indexOf('password') === -1 && lastLog.detalle.indexOf('token') === -1, 'la auditoría nunca debe incluir secretos/tokens');
+  assert(lastLog.detalle.length < 2000, 'la auditoría nunca debe registrar el JSON completo del backup (debe ser un resumen corto)');
+
+  // Fallo de validación también debe auditarse.
+  const badBackup = buildValidRestoreBackup_();
+  badBackup.complete = false;
+  doPostRaw('system.restoreBackup', { backup: badBackup }, adminToken);
+  const failureLogs = runInContext(`DbHelper.findRows('Auditoria', a => a.accion === 'RESTORE_BACKUP_FAILED')`);
+  assert(failureLogs.length > 0, 'debe existir al menos un registro de auditoría RESTORE_BACKUP_FAILED');
+});
+
+test('RESTORE_NEVER_INCLUDES_USERS_PASSWORDS_OR_SECRETS_IN_WRITTEN_SHEETS', () => {
+  const backup = buildValidRestoreBackup_();
+  backup.data.customers[0].id = 'CLI-SECRETS-TEST';
+  backup.data.sales[0].clienteId = 'CLI-SECRETS-TEST';
+  backup.data.credits[0].clienteId = 'CLI-SECRETS-TEST';
+  backup.data.returns[0].clienteId = 'CLI-SECRETS-TEST';
+  backup.data.creditNotes[0].clienteId = 'CLI-SECRETS-TEST';
+  // Ningún dato de usuarios/roles/secretos forma parte del backup en
+  // absoluto (Fase A ya los excluyó) -- esta prueba confirma que
+  // RestoreController tampoco los toca aunque alguien los agregara a mano.
+  backup.data.users = [{ id: 'USR-INYECTADO', usuario: 'hacker', password_hash: 'deberia-ser-ignorado' }];
+
+  const usersBefore = runInContext(`DbHelper.getAllRows('Usuarios').length`);
+  const res = doPostRaw('system.restoreBackup', { backup: backup }, adminToken);
+  assert(res.success === true, JSON.stringify(res));
+  const usersAfter = runInContext(`DbHelper.getAllRows('Usuarios').length`);
+  assertEqual(usersAfter, usersBefore, 'Usuarios nunca debe modificarse por una restauración, incluso si el JSON trae una clave "users"');
+
+  const injected = runInContext(`DbHelper.findById('Usuarios', 'USR-INYECTADO')`);
+  assert(!injected, 'un usuario inyectado en el backup jamás debe terminar escrito en la hoja Usuarios real');
 });
 
 /* ------------------------------------------------------------

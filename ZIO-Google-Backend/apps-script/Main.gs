@@ -160,6 +160,14 @@ function doPost(e) {
         result = SettingsController.handleUploadLogo(data, currentUser);
         break;
 
+      // --- BACKUP RESTORE (FASE B) ---
+      case 'system.previewRestoreBackup':
+        result = RestoreController.handlePreviewRestoreBackup(data, currentUser);
+        break;
+      case 'system.restoreBackup':
+        result = RestoreController.handleRestoreBackup(data, currentUser);
+        break;
+
       // --- PRODUCTS & CATALOG ---
       case 'products.list':
         result = ProductsController.handleListProducts(data);
@@ -233,6 +241,9 @@ function doPost(e) {
         break;
       case 'cash.listSessions':
         result = CashController.handleListSessions();
+        break;
+      case 'cash.listMovements':
+        result = CashController.handleListMovements(data, currentUser);
         break;
       case 'cash.open':
         result = CashController.handleOpenSession(data, currentUser);

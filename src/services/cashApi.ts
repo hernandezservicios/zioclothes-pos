@@ -98,6 +98,67 @@ class CashApi {
     return { success: true, message: 'OK', data: raw ? mapCashSession(raw) : null };
   }
 
+  /**
+   * FASE — COPIA DE SEGURIDAD (auditoría "Restaurar Backup JSON"):
+   * historial real de sesiones de caja (`cash.listSessions`, ver
+   * CashController.handleListSessions -- verificado línea por línea, no
+   * inventado). A diferencia de `getActiveSession`, el backend NO incluye
+   * aquí el detalle línea por línea de `Caja_Movimientos` de cada sesión
+   * (solo los totales ya agregados por sesión: ventasEfectivo,
+   * ingresosManuales, retirosManuales, gastos, efectivoEsperado, etc.) --
+   * no existe hoy un endpoint de backend para listar Caja_Movimientos en
+   * bloque para sesiones cerradas. `mapCashSession` ya maneja con
+   * seguridad la ausencia de `movimientos` (ver `mapMovimientos`).
+   */
+  public async listSessions(): Promise<ApiResponse<CashSession[]>> {
+    const token = this.requireToken();
+    if (!token) return { success: false, message: 'No hay sesión activa.', errorCode: 'AUTH_REQUIRED' };
+
+    const res = await apiService.syncWithGoogleAppsScript('cash.listSessions', {}, token);
+    if (!res.success) return { success: false, message: res.message, errorCode: res.errorCode };
+
+    const raw = res.data && Array.isArray(res.data.sessions) ? res.data.sessions : [];
+    return { success: true, message: 'OK', data: raw.map(mapCashSession) };
+  }
+
+  /**
+   * FASE A — BACKUP PROFESIONAL: historial COMPLETO de Caja_Movimientos
+   * (`cash.listMovements`, endpoint nuevo de esta fase -- ver
+   * CashController.handleListMovements). Deliberadamente NO reutiliza
+   * `mapMovimientos` de arriba -- esa función filtra solo INGRESO/RETIRO
+   * y los remapea a ENTRADA/SALIDA para la tabla de "Movimientos
+   * Manuales" de CashView. Un backup necesita TODOS los tipos de
+   * movimiento tal cual los guarda el backend (incluye VENTA_EFECTIVO,
+   * ABONO_EFECTIVO, DEVOLUCION_EFECTIVO, REVERSION_ABONO), sin filtrar ni
+   * renombrar nada.
+   */
+  public async listMovements(): Promise<ApiResponse<CashMovement[]>> {
+    const token = this.requireToken();
+    if (!token) return { success: false, message: 'No hay sesión activa.', errorCode: 'AUTH_REQUIRED' };
+
+    const res = await apiService.syncWithGoogleAppsScript('cash.listMovements', {}, token);
+    if (!res.success) return { success: false, message: res.message, errorCode: res.errorCode };
+
+    const raw = res.data && Array.isArray(res.data.movements) ? res.data.movements : [];
+    return {
+      success: true,
+      message: 'OK',
+      data: raw.map((m: any) => ({
+        id: m.id,
+        cajaSesionId: m.cajaSesionId,
+        tipo: m.tipo,
+        monto: Number(m.monto) || 0,
+        motivo: m.motivo || '',
+        categoriaGasto: m.categoriaGasto || undefined,
+        referencia: m.referencia || undefined,
+        usuarioId: m.usuarioId,
+        usuarioNombre: m.usuarioNombre,
+        fecha: m.fecha,
+        estado: m.estado || 'ACTIVO',
+      })),
+    };
+  }
+
   public async openSession(data: { montoInicial: number; cajaNombre?: string; observacionApertura?: string }): Promise<ApiResponse<CashSession>> {
     const token = this.requireToken();
     if (!token) return { success: false, message: 'No hay sesión activa.', errorCode: 'AUTH_REQUIRED' };

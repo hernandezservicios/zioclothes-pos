@@ -27,6 +27,26 @@ const DbHelper = {
   },
 
   /**
+   * FASE B (RESTAURACIÓN REAL): invalida la caché de hoja para un nombre
+   * específico (o toda la caché si no se pasa `sheetName`). Indispensable
+   * cuando algo distinto de DbHelper renombra/borra/reemplaza una hoja en
+   * medio de la misma ejecución (ver RestoreController.gs -- la
+   * estrategia de staging/swap por hojas renombra y borra hojas reales) --
+   * sin esto, una llamada posterior a `getSheet(sheetName)` devolvería la
+   * referencia vieja cacheada en vez de la hoja real que ahora ocupa ese
+   * nombre, un bug silencioso y grave. Nunca se llama durante el flujo
+   * normal de negocio (crear venta, ajustar stock, etc.), que jamás
+   * renombra ni borra hojas.
+   */
+  invalidateSheetCache(sheetName) {
+    if (sheetName) {
+      delete this._sheetCache[sheetName];
+    } else {
+      this._sheetCache = {};
+    }
+  },
+
+  /**
    * Reads all data rows from a sheet and maps them to an array of objects based on row 1 headers.
    * Uses a single getValues() call for optimal performance.
    * @param {string} sheetName
