@@ -4332,6 +4332,475 @@ test('SALE_VOID_REVERSES_ONLY_ITS_OWN_CREDIT_NOTE_APPLICATION', () => {
   assertEqual(Number(aplicacionesVenta2[0].monto), 300);
 });
 
+/* ================================================================
+   FASE 10.1 -- Parte 8: regresión completa de BUG-003. Venta A consume
+   una porción del crédito, Venta B consume otra porción distinta del
+   MISMO crédito; anular A revierte SOLO A (ya probado arriba); esta
+   prueba continúa la cadena anulando TAMBIÉN B, y confirma la invariante
+   final: saldo_disponible + monto_aplicado siempre debe coincidir con el
+   monto_original del crédito, sin importar cuántas aplicaciones/
+   reversiones haya sufrido.
+   ================================================================ */
+
+test('SALE_VOID_BOTH_APPLICATIONS_SEQUENTIALLY_RESTORES_FULL_ORIGINAL_BALANCE', () => {
+  const emitido = issueCreditNoteForTest(); // saldo original 1180
+  const sale1 = doPostRaw('sales.create', buildValidSaleData({
+    clienteId: 'CLI-T01', clienteNombre: 'Cliente Test',
+    metodoPago: 'MIXTO',
+    pagos: [{ metodo: 'CREDITO_FAVOR', monto: 500 }, { metodo: 'EFECTIVO', monto: 680 }],
+    creditoFavorAplicado: { id: emitido.id, monto: 500 }
+  }), adminToken);
+  assert(sale1.success === true, JSON.stringify(sale1));
+
+  const sale2 = doPostRaw('sales.create', buildValidSaleData({
+    clienteId: 'CLI-T01', clienteNombre: 'Cliente Test',
+    metodoPago: 'MIXTO',
+    pagos: [{ metodo: 'CREDITO_FAVOR', monto: 300 }, { metodo: 'EFECTIVO', monto: 880 }],
+    creditoFavorAplicado: { id: emitido.id, monto: 300 }
+  }), adminToken);
+  assert(sale2.success === true, JSON.stringify(sale2));
+
+  // Anular Venta A -- solo debe revertir la aplicación de A (300 sigue aplicado de B).
+  const voidA = doPostRaw('sales.void', { saleId: sale1.saleId, motivo: 'Anular venta A' }, adminToken);
+  assert(voidA.success === true, JSON.stringify(voidA));
+
+  let credito = runInContext(`DbHelper.findById('Creditos_Favor', '${emitido.id}')`);
+  assertEqual(Number(credito.saldo_disponible), 880); // 1180 - 300 (solo B activo)
+  assertEqual(Number(credito.monto_aplicado), 300);
+  assertEqual(credito.estado, 'PARCIALMENTE_APLICADA', 'todavía tiene la aplicación de B activa');
+  assertEqual(
+    Number(credito.saldo_disponible) + Number(credito.monto_aplicado),
+    Number(credito.monto_original),
+    'la invariante saldo+aplicado=original debe cumplirse en todo momento, no solo al final'
+  );
+
+  // Anular Venta B -- ahora SÍ debe revertir por completo.
+  const voidB = doPostRaw('sales.void', { saleId: sale2.saleId, motivo: 'Anular venta B' }, adminToken);
+  assert(voidB.success === true, JSON.stringify(voidB));
+
+  credito = runInContext(`DbHelper.findById('Creditos_Favor', '${emitido.id}')`);
+  assertEqual(Number(credito.saldo_disponible), 1180, 'con ambas ventas anuladas, el saldo debe quedar exactamente como el monto original');
+  assertEqual(Number(credito.monto_aplicado), 0);
+  assertEqual(credito.estado, 'EMITIDA');
+  assertEqual(
+    Number(credito.saldo_disponible) + Number(credito.monto_aplicado),
+    Number(credito.monto_original),
+    'invariante final: saldo_disponible + monto_aplicado = monto_original'
+  );
+
+  // El histórico de aplicaciones nunca se borra: 2 aplicaciones originales + 2 reversiones = 4 filas.
+  const aplicaciones = runInContext(`DbHelper.findRows('Creditos_Favor_Aplicaciones', a => a.credito_favor_id === '${emitido.id}')`);
+  assertEqual(aplicaciones.length, 4, 'deben quedar las 2 aplicaciones originales MÁS las 2 reversiones -- nunca se borra ni se edita nada');
+  const sumaAplicaciones = aplicaciones.reduce((sum, a) => sum + Number(a.monto), 0);
+  assertEqual(sumaAplicaciones, 0, 'la suma de todo el historial (aplicaciones + reversiones) debe netear a cero cuando todo fue revertido');
+});
+
+/* ================================================================
+   FASE 10.1 (Parte 3) -- PRUEBA E2E ÚNICA DE CADENA COMPLETA:
+   Producto -> Variante -> Cliente -> Venta a crédito -> Cuenta por
+   cobrar -> Abono -> Venta simple -> Devolución -> Nota de Crédito ->
+   Nueva venta (aplica el crédito + pago complementario) -> Anulación ->
+   Reversión del crédito -> Verificación de stock/saldos/estados finales.
+   Usa exclusivamente acciones HTTP reales (doPostRaw), nunca inserta
+   filas directamente -- cada paso pasa por el mismo camino que usaría el
+   frontend real.
+   ================================================================ */
+
+test('E2E_FULL_CHAIN_PRODUCT_TO_METRICS_WITH_CREDIT_REVERSAL', () => {
+  // ---------- 1-2. Crear producto con variante ----------
+  const productRes = doPostRaw('products.save', {
+    nombre: 'Producto E2E Cadena Completa', categoriaId: 'CAT-T01',
+    variantes: [{ color: 'Verde E2E', talla: 'M', stock: 50, precio: 1000, costo: 400 }],
+  }, adminToken);
+  assert(productRes.success === true, JSON.stringify(productRes));
+  const productId = productRes.productId;
+
+  const variant = runInContext(`DbHelper.findRows('Variantes', v => v.producto_id === '${productId}')[0]`);
+  assert(!!variant, 'debe existir la variante recién creada por products.save');
+  const varianteId = variant.id;
+  const stockInicial = Number(variant.stock);
+  assertEqual(stockInicial, 50);
+
+  const buildItem = (cantidad) => ({
+    productoId: productId, varianteId, nombreProducto: 'Producto E2E Cadena Completa', sku: variant.sku,
+    talla: 'M', color: 'Verde E2E', cantidad, costoUnitario: 400, precioUnitario: 1000,
+    descuentoPorcentaje: 0, descuentoMonto: 0, subtotal: 1000 * cantidad, impuestoMonto: 180 * cantidad, total: 1180 * cantidad
+  });
+
+  // ---------- 3. Crear cliente ----------
+  const customerRes = doPostRaw('customers.save', {
+    nombre: 'Cliente', apellido: 'Cadena E2E', telefono: '809-000-9999',
+    limiteCredito: 5000, diasCreditoPorDefecto: 30,
+  }, adminToken);
+  assert(customerRes.success === true, JSON.stringify(customerRes));
+  const clienteId = customerRes.customerId;
+
+  // ---------- 4-6. Venta A: pago a CRÉDITO -> genera cuenta por cobrar ----------
+  const saleA = doPostRaw('sales.create', {
+    clienteId, clienteNombre: 'Cliente Cadena E2E', cajaSesionId: '',
+    subtotal: 1000, descuentoTotal: 0, impuestoTotal: 180, total: 1180, costoTotal: 400,
+    metodoPago: 'CREDITO', pagos: [{ metodo: 'CREDITO', monto: 1180 }],
+    esCredito: true, montoFinanciado: 1180, aplicarImpuesto: true,
+    items: [buildItem(1)],
+  }, adminToken);
+  assert(saleA.success === true, JSON.stringify(saleA));
+  assert(!!saleA.cuentaCobrarId, 'la venta A debe generar una cuenta por cobrar real');
+
+  const stockTrasVentaA = Number(runInContext(`DbHelper.findById('Variantes', '${varianteId}')`).stock);
+  assertEqual(stockTrasVentaA, stockInicial - 1);
+
+  // ---------- 7. Registrar abono parcial contra la cuenta por cobrar ----------
+  const abonoRes = doPostRaw('credits.registerAbono', { cuentaCobrarId: saleA.cuentaCobrarId, monto: 500, metodoPago: 'EFECTIVO' }, adminToken);
+  assert(abonoRes.success === true, JSON.stringify(abonoRes));
+  assertEqual(abonoRes.saldoRestante, 680);
+
+  let creditoA = runInContext(`DbHelper.findById('Creditos', '${saleA.cuentaCobrarId}')`);
+  assertEqual(Number(creditoA.saldo_pendiente), 680);
+  assertEqual(Number(creditoA.monto_pagado), 500);
+  assertEqual(creditoA.estado, 'PARCIAL');
+
+  // ---------- Venta B: pago 100% EFECTIVO (sin cuenta por cobrar) ----------
+  const saleB = doPostRaw('sales.create', {
+    clienteId, clienteNombre: 'Cliente Cadena E2E', cajaSesionId: '',
+    subtotal: 1000, descuentoTotal: 0, impuestoTotal: 180, total: 1180, costoTotal: 400,
+    metodoPago: 'EFECTIVO', pagos: [{ metodo: 'EFECTIVO', monto: 1180 }],
+    esCredito: false, aplicarImpuesto: true,
+    items: [buildItem(1)],
+  }, adminToken);
+  assert(saleB.success === true, JSON.stringify(saleB));
+  assert(!saleB.cuentaCobrarId, 'la venta B es 100% al contado -- nunca debe generar cuenta por cobrar');
+
+  const stockTrasVentaB = Number(runInContext(`DbHelper.findById('Variantes', '${varianteId}')`).stock);
+  assertEqual(stockTrasVentaB, stockTrasVentaA - 1);
+
+  // ---------- 8-9. Devolución de la Venta B -> emite Nota de Crédito ----------
+  const returnRes = doPostRaw('returns.create', {
+    ventaId: saleB.saleId, motivo: 'Prueba E2E de cadena completa', tipoReembolso: 'NOTA_CREDITO',
+    items: [{ varianteId, cantidad: 1 }],
+  }, adminToken);
+  assert(returnRes.success === true, JSON.stringify(returnRes));
+  assert(!!returnRes.creditoFavorEmitido, 'debe emitirse una Nota de Crédito real (la venta B no tiene cuenta por cobrar propia)');
+  assertEqual(returnRes.creditoFavorEmitido.tipo, 'NOTA_CREDITO');
+  assertEqual(returnRes.creditoFavorEmitido.montoOriginal, 1180);
+  const notaCreditoId = returnRes.creditoFavorEmitido.id;
+
+  const stockTrasDevolucion = Number(runInContext(`DbHelper.findById('Variantes', '${varianteId}')`).stock);
+  assertEqual(stockTrasDevolucion, stockTrasVentaB + 1, 'la devolución debe reintegrar el stock de la unidad devuelta');
+
+  // ---------- 10-12. Venta C: aplica la Nota de Crédito + pago complementario en efectivo ----------
+  const saleC = doPostRaw('sales.create', {
+    clienteId, clienteNombre: 'Cliente Cadena E2E', cajaSesionId: '',
+    subtotal: 2000, descuentoTotal: 0, impuestoTotal: 360, total: 2360, costoTotal: 800,
+    metodoPago: 'MIXTO',
+    pagos: [{ metodo: 'CREDITO_FAVOR', monto: 1180 }, { metodo: 'EFECTIVO', monto: 1180 }],
+    creditoFavorAplicado: { id: notaCreditoId, monto: 1180 },
+    esCredito: false, aplicarImpuesto: true,
+    items: [buildItem(2)],
+  }, adminToken);
+  assert(saleC.success === true, JSON.stringify(saleC));
+  assert(!!saleC.creditoFavorAplicado, 'debe confirmarse la aplicación del crédito en la respuesta de la venta');
+  assertEqual(saleC.creditoFavorAplicado.estado, 'APLICADA');
+  assertEqual(saleC.creditoFavorAplicado.saldoRestante, 0);
+
+  const stockTrasVentaC = Number(runInContext(`DbHelper.findById('Variantes', '${varianteId}')`).stock);
+  assertEqual(stockTrasVentaC, stockTrasDevolucion - 2);
+
+  let notaCredito = runInContext(`DbHelper.findById('Creditos_Favor', '${notaCreditoId}')`);
+  assertEqual(Number(notaCredito.saldo_disponible), 0);
+  assertEqual(notaCredito.estado, 'APLICADA');
+
+  // ---------- 13. Anular la Venta C (la que consumió el crédito) ----------
+  const voidC = doPostRaw('sales.void', { saleId: saleC.saleId, motivo: 'Prueba E2E: anulación de venta con crédito aplicado' }, adminToken);
+  assert(voidC.success === true, JSON.stringify(voidC));
+
+  // ---------- 14. Confirmar que el crédito utilizado se revierte ----------
+  notaCredito = runInContext(`DbHelper.findById('Creditos_Favor', '${notaCreditoId}')`);
+  assertEqual(Number(notaCredito.saldo_disponible), 1180, 'el saldo de la nota debe restaurarse por completo');
+  assertEqual(Number(notaCredito.monto_aplicado), 0);
+  assertEqual(notaCredito.estado, 'EMITIDA');
+
+  // ---------- 15-16. La aplicación original NO se elimina; la reversión queda registrada ----------
+  const aplicacionesNota = runInContext(`DbHelper.findRows('Creditos_Favor_Aplicaciones', a => a.credito_favor_id === '${notaCreditoId}')`);
+  assertEqual(aplicacionesNota.length, 2, 'la aplicación original debe permanecer, junto con una nueva fila de reversión');
+  const montosAplicaciones = aplicacionesNota.map((a) => Number(a.monto)).sort((a, b) => a - b);
+  assertEqual(JSON.stringify(montosAplicaciones), JSON.stringify([-1180, 1180]));
+
+  // ---------- 17. Stock final ----------
+  const stockFinal = Number(runInContext(`DbHelper.findById('Variantes', '${varianteId}')`).stock);
+  assertEqual(stockFinal, stockInicial - 1 /* venta A */ - 1 /* venta B */ + 1 /* devolución B */ - 2 /* venta C */ + 2 /* anulación C */);
+  assertEqual(stockFinal, stockInicial - 1, 'stock final esperado: solo la unidad de la Venta A (nunca anulada) sigue descontada');
+
+  // ---------- 18. Saldos finales ----------
+  assertEqual(
+    Number(notaCredito.saldo_disponible) + Number(notaCredito.monto_aplicado),
+    Number(notaCredito.monto_original),
+    'invariante: saldo_disponible + monto_aplicado = monto_original'
+  );
+  // La cuenta por cobrar de la Venta A es una entidad TOTALMENTE distinta
+  // (cuenta por cobrar, no crédito a favor) -- nada de la cadena de la
+  // Nota de Crédito debió afectarla.
+  creditoA = runInContext(`DbHelper.findById('Creditos', '${saleA.cuentaCobrarId}')`);
+  assertEqual(Number(creditoA.saldo_pendiente), 680, 'la cuenta por cobrar de la venta A nunca debió alterarse por la cadena de crédito a favor');
+
+  // ---------- 19. Estados finales de las entidades ----------
+  const ventaCFinal = runInContext(`DbHelper.findById('Ventas', '${saleC.saleId}')`);
+  assertEqual(ventaCFinal.estado, 'ANULADA');
+  const ventaBFinal = runInContext(`DbHelper.findById('Ventas', '${saleB.saleId}')`);
+  assert(ventaBFinal.estado === 'DEVUELTA_TOTAL' || ventaBFinal.estado === 'DEVUELTA_PARCIAL', 'la venta B debe reflejar su devolución, nunca quedar como COMPLETADA');
+  const ventaAFinal = runInContext(`DbHelper.findById('Ventas', '${saleA.saleId}')`);
+  assertEqual(ventaAFinal.estado, 'COMPLETADA', 'la venta A nunca fue tocada por esta cadena -- debe seguir COMPLETADA');
+
+  // ---------- 20. Métricas/listados finales (mismos endpoints que usa el frontend real) ----------
+  const salesListRes = doPostRaw('sales.list', {}, adminToken);
+  assert(salesListRes.success === true, JSON.stringify(salesListRes));
+  const ventaCEnListado = salesListRes.sales.find((s) => s.id === saleC.saleId);
+  assert(!!ventaCEnListado, 'la venta anulada debe seguir apareciendo en el histórico real -- nunca se borra');
+  assertEqual(ventaCEnListado.estado, 'ANULADA');
+
+  const creditNotesListRes = doPostRaw('creditNotes.list', { clienteId }, adminToken);
+  assert(creditNotesListRes.success === true, JSON.stringify(creditNotesListRes));
+  const notaEnListado = creditNotesListRes.creditNotes.find((c) => c.id === notaCreditoId);
+  assert(!!notaEnListado, 'la nota debe seguir apareciendo en creditNotes.list para este cliente');
+  assertEqual(notaEnListado.saldoDisponible, 1180);
+  assertEqual(notaEnListado.aplicaciones.length, 2, 'creditNotes.list debe exponer tanto la aplicación original como la reversión -- mismo contrato que usa CreditNotesView en el frontend real');
+});
+
+/* ================================================================
+   FASE 10.1 (Parte 4) -- cobertura dedicada de inventory.adjust
+   (InventoryController.gs), sin ninguna prueba previa en esta suite.
+   ================================================================ */
+
+test('INVENTORY_ADJUST_POSITIVE_DELTA_INCREASES_STOCK', () => {
+  resetVarT01Stock(10);
+  const res = doPostRaw('inventory.adjust', { varianteId: 'VAR-T01', cantidadAjuste: 5, tipo: 'ENTRADA', motivo: 'Prueba E2E: entrada manual' }, adminToken);
+  assert(res.success === true, JSON.stringify(res));
+  assertEqual(res.stockAnterior, 10);
+  assertEqual(res.nuevoStock, 15);
+  const variant = runInContext("DbHelper.findById('Variantes', 'VAR-T01')");
+  assertEqual(Number(variant.stock), 15);
+  resetVarT01Stock(5);
+});
+
+test('INVENTORY_ADJUST_NEGATIVE_DELTA_DECREASES_STOCK', () => {
+  resetVarT01Stock(10);
+  const res = doPostRaw('inventory.adjust', { varianteId: 'VAR-T01', cantidadAjuste: -4, tipo: 'SALIDA', motivo: 'Prueba E2E: salida manual' }, adminToken);
+  assert(res.success === true, JSON.stringify(res));
+  assertEqual(res.nuevoStock, 6);
+  const variant = runInContext("DbHelper.findById('Variantes', 'VAR-T01')");
+  assertEqual(Number(variant.stock), 6);
+  resetVarT01Stock(5);
+});
+
+test('INVENTORY_ADJUST_REJECTS_NEGATIVE_RESULTING_STOCK', () => {
+  resetVarT01Stock(3);
+  const res = doPostRaw('inventory.adjust', { varianteId: 'VAR-T01', cantidadAjuste: -10, tipo: 'SALIDA', motivo: 'Intento de dejar stock negativo' }, adminToken);
+  assert(res.success === false, 'un ajuste que deje el stock negativo debe rechazarse');
+  assert(String(res.error || '').indexOf('STOCK_INSUFICIENTE') === 0, res.error);
+  const variant = runInContext("DbHelper.findById('Variantes', 'VAR-T01')");
+  assertEqual(Number(variant.stock), 3, 'el stock no debe cambiar si el ajuste se rechaza');
+  resetVarT01Stock(5);
+});
+
+test('INVENTORY_ADJUST_REJECTS_NONEXISTENT_VARIANT', () => {
+  const res = doPostRaw('inventory.adjust', { varianteId: 'VAR-NO-EXISTE-999', cantidadAjuste: 5, tipo: 'ENTRADA', motivo: 'Variante inexistente' }, adminToken);
+  assert(res.success === false, 'una variante inexistente debe rechazarse');
+  assert(String(res.error || '').indexOf('NOT_FOUND') === 0, res.error);
+});
+
+test('INVENTORY_ADJUST_REJECTS_ZERO_DELTA', () => {
+  resetVarT01Stock(5);
+  const res = doPostRaw('inventory.adjust', { varianteId: 'VAR-T01', cantidadAjuste: 0, tipo: 'AJUSTE', motivo: 'Delta cero' }, adminToken);
+  assert(res.success === false, 'un ajuste de cantidad 0 no representa ningún movimiento real -- debe rechazarse');
+  assert(String(res.error || '').indexOf('VALIDATION_ERROR') === 0, res.error);
+});
+
+test('INVENTORY_ADJUST_TWO_SEQUENTIAL_DELTAS_COMPOSE_CORRECTLY', () => {
+  // STOCK FINAL = STOCK INICIAL + SUMA DE DELTAS -- calculado SIEMPRE a
+  // partir del stock REAL releído dentro del candado (ver el propio
+  // comentario de diseño en InventoryController.gs), nunca de un valor
+  // absoluto cacheado por el cliente.
+  resetVarT01Stock(10);
+  const res1 = doPostRaw('inventory.adjust', { varianteId: 'VAR-T01', cantidadAjuste: 5, tipo: 'ENTRADA', motivo: 'Ajuste secuencial 1' }, adminToken);
+  assert(res1.success === true, JSON.stringify(res1));
+  assertEqual(res1.nuevoStock, 15);
+
+  const res2 = doPostRaw('inventory.adjust', { varianteId: 'VAR-T01', cantidadAjuste: -3, tipo: 'AJUSTE', motivo: 'Ajuste secuencial 2' }, adminToken);
+  assert(res2.success === true, JSON.stringify(res2));
+  assertEqual(res2.nuevoStock, 12);
+
+  const variant = runInContext("DbHelper.findById('Variantes', 'VAR-T01')");
+  assertEqual(Number(variant.stock), 10 + 5 - 3, 'STOCK FINAL = STOCK INICIAL + SUMA DE DELTAS');
+
+  const kardex = runInContext("DbHelper.findRows('Inventario_Kardex', k => k.variante_id === 'VAR-T01' && (k.motivo === 'Ajuste secuencial 1' || k.motivo === 'Ajuste secuencial 2'))");
+  assertEqual(kardex.length, 2, 'cada ajuste debe dejar su propia fila de Kardex, nunca sobrescribir la anterior');
+  resetVarT01Stock(5);
+});
+
+/* ================================================================
+   FASE 10.1 (Parte 5) -- cobertura dedicada de customers.save
+   (CustomersController.gs), sin ninguna prueba previa en esta suite.
+   ================================================================ */
+
+test('CUSTOMERS_SAVE_CREATES_NEW_CUSTOMER', () => {
+  const res = doPostRaw('customers.save', { nombre: 'Prueba', apellido: 'Cliente Nuevo', telefono: '809-111-2222', documento: 'DOC-CUST-001' }, adminToken);
+  assert(res.success === true, JSON.stringify(res));
+  assert(!!res.customerId, 'debe devolver el ID real generado por Sequences');
+  const cliente = runInContext(`DbHelper.findById('Clientes', '${res.customerId}')`);
+  assertEqual(cliente.nombre, 'Prueba');
+  assertEqual(cliente.estado, 'ACTIVO', 'un cliente nuevo debe quedar ACTIVO por defecto');
+});
+
+test('CUSTOMERS_SAVE_EDITS_EXISTING_CUSTOMER', () => {
+  const createRes = doPostRaw('customers.save', { nombre: 'Original', apellido: 'Antes de Editar', telefono: '809-333-4444' }, adminToken);
+  assert(createRes.success === true, JSON.stringify(createRes));
+  const customerId = createRes.customerId;
+
+  const editRes = doPostRaw('customers.save', { id: customerId, nombre: 'Editado', apellido: 'Después de Editar', telefono: '809-555-6666', limiteCredito: 2000 }, adminToken);
+  assert(editRes.success === true, JSON.stringify(editRes));
+
+  const cliente = runInContext(`DbHelper.findById('Clientes', '${customerId}')`);
+  assertEqual(cliente.nombre, 'Editado');
+  assertEqual(cliente.apellido, 'Después de Editar');
+  assertEqual(Number(cliente.limite_credito), 2000);
+});
+
+test('CUSTOMERS_SAVE_REJECTS_MISSING_REQUIRED_FIELDS', () => {
+  const res = doPostRaw('customers.save', { apellido: 'Sin Nombre Ni Telefono' }, adminToken);
+  assert(res.success === false, 'nombre y teléfono son obligatorios');
+  assert(String(res.error || '').indexOf('VALIDATION_ERROR') === 0, res.error);
+});
+
+test('CUSTOMERS_SAVE_ALLOWS_SAME_DOCUMENTO_NO_DUPLICATE_CHECK_EXISTS', () => {
+  // Hallazgo de auditoría, documentado explícitamente (no se inventa una
+  // regla de negocio nueva): CustomersController.handleSaveCustomer NO
+  // valida duplicados por documento/teléfono hoy -- esta prueba confirma
+  // el comportamiento REAL actual del sistema, para que quede como
+  // regresión documentada en vez de una suposición.
+  const first = doPostRaw('customers.save', { nombre: 'Cliente', apellido: 'Uno', telefono: '809-999-0001', documento: 'DOC-DUPLICADO-TEST' }, adminToken);
+  assert(first.success === true, JSON.stringify(first));
+  const second = doPostRaw('customers.save', { nombre: 'Cliente', apellido: 'Dos', telefono: '809-999-0002', documento: 'DOC-DUPLICADO-TEST' }, adminToken);
+  assert(second.success === true, 'el backend real hoy no rechaza documentos duplicados -- se documenta el comportamiento actual, no se inventa uno nuevo');
+  assert(first.customerId !== second.customerId, 'deben quedar como dos clientes distintos con IDs distintos');
+});
+
+test('CUSTOMERS_SAVE_INACTIVE_CUSTOMER_STATE_PERSISTS_AND_LISTS_CORRECTLY', () => {
+  const createRes = doPostRaw('customers.save', { nombre: 'Cliente', apellido: 'Para Desactivar', telefono: '809-777-8888' }, adminToken);
+  assert(createRes.success === true, JSON.stringify(createRes));
+  const customerId = createRes.customerId;
+
+  const deactivateRes = doPostRaw('customers.save', { id: customerId, nombre: 'Cliente', apellido: 'Para Desactivar', telefono: '809-777-8888', estado: 'INACTIVO' }, adminToken);
+  assert(deactivateRes.success === true, JSON.stringify(deactivateRes));
+
+  const listRes = doPostRaw('customers.list', {}, adminToken);
+  assert(listRes.success === true, JSON.stringify(listRes));
+  const clienteEnListado = listRes.customers.find((c) => c.id === customerId);
+  assert(!!clienteEnListado, 'un cliente inactivo debe seguir apareciendo en el listado -- nunca se borra');
+  assertEqual(clienteEnListado.estado, 'INACTIVO');
+});
+
+test('CUSTOMERS_SAVE_DOES_NOT_BREAK_EXISTING_CREDIT_FAVOR_RELATIONSHIPS', () => {
+  const createRes = doPostRaw('customers.save', { nombre: 'Cliente', apellido: 'Con Credito E2E', telefono: '809-444-3333' }, adminToken);
+  assert(createRes.success === true, JSON.stringify(createRes));
+  const customerId = createRes.customerId;
+
+  runInContext(`
+    DbHelper.insertRow('Creditos_Favor', {
+      id: 'CFAV-CUST-TEST', numero: 'CFAV-CUST-TEST', tipo: 'VALE_TIENDA', cliente_id: '${customerId}',
+      cliente_nombre: 'Cliente Con Credito E2E', devolucion_id: '', venta_origen_id: '',
+      monto_original: 750, monto_aplicado: 0, saldo_disponible: 750, estado: 'EMITIDA',
+      motivo_anulacion: '', anulado_por: '', fecha_anulacion: '',
+      usuario_id: 'USR-001', usuario_nombre: 'Sistema',
+      fecha_creacion: getNowFormatted(), actualizado_en: getNowFormatted()
+    });
+  `);
+
+  const editRes = doPostRaw('customers.save', { id: customerId, nombre: 'Cliente', apellido: 'Actualizado E2E', telefono: '809-444-3333', direccion: 'Nueva Direccion' }, adminToken);
+  assert(editRes.success === true, JSON.stringify(editRes));
+
+  const credito = runInContext(`DbHelper.findById('Creditos_Favor', 'CFAV-CUST-TEST')`);
+  assertEqual(Number(credito.saldo_disponible), 750, 'editar los datos del cliente nunca debe afectar sus créditos a favor existentes');
+});
+
+/* ================================================================
+   FASE 10.1 (Parte 6) -- cobertura dedicada de purchases.create
+   (PurchasesController.gs), sin ninguna prueba previa en esta suite.
+   ================================================================ */
+
+test('PURCHASES_CREATE_SIMPLE_INCREASES_STOCK_AND_KARDEX', () => {
+  resetVarT01Stock(5);
+  const res = doPostRaw('purchases.create', {
+    proveedor: 'Proveedor E2E Test', proveedorId: '',
+    items: [{ varianteId: 'VAR-T01', nombreProducto: 'Producto Test', cantidad: 10, costoUnitario: 500 }],
+    total: 5000, formaPago: 'TRANSFERENCIA',
+  }, adminToken);
+  assert(res.success === true, JSON.stringify(res));
+  assertEqual(res.total, 5000);
+
+  const variant = runInContext("DbHelper.findById('Variantes', 'VAR-T01')");
+  assertEqual(Number(variant.stock), 15, 'STOCK INICIAL (5) + cantidad recibida (10) = 15');
+
+  const kardex = runInContext(`DbHelper.findRows('Inventario_Kardex', k => k.referencia === '${res.compraId}')`);
+  assertEqual(kardex.length, 1);
+  assertEqual(kardex[0].tipo, 'COMPRA');
+  assertEqual(Number(kardex[0].stock_anterior), 5);
+  assertEqual(Number(kardex[0].stock_nuevo), 15);
+  resetVarT01Stock(5);
+});
+
+test('PURCHASES_CREATE_MULTIPLE_ITEMS_UPDATES_ALL_VARIANTS', () => {
+  resetVarT01Stock(5);
+  const var2Antes = Number(runInContext("DbHelper.findById('Variantes', 'VAR-T02')").stock);
+
+  const res = doPostRaw('purchases.create', {
+    proveedor: 'Proveedor E2E Multi', proveedorId: '',
+    items: [
+      { varianteId: 'VAR-T01', nombreProducto: 'Producto Test', cantidad: 4, costoUnitario: 500 },
+      { varianteId: 'VAR-T02', nombreProducto: 'Producto Barato Test', cantidad: 6, costoUnitario: 100 },
+    ],
+    total: 4 * 500 + 6 * 100, formaPago: 'EFECTIVO',
+  }, adminToken);
+  assert(res.success === true, JSON.stringify(res));
+
+  assertEqual(Number(runInContext("DbHelper.findById('Variantes', 'VAR-T01')").stock), 9);
+  assertEqual(Number(runInContext("DbHelper.findById('Variantes', 'VAR-T02')").stock), var2Antes + 6);
+  resetVarT01Stock(5);
+});
+
+test('PURCHASES_CREATE_REJECTS_TOTAL_MISMATCH_WITHOUT_TOUCHING_STOCK', () => {
+  resetVarT01Stock(5);
+  const res = doPostRaw('purchases.create', {
+    proveedor: 'Proveedor E2E Mismatch', proveedorId: '',
+    items: [{ varianteId: 'VAR-T01', nombreProducto: 'Producto Test', cantidad: 10, costoUnitario: 500 }],
+    total: 999, // no coincide con 10*500=5000
+    formaPago: 'EFECTIVO',
+  }, adminToken);
+  assert(res.success === false, 'un total que no cuadra con cantidad x costo debe rechazarse');
+  assert(String(res.error || '').indexOf('PURCHASE_TOTAL_MISMATCH') === 0, res.error);
+
+  const variant = runInContext("DbHelper.findById('Variantes', 'VAR-T01')");
+  assertEqual(Number(variant.stock), 5, 'el stock no debe cambiar si la compra se rechaza');
+});
+
+test('PURCHASES_CREATE_REJECTS_NONEXISTENT_VARIANT_ATOMICALLY', () => {
+  // Todo o nada: el primer ítem (válido) NUNCA debe aplicarse si el
+  // segundo ítem de la MISMA compra referencia una variante inexistente.
+  resetVarT01Stock(5);
+  const res = doPostRaw('purchases.create', {
+    proveedor: 'Proveedor E2E Rollback', proveedorId: '',
+    items: [
+      { varianteId: 'VAR-T01', nombreProducto: 'Producto Test', cantidad: 10, costoUnitario: 500 },
+      { varianteId: 'VAR-NO-EXISTE-999', nombreProducto: 'Fantasma', cantidad: 1, costoUnitario: 100 },
+    ],
+    total: 5100,
+    formaPago: 'EFECTIVO',
+  }, adminToken);
+  assert(res.success === false, 'una variante inexistente en cualquier línea debe rechazar TODA la compra');
+  assert(String(res.error || '').indexOf('NOT_FOUND') === 0, res.error);
+
+  const variant = runInContext("DbHelper.findById('Variantes', 'VAR-T01')");
+  assertEqual(Number(variant.stock), 5, 'ninguna línea debe aplicarse -- ni siquiera la primera, que sí era válida');
+});
+
 /* ------------------------------------------------------------
    REPORTE
    ------------------------------------------------------------ */

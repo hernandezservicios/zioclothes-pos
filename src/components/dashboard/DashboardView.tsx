@@ -148,7 +148,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
   const overdueTotal = overdueCredits.reduce((acc, c) => acc + (c.saldoPendiente || 0), 0);
 
   const installmentsMonth = (installments || [])
-    .filter((i) => i && i.fecha && i.fecha.startsWith(currentMonthStr))
+    .filter((i) => i && matchesReportPeriod(i.fecha, 'MES'))
     .reduce((acc, i) => acc + (i.montoAbonado || 0), 0);
 
   const lowStockCount = (products || []).reduce((total, p) => {
@@ -157,7 +157,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
   }, 0);
 
   const expensesMonth = (expenses || [])
-    .filter((e) => e && e.fecha && e.fecha.startsWith(currentMonthStr))
+    .filter((e) => e && matchesReportPeriod(e.fecha, 'MES'))
     .reduce((acc, e) => acc + (e.monto || 0), 0);
 
   // 2. Chart: Sales Trend Data

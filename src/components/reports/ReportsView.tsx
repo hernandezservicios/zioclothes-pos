@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useDataStore } from '../../context/DataStoreContext';
 import { useToast } from '../../context/ToastContext';
-import { formatCurrency } from '../../utils/formatters';
+import { formatCurrency, matchesReportPeriod, ReportPeriod } from '../../utils/formatters';
 import { exportToCSV } from '../../utils/exportUtils';
 import {
   BarChart,
@@ -35,7 +35,20 @@ export const ReportsView: React.FC = () => {
   const { settings, hasPermission } = useAuth();
   const { showToast } = useToast();
 
-  const [timeRange, setTimeRange] = useState<'HOY' | 'SEMANA' | 'MES' | 'TODO'>('MES');
+  // FASE 10.1 (cierre de auditoría E2E -- hallazgo real): este selector
+  // existía desde antes pero NUNCA se aplicaba a ningún cálculo de esta
+  // pantalla -- el reporte siempre mostraba el histórico completo sin
+  // importar lo que el usuario seleccionara aquí. Ahora sí filtra las
+  // métricas de FLUJO (ventas, devoluciones, gastos, abonos, créditos/
+  // notas EMITIDOS) usando `matchesReportPeriod` (día/mes comercial de
+  // America/Santo_Domingo, la MISMA función que usa DashboardView.tsx
+  // para "Hoy"/"Mes actual" -- nunca dos fórmulas de fecha distintas).
+  // Los saldos/balances (Cartera Pendiente de Cobro, Saldo a Favor
+  // Pendiente de Usar) deliberadamente NO se filtran por período: son una
+  // fotografía del estado ACTUAL de la cuenta, no algo que "ocurrió" en
+  // un rango de fechas -- filtrarlos no tendría un significado contable
+  // correcto (no existen saldos históricos por fecha en este sistema).
+  const [timeRange, setTimeRange] = useState<ReportPeriod>('MES');
 
   // FASE 3.7A/3.7B/3.7E / CORREGIR AUDITORÍA: ventas, créditos y gastos
   // reales, ahora leídos del DataStore central -- la MISMA colección que
@@ -85,11 +98,18 @@ export const ReportsView: React.FC = () => {
     refreshReturns();
   }, [refreshSales, refreshCredits, refreshCreditNotes, refreshExpenses, refreshReturns]);
 
-  const sales = (rawSales || []).filter((s) => s && s.estado !== 'ANULADA');
-  const returnsList = rawReturns || [];
-  const expenses = rawExpenses || [];
+  // Métricas de FLUJO -- respetan el selector `timeRange`.
+  const sales = (rawSales || []).filter((s) => s && s.estado !== 'ANULADA' && matchesReportPeriod(s.fecha, timeRange));
+  const returnsList = (rawReturns || []).filter((r) => r && matchesReportPeriod(r.fecha, timeRange));
+  const expenses = (rawExpenses || []).filter((e) => e && matchesReportPeriod(e.fecha, timeRange));
+  const installments = (rawCredits || [])
+    .flatMap((c) => c.abonos || [])
+    .filter((i) => i && i.estado !== 'ANULADO' && matchesReportPeriod(i.fecha, timeRange));
+  const creditsIssuedInPeriod = (rawCredits || []).filter((c) => c && matchesReportPeriod(c.fechaCreacion, timeRange));
+
+  // Métricas de SALDO/BALANCE -- SIEMPRE el estado actual, nunca filtradas
+  // por período (ver comentario de `timeRange` arriba).
   const credits = rawCredits || [];
-  const installments = (rawCredits || []).flatMap((c) => c.abonos || []).filter((i) => i && i.estado !== 'ANULADO');
 
   // Metrics Calculation
   const totalSalesRevenueBruto = sales.reduce((acc, s) => acc + (s.total || 0), 0);
@@ -119,8 +139,12 @@ export const ReportsView: React.FC = () => {
   const totalExpenses = expenses.reduce((acc, e) => acc + (e.monto || 0), 0);
   const netProfit = grossProfit - totalExpenses;
 
-  // Total Receivables & Collected
-  const totalCreditIssued = credits.reduce((acc, c) => acc + (c.montoOriginal || 0), 0);
+  // Créditos Emitidos: FLUJO -- cuántas cuentas por cobrar se ORIGINARON
+  // dentro del período seleccionado (por fechaCreacion). Abonos Cobrados:
+  // también flujo, ya filtrado arriba en `installments`. Cartera
+  // Pendiente de Cobro: BALANCE, siempre el saldo actual completo, nunca
+  // filtrado por período (ver comentario de `timeRange`).
+  const totalCreditIssued = creditsIssuedInPeriod.reduce((acc, c) => acc + (c.montoOriginal || 0), 0);
   const totalCreditCollected = installments.reduce((acc, i) => acc + (i.montoAbonado || 0), 0);
   const totalPendingDebt = credits
     .filter((c) => c && c.estado !== 'PAGADA' && c.estado !== 'ANULADA')
@@ -130,12 +154,24 @@ export const ReportsView: React.FC = () => {
   // DISTINTO de la cartera por cobrar de arriba (aquí el negocio le debe
   // al cliente, no al revés; ver Creditos_Favor vs Creditos en el
   // backend). Nunca se suman entre sí.
-  const creditNotes = rawCreditNotes || [];
-  const totalCreditNotesIssued = creditNotes
-    .filter((c) => c && c.estado !== 'ANULADA')
-    .reduce((acc, c) => acc + (c.montoOriginal || 0), 0);
-  const totalCreditNotesApplied = creditNotes.reduce((acc, c) => acc + (c.montoAplicado || 0), 0);
-  const totalCreditNotesPending = creditNotes
+  //
+  // FASE 10.1: "Emitidos" y "Aplicados en Ventas" son FLUJO (se filtran
+  // por período, por fechaCreacion y por la fecha de cada aplicación
+  // individual respectivamente -- un crédito puede tener aplicaciones en
+  // fechas distintas, por eso se aplanan primero). "Saldo a Favor
+  // Pendiente de Usar" es BALANCE (saldo actual, nunca filtrado).
+  const creditNotesAll = rawCreditNotes || [];
+  const creditNotesIssuedInPeriod = creditNotesAll.filter(
+    (c) => c && c.estado !== 'ANULADA' && matchesReportPeriod(c.fechaCreacion, timeRange)
+  );
+  const totalCreditNotesIssued = creditNotesIssuedInPeriod.reduce((acc, c) => acc + (c.montoOriginal || 0), 0);
+
+  const creditNoteApplicationsInPeriod = creditNotesAll
+    .flatMap((c) => c.aplicaciones || [])
+    .filter((a) => a && matchesReportPeriod(a.fecha, timeRange));
+  const totalCreditNotesApplied = creditNoteApplicationsInPeriod.reduce((acc, a) => acc + (a.monto || 0), 0);
+
+  const totalCreditNotesPending = creditNotesAll
     .filter((c) => c && c.estado !== 'ANULADA')
     .reduce((acc, c) => acc + (c.saldoDisponible || 0), 0);
 
@@ -166,8 +202,13 @@ export const ReportsView: React.FC = () => {
     total,
   }));
 
+  const periodLabels: Record<ReportPeriod, string> = {
+    HOY: 'Hoy', SEMANA: 'Últimos 7 días', MES: 'Mes actual', TODO: 'Todo el histórico',
+  };
+
   const handleExportFullFinancialReport = () => {
     const reportRows = [
+      { Concepto: 'Período del Reporte', Monto: periodLabels[timeRange] },
       { Concepto: 'Ventas Brutas', Monto: totalSalesRevenueBruto },
       { Concepto: 'Devoluciones (monto devuelto)', Monto: -totalDevueltoMonto },
       { Concepto: 'Ingresos Totales por Ventas (neto de devoluciones)', Monto: totalSalesRevenue },
@@ -197,7 +238,23 @@ export const ReportsView: React.FC = () => {
           </h1>
         </div>
 
-        <div className="flex items-center gap-2.5">
+        <div className="flex flex-wrap items-center gap-2.5">
+          {/* FASE 10.1: selector de período REAL -- ahora sí filtra las
+              métricas de flujo de todo este reporte (ver `timeRange`). */}
+          <div className="flex bg-[#F6F1E8] border border-[#E4DDD2] p-1 rounded-xl text-xs">
+            {(['HOY', 'SEMANA', 'MES', 'TODO'] as ReportPeriod[]).map((p) => (
+              <button
+                key={p}
+                type="button"
+                onClick={() => setTimeRange(p)}
+                className={`px-3 py-1 rounded-lg font-semibold transition ${
+                  timeRange === p ? 'bg-[#2F2A25] text-[#FAF8F4]' : 'text-[#756E65] hover:text-[#2F2A25]'
+                }`}
+              >
+                {p === 'HOY' ? 'Hoy' : p === 'SEMANA' ? '7 Días' : p === 'MES' ? 'Este Mes' : 'Todo'}
+              </button>
+            ))}
+          </div>
           <button
             type="button"
             onClick={handleExportFullFinancialReport}
@@ -322,6 +379,7 @@ export const ReportsView: React.FC = () => {
           <p className="text-base font-bold text-amber-900 mt-1">
             {creditsLoading ? '...' : formatCurrency(totalPendingDebt, settings.simboloMoneda)}
           </p>
+          <span className="text-[9px] text-[#756E65]">Saldo actual -- no varía con el período seleccionado</span>
         </div>
       </div>
 
@@ -346,6 +404,7 @@ export const ReportsView: React.FC = () => {
           <p className="text-base font-bold text-amber-900 mt-1">
             {creditNotesLoading ? '...' : formatCurrency(totalCreditNotesPending, settings.simboloMoneda)}
           </p>
+          <span className="text-[9px] text-[#756E65]">Saldo actual -- no varía con el período seleccionado</span>
         </div>
       </div>
       {/* Charts Section */}
