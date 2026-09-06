@@ -12,6 +12,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useDataStore } from '../../context/DataStoreContext';
 import { formatCurrency, matchesReportPeriod } from '../../utils/formatters';
 import { toDisplayableImageUrl } from '../../utils/imageUrl';
+import { Sale } from '../../types';
 import {
   TrendingUp,
   DollarSign,
@@ -29,6 +30,72 @@ import {
   BarChart3,
   RefreshCcw,
 } from 'lucide-react';
+
+/**
+ * FIX CRÍTICO (auditoría "Métodos de Pago" -- número absurdo en
+ * EFECTIVO): `Sale.pagos[].monto` DEBE ser numérico según el contrato de
+ * tipos, pero como con cualquier celda de Google Sheets, un registro
+ * histórico puede haber quedado guardado como texto (mismo riesgo ya
+ * corregido antes para products.list/listAuxiliaries en
+ * productsApi.ts -- ver `normalizeSearchField` en POSView.tsx para el
+ * mismo patrón aplicado a strings). Causa raíz encontrada: el código
+ * anterior sumaba con `(acumulador || 0) + (p.monto || 0)` -- si
+ * `p.monto` llega como STRING (ej. "5400"), el operador `+` de
+ * JavaScript entre un número y un string NO suma, CONCATENA
+ * ("0" + "5400" = "05400"), y ese resultado ya-string envenena cada
+ * suma siguiente para ese mismo método (y también el total general),
+ * produciendo números absurdamente largos -- exactamente el caso
+ * reportado (RD$ 22,551,000,240,065,016,000,000) -- y porcentajes sin
+ * sentido. `toSafeAmount` fuerza cada monto a `Number` ANTES de
+ * sumar, nunca después, cortando la cascada en su origen. No cambia
+ * ningún dato de Google Sheets ni del backend -- solo cómo el frontend
+ * LEE un valor que ya llegó.
+ */
+function toSafeAmount(value: unknown): number {
+  return Number(value) || 0;
+}
+
+export interface PaymentMethodBreakdown {
+  metodo: string;
+  monto: number;
+  porcentaje: number;
+}
+
+/**
+ * Distribución real de pagos cobrados por método (EFECTIVO/TARJETA/
+ * TRANSFERENCIA/CREDITO/CREDITO_FAVOR/...). Exportada como función pura
+ * (extraída del `useMemo` que la usa, sin cambiar su comportamiento) para
+ * poder cubrirla con pruebas de regresión exactas sin tener que montar
+ * todo `DashboardView` -- ver `DashboardView.paymentMethods.test.ts`.
+ *
+ * Regla (Tercera Parte de la auditoría): para cada método,
+ * `montoMetodo` = suma de los pagos reales de ese método; `porcentaje` =
+ * `montoMetodo / totalPagos * 100` si `totalPagos > 0`, si no `0`. Nunca
+ * se usan ventas brutas, cuentas por cobrar, abonos ni devoluciones aquí
+ * -- solo `sale.pagos`, de ventas ya no-anuladas (filtro aplicado por
+ * quien llama, igual que antes).
+ */
+export function computePaymentMethodsData(sales: Pick<Sale, 'pagos'>[]): PaymentMethodBreakdown[] {
+  const counts: Record<string, number> = {
+    EFECTIVO: 0,
+    TARJETA: 0,
+    TRANSFERENCIA: 0,
+    CREDITO: 0,
+  };
+  (sales || []).forEach((s) => {
+    (s?.pagos || []).forEach((p) => {
+      if (p && p.metodo) {
+        counts[p.metodo] = toSafeAmount(counts[p.metodo]) + toSafeAmount(p.monto);
+      }
+    });
+  });
+  const totalPayments = Object.values(counts).reduce((a, b) => toSafeAmount(a) + toSafeAmount(b), 0);
+  return Object.entries(counts).map(([metodo, monto]) => ({
+    metodo,
+    monto,
+    porcentaje: totalPayments > 0 ? Math.round((monto / totalPayments) * 100) : 0,
+  }));
+}
 
 interface DashboardViewProps {
   onNavigate: (view: string, filterOrTab?: string) => void;
@@ -207,27 +274,19 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
   }, [sales, period]);
 
   // 3. Payment Methods Breakdown
-  const paymentMethodsData = useMemo(() => {
-    const counts: Record<string, number> = {
-      EFECTIVO: 0,
-      TARJETA: 0,
-      TRANSFERENCIA: 0,
-      CREDITO: 0,
-    };
-    (sales || []).forEach((s) => {
-      (s.pagos || []).forEach((p) => {
-        if (p && p.metodo) {
-          counts[p.metodo] = (counts[p.metodo] || 0) + (p.monto || 0);
-        }
-      });
-    });
-    const totalPayments = Object.values(counts).reduce((a, b) => a + b, 0) || 1;
-    return Object.entries(counts).map(([metodo, monto]) => ({
-      metodo,
-      monto,
-      porcentaje: Math.round((monto / totalPayments) * 100),
-    }));
-  }, [sales]);
+  //
+  // Solo pagos REALES ya cobrados (sale.pagos, de ventas no anuladas --
+  // `sales` arriba ya excluye ANULADA). CREDITO_FAVOR únicamente aparece
+  // aquí cuando efectivamente se aplicó un crédito a favor a una venta
+  // (PaymentModal.tsx envía `{metodo:'CREDITO_FAVOR', monto: montoAplicado}`
+  // -- el monto exacto aplicado, nunca el saldo total del vale) -- un
+  // crédito emitido pero no aplicado JAMÁS entra a `sale.pagos` de
+  // ninguna venta, y una nota de crédito no puede anularse si ya tiene
+  // algo aplicado (ver CreditNotesController.handleVoidCreditNote), así
+  // que no existe el caso "nota anulada pero ya contada aquí". No se
+  // mezclan ventas/cuentas por cobrar/abonos/devoluciones: esta métrica
+  // usa EXCLUSIVAMENTE el desglose de pagos de cada venta.
+  const paymentMethodsData = useMemo(() => computePaymentMethodsData(sales), [sales]);
 
   // 4. Top Selling Products
   const topProducts = useMemo(() => {
