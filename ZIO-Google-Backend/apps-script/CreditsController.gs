@@ -7,11 +7,81 @@
 
 const CreditsController = {
   /**
+   * FASE (normalización de estados de CxC / VENCIDA).
+   *
+   * Auditoría previa a este cambio: ni esta ni ninguna otra función de
+   * todo el backend (grep exhaustivo de 'VENCIDA' en ZIO-Google-Backend/
+   * apps-script/*.gs, cero resultados) escribía jamás `estado: 'VENCIDA'`
+   * en la hoja `Creditos` -- la columna solo llegaba a valer
+   * 'PENDIENTE' (al crear, ver SalesController.handleCreateSale),
+   * 'PARCIAL'/'PAGADA' (al abonar/revertir un abono, ver
+   * handleRegisterAbono/handleVoidAbono más abajo) o 'ANULADA' (al
+   * anular la venta asociada, ver SalesController.handleVoidSale). Por
+   * eso el filtro ya existente `c.estado === 'VENCIDA'` en
+   * DashboardView.tsx/CreditsView.tsx nunca era verdadero con datos
+   * reales.
+   *
+   * Esta función NUNCA escribe nada a Sheets -- calcula el estado REAL
+   * en el momento de LEER (aquí, en handleListCredits, el único punto
+   * por el que credits.list expone cada cuenta al frontend), exactamente
+   * el mismo criterio que ya usa NotificationContext.tsx en el
+   * frontend (que se deja sin cambios, ver reporte de esta fase). Esto
+   * evita por diseño TODO lo que la fase pide evitar explícitamente:
+   *   - no hay escritura nueva a Sheets -> no hay riesgo de duplicados,
+   *     no hace falta LockService/DbHelper.beginTx para esto, no hay
+   *     "job de mantenimiento" que pueda dejar cuentas a medio actualizar;
+   *   - no hace falta ninguna migración histórica -- una cuenta creada
+   *     hace un año se reinterpreta correctamente en cada lectura, sin
+   *     necesidad de tocar su fila real en Sheets jamás.
+   *
+   * Prioridad exacta pedida por la fase: ANULADA > PAGADA > VENCIDA >
+   * PARCIAL > PENDIENTE. `rawEstado` es el valor crudo ya almacenado
+   * (nunca se le pide a esta función que "adivine" si hubo abonos --
+   * eso ya lo decidió handleRegisterAbono al escribir 'PARCIAL', y se
+   * respeta tal cual mientras la cuenta no esté vencida ni saldada).
+   * @param {string} rawEstado
+   * @param {number} saldoPendiente
+   * @param {string} fechaVencimientoStr
+   * @param {string} todayDateStr - ver toBusinessDateStr_(new Date()), calculado UNA vez por llamada a handleListCredits, no por fila.
+   * @returns {string}
+   */
+  normalizeReceivableStatus_(rawEstado, saldoPendiente, fechaVencimientoStr, todayDateStr) {
+    // 1. ANULADA es terminal -- ninguna fecha ni saldo la reinterpreta jamás.
+    if (rawEstado === 'ANULADA') return 'ANULADA';
+
+    const saldo = Number(saldoPendiente) || 0;
+
+    // 2. Saldada -- PAGADA, sin importar si antes estuvo PENDIENTE,
+    // PARCIAL o (ahora) VENCIDA.
+    if (saldo <= 0) return 'PAGADA';
+
+    // 3. Saldo > 0: ¿la fecha de vencimiento comercial ya pasó?
+    if (fechaVencimientoStr) {
+      const dueDate = new Date(String(fechaVencimientoStr).replace(' ', 'T'));
+      if (!isNaN(dueDate.getTime())) {
+        const dueDateStr = toBusinessDateStr_(dueDate);
+        // Estrictamente MAYOR -- el mismo día de vencimiento todavía NO
+        // está vencido (Parte 3 de la fase: "fecha actual comercial =
+        // fecha de vencimiento -> todavía NO vencida").
+        if (todayDateStr > dueDateStr) return 'VENCIDA';
+      }
+    }
+
+    // 4. Todavía dentro de plazo: se respeta la distinción
+    // PENDIENTE/PARCIAL que ya decidió el flujo de abonos -- esta
+    // función nunca las reclasifica entre sí.
+    return rawEstado === 'PARCIAL' ? 'PARCIAL' : 'PENDIENTE';
+  },
+
+  /**
    * Returns accounts receivable with embedded payment installments (Abonos).
    */
   handleListCredits(data) {
     const credits = DbHelper.getAllRows('Creditos');
     const installments = DbHelper.getAllRows('Abonos');
+    // Calculado UNA sola vez por llamada -- nunca por fila (Parte 18 de
+    // la fase: el cálculo debe ser eficiente, nunca O(n²)).
+    const todayDateStr = toBusinessDateStr_(new Date());
 
     const installmentsByCredit = {};
     installments.forEach(inst => {
@@ -61,7 +131,7 @@ const CreditsController = {
         fechaCreacion: c.fecha_creacion,
         fechaVencimiento: c.fecha_vencimiento,
         diasPlazo: Number(c.dias_plazo) || 15,
-        estado: c.estado,
+        estado: this.normalizeReceivableStatus_(c.estado, c.saldo_pendiente, c.fecha_vencimiento, todayDateStr),
         observaciones: c.observaciones || '',
         creadoPor: c.creado_por,
         abonos: abonos

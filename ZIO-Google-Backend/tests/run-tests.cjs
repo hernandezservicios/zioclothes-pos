@@ -180,6 +180,24 @@ class MockSpreadsheet {
 
 function pad(n) { return String(n).padStart(2, '0'); }
 function formatDate(date, tz, fmt) {
+  // FASE (normalización de estados de CxC / VENCIDA): único formato que
+  // de verdad necesita respetar `tz` con fidelidad real -- Config.gs
+  // (toBusinessDateStr_) lo usa para decidir si una cuenta venció, y esa
+  // decisión SÍ debe ser sensible a la zona horaria real
+  // (America/Santo_Domingo), a diferencia de los timestamps completos de
+  // abajo (getNowFormatted, usados solo para auditoría/orden relativo,
+  // nunca comparados con aritmética de fechas de vencimiento). El resto
+  // de los formatos de abajo NO se toca -- se preserva exactamente su
+  // comportamiento anterior (ignora `tz`, usa la hora local del proceso
+  // Node) para no alterar ninguna de las pruebas ya existentes que
+  // dependen de ellos.
+  if (fmt === 'yyyy-MM-dd') {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit'
+    }).formatToParts(date);
+    const get = (type) => parts.find(p => p.type === type).value;
+    return `${get('year')}-${get('month')}-${get('day')}`;
+  }
   const yyyy = date.getFullYear();
   const MM = pad(date.getMonth() + 1);
   const dd = pad(date.getDate());
@@ -6223,6 +6241,365 @@ test('VARIANT_NULL_AND_UNDEFINED_TALLA_COLOR_NEVER_LEAK_OBJECT_OBJECT_OR_CRASH',
   assert(color.indexOf('[object') === -1 && color !== 'null' && color !== 'undefined', `color nulo/indefinido debe caer en el centinela, nunca en texto crudo: "${color}"`);
   assertEqual(talla, 'U');
   assertEqual(color, 'Único');
+});
+
+/* ================================================================
+   FASE — NORMALIZACIÓN DE ESTADOS DE CxC Y ESTADO VENCIDA.
+
+   Auditoría previa confirmada por grep exhaustivo (ver comentario de
+   CreditsController.normalizeReceivableStatus_): ningún archivo del
+   backend escribía jamás `estado: 'VENCIDA'`. La corrección de esta
+   fase es DELIBERADAMENTE de solo-lectura -- normalizeReceivableStatus_
+   se evalúa en handleListCredits en el momento de leer, nunca escribe
+   nada a Sheets. Por eso estas pruebas no necesitan ninguna migración:
+   una fila `Creditos` insertada directamente (simulando datos
+   históricos) se reinterpreta correctamente en la primera lectura.
+   ================================================================ */
+
+function daysAgoStr_(days) {
+  const d = new Date(Date.now() - days * 86400000);
+  return runInContext(`toBusinessDateStr_(new Date(${d.getTime()})) + ' 00:00:00'`);
+}
+function daysFromNowStr_(days) {
+  const d = new Date(Date.now() + days * 86400000);
+  return runInContext(`toBusinessDateStr_(new Date(${d.getTime()})) + ' 00:00:00'`);
+}
+function todayBusinessStr_() {
+  return runInContext(`toBusinessDateStr_(new Date())`);
+}
+
+function normStatus_(rawEstado, saldo, fechaVenc, todayStr) {
+  return runInContext(
+    `CreditsController.normalizeReceivableStatus_(${JSON.stringify(rawEstado)}, ${JSON.stringify(saldo)}, ${JSON.stringify(fechaVenc)}, ${JSON.stringify(todayStr)})`
+  );
+}
+
+let cxcRawSeq = 0;
+function insertRawCredit_(overrides) {
+  cxcRawSeq++;
+  const id = (overrides && overrides.id) || `CRED-RAW-${cxcRawSeq}`;
+  const row = Object.assign(
+    {
+      id,
+      numero_credito: id,
+      cliente_id: 'CLI-CXC-T01',
+      cliente_nombre: 'Cliente CxC Test',
+      cliente_telefono: '000',
+      cliente_documento: '000',
+      venta_id: `VEN-SYN-${id}`,
+      numero_venta: `VEN-SYN-${id}`,
+      monto_original: 5000,
+      monto_pagado: 0,
+      saldo_pendiente: 5000,
+      fecha_creacion: getNowFormatted_(),
+      fecha_vencimiento: daysFromNowStr_(10),
+      dias_plazo: 15,
+      estado: 'PENDIENTE',
+      observaciones: '',
+      creado_por: 'USR-001',
+    },
+    overrides || {}
+  );
+  delete row.id;
+  runInContext(`DbHelper.insertRow('Creditos', Object.assign({ id: ${JSON.stringify(id)} }, ${JSON.stringify(row)}))`);
+  return id;
+}
+function getNowFormatted_() {
+  return runInContext('getNowFormatted()');
+}
+
+function creditFromList_(id) {
+  const res = doPostRaw('credits.list', {}, adminToken);
+  return (res.credits || []).find((c) => c.id === id);
+}
+
+// Cliente/producto EXCLUSIVOS de esta sección -- mismo criterio ya
+// establecido (ver "Segundo cliente, exclusivo del test de caja+crédito"
+// en el seed compartido) para no depender del estado acumulado de
+// crédito que dejan otros tests sobre CLI-T01/CLI-T02.
+runInContext(`
+  DbHelper.insertRow('Clientes', {
+    id: 'CLI-CXC-T01', nombre: 'Cliente', apellido: 'CxC Test', documento: '000-0000000-9', telefono: '000',
+    correo: '', direccion: '', ciudad: '', limite_credito: 100000, dias_credito_por_defecto: 15,
+    notas: '', estado: 'ACTIVO', creado_en: getNowFormatted()
+  });
+  DbHelper.insertRow('Productos', {
+    id: 'PRD-CXC-T01', sku: 'SKU-CXC-T01', codigo_barras: '7460000009001', nombre: 'Producto CxC Test',
+    descripcion: '', categoria_id: 'CAT-T01', categoria_nombre: 'Categoria Test', marca: 'ZIO',
+    proveedor_id: '', costo: 1000, precio: 2000, precio_especial: '', impuesto: 0,
+    descuento_maximo: 0, stock_minimo: 1, estado: 'ACTIVO', imagen_url: '', creado_en: getNowFormatted()
+  });
+  DbHelper.insertRow('Variantes', {
+    id: 'VAR-CXC-T01', producto_id: 'PRD-CXC-T01', sku: 'SKU-CXC-T01-U', codigo_barras: '7460000009002',
+    color: 'Único', talla: 'U', costo: 1000, precio: 2000, stock: 1000, estado: 'ACTIVO'
+  });
+`);
+
+function createTestCreditSale_() {
+  const res = doPostRaw(
+    'sales.create',
+    {
+      clienteId: 'CLI-CXC-T01', clienteNombre: 'Cliente CxC Test', cajaSesionId: '',
+      subtotal: 2000, descuentoTotal: 0, impuestoTotal: 0, total: 2000, costoTotal: 1000,
+      metodoPago: 'CREDITO', pagos: [{ metodo: 'CREDITO', monto: 2000 }],
+      esCredito: true, montoFinanciado: 2000, aplicarImpuesto: false,
+      items: [{
+        productoId: 'PRD-CXC-T01', varianteId: 'VAR-CXC-T01', nombreProducto: 'Producto CxC Test', sku: 'SKU-CXC-T01-U',
+        talla: 'U', color: 'Único', cantidad: 1, costoUnitario: 1000, precioUnitario: 2000,
+        descuentoPorcentaje: 0, descuentoMonto: 0, subtotal: 2000, impuestoMonto: 0, total: 2000,
+      }],
+    },
+    adminToken
+  );
+  assert(res.success === true, 'debe poder crear una venta a crédito de prueba real: ' + JSON.stringify(res));
+  return res;
+}
+
+/* ---------------------------------------------------------------
+   Parte 15 (1-12) — pruebas unitarias directas de
+   normalizeReceivableStatus_ (sin pasar por Sheets/credits.list).
+   --------------------------------------------------------------- */
+
+test('CXC_PENDIENTE_NO_VENCIDA_PERMANECE_PENDIENTE', () => {
+  const today = todayBusinessStr_();
+  assertEqual(normStatus_('PENDIENTE', 5000, daysFromNowStr_(5), today), 'PENDIENTE');
+});
+
+test('CXC_PENDIENTE_VENCIDA_PASA_A_VENCIDA', () => {
+  const today = todayBusinessStr_();
+  assertEqual(normStatus_('PENDIENTE', 5000, daysAgoStr_(1), today), 'VENCIDA');
+});
+
+test('CXC_PARCIAL_NO_VENCIDA_PERMANECE_PARCIAL', () => {
+  const today = todayBusinessStr_();
+  assertEqual(normStatus_('PARCIAL', 3000, daysFromNowStr_(5), today), 'PARCIAL');
+});
+
+test('CXC_PARCIAL_VENCIDA_PASA_A_VENCIDA', () => {
+  const today = todayBusinessStr_();
+  assertEqual(normStatus_('PARCIAL', 3000, daysAgoStr_(1), today), 'VENCIDA');
+});
+
+test('CXC_VENCIDA_CON_SALDO_MAYOR_A_CERO_PERMANECE_VENCIDA', () => {
+  const today = todayBusinessStr_();
+  assertEqual(normStatus_('VENCIDA', 1200, daysAgoStr_(8), today), 'VENCIDA');
+});
+
+test('CXC_VENCIDA_CON_SALDO_CERO_PASA_A_PAGADA', () => {
+  const today = todayBusinessStr_();
+  assertEqual(normStatus_('VENCIDA', 0, daysAgoStr_(8), today), 'PAGADA');
+});
+
+test('CXC_PENDIENTE_CON_SALDO_CERO_PASA_A_PAGADA', () => {
+  const today = todayBusinessStr_();
+  assertEqual(normStatus_('PENDIENTE', 0, daysFromNowStr_(5), today), 'PAGADA');
+});
+
+test('CXC_PARCIAL_CON_SALDO_CERO_PASA_A_PAGADA', () => {
+  const today = todayBusinessStr_();
+  assertEqual(normStatus_('PARCIAL', 0, daysFromNowStr_(5), today), 'PAGADA');
+});
+
+test('CXC_ANULADA_NUNCA_PASA_A_VENCIDA', () => {
+  const today = todayBusinessStr_();
+  // Saldo > 0 y fecha vencida hace mucho -- si la prioridad ANULADA no
+  // fuera absoluta, esto se vería como VENCIDA.
+  assertEqual(normStatus_('ANULADA', 5000, daysAgoStr_(30), today), 'ANULADA');
+});
+
+test('CXC_PAGADA_NUNCA_PASA_A_VENCIDA', () => {
+  const today = todayBusinessStr_();
+  assertEqual(normStatus_('PENDIENTE', 0, daysAgoStr_(30), today), 'PAGADA');
+});
+
+test('CXC_FECHA_EXACTAMENTE_IGUAL_AL_VENCIMIENTO_NO_ES_VENCIDA', () => {
+  const today = todayBusinessStr_();
+  // Misma fecha comercial que hoy -- "todavía NO vencida" (Parte 3 de la fase, ejemplo textual).
+  assertEqual(normStatus_('PENDIENTE', 5000, `${today} 00:00:00`, today), 'PENDIENTE');
+  assertEqual(normStatus_('PENDIENTE', 5000, `${today} 23:59:59`, today), 'PENDIENTE');
+});
+
+test('CXC_DIA_SIGUIENTE_AL_VENCIMIENTO_SI_ES_VENCIDA', () => {
+  const today = todayBusinessStr_();
+  assertEqual(normStatus_('PENDIENTE', 5000, daysAgoStr_(1), today), 'VENCIDA');
+});
+
+/* ---------------------------------------------------------------
+   Parte 14 — casos especiales adicionales.
+   --------------------------------------------------------------- */
+
+test('CXC_FECHA_VENCIMIENTO_VACIA_NUNCA_ES_VENCIDA', () => {
+  const today = todayBusinessStr_();
+  assertEqual(normStatus_('PENDIENTE', 5000, '', today), 'PENDIENTE');
+  assertEqual(normStatus_('PARCIAL', 3000, '', today), 'PARCIAL');
+});
+
+test('CXC_FECHA_VENCIMIENTO_INVALIDA_NUNCA_ES_VENCIDA_NI_LANZA_ERROR', () => {
+  const today = todayBusinessStr_();
+  assertEqual(normStatus_('PENDIENTE', 5000, 'fecha-corrupta-no-parseable', today), 'PENDIENTE');
+});
+
+test('CXC_SALDO_NEGATIVO_SE_TRATA_COMO_PAGADA', () => {
+  const today = todayBusinessStr_();
+  assertEqual(normStatus_('PARCIAL', -100, daysAgoStr_(5), today), 'PAGADA');
+});
+
+test('CXC_ESTADOS_NO_PERMITIDOS_NUNCA_OCURREN', () => {
+  // Prueba de propiedad: para cualquier combinación razonable de
+  // entradas, la salida SIEMPRE es uno de los 5 estados válidos.
+  const today = todayBusinessStr_();
+  const validStates = ['PENDIENTE', 'PARCIAL', 'VENCIDA', 'PAGADA', 'ANULADA'];
+  const rawEstados = ['PENDIENTE', 'PARCIAL', 'VENCIDA', 'PAGADA', 'ANULADA', ''];
+  const saldos = [-500, 0, 1, 5000];
+  const fechas = ['', daysAgoStr_(10), daysFromNowStr_(10), 'invalida'];
+  rawEstados.forEach((re) => {
+    saldos.forEach((s) => {
+      fechas.forEach((f) => {
+        const result = normStatus_(re, s, f, today);
+        assert(validStates.indexOf(result) !== -1, `combinación (${re}, ${s}, "${f}") produjo un estado inválido: "${result}"`);
+      });
+    });
+  });
+});
+
+test('CXC_ZONA_HORARIA_AMERICA_SANTO_DOMINGO_REAL_NO_UTC', () => {
+  // Parte 3 de la fase: nunca decidir "vencido" con UTC directo. Se
+  // construye una fecha que en UTC ya cruzó la medianoche hacia el día
+  // siguiente, pero que en America/Santo_Domingo (UTC-4) TODAVÍA es el
+  // mismo día comercial que el vencimiento -- si la función usara UTC en
+  // vez de la zona horaria real, esto se marcaría incorrectamente como
+  // VENCIDA.
+  // 2026-09-07T02:00:00Z = 2026-09-06 22:00:00 en America/Santo_Domingo (UTC-4).
+  const nowUtcButStillTodayInSantoDomingo = new Date('2026-09-07T02:00:00Z');
+  const todayInSantoDomingo = runInContext(`toBusinessDateStr_(new Date(${nowUtcButStillTodayInSantoDomingo.getTime()}))`);
+  assertEqual(todayInSantoDomingo, '2026-09-06', 'la fecha comercial real en Santo Domingo para ese instante UTC debe ser 2026-09-06, no 2026-09-07');
+
+  const result = normStatus_('PENDIENTE', 5000, '2026-09-06 00:00:00', todayInSantoDomingo);
+  assertEqual(result, 'PENDIENTE', 'con la fecha comercial correcta (Santo Domingo), una cuenta que vence HOY mismo todavía NO debe estar vencida');
+});
+
+/* ---------------------------------------------------------------
+   Integración real contra credits.list (el endpoint real que consume
+   el frontend) -- confirma que handleListCredits aplica la
+   normalización, no solo la función pura.
+   --------------------------------------------------------------- */
+
+test('CXC_CREDITS_LIST_EXPONE_VENCIDA_PARA_FILA_CRUDA_VENCIDA', () => {
+  const id = insertRawCredit_({ saldo_pendiente: 4000, fecha_vencimiento: daysAgoStr_(3), estado: 'PENDIENTE' });
+  const credit = creditFromList_(id);
+  assert(!!credit, 'la cuenta debe aparecer en credits.list');
+  assertEqual(credit.estado, 'VENCIDA');
+  assertEqual(credit.saldoPendiente, 4000, 'el saldo expuesto no debe alterarse por la normalización de estado');
+});
+
+test('CXC_CREDITS_LIST_NUNCA_DUPLICA_CUENTAS', () => {
+  const before = doPostRaw('credits.list', {}, adminToken).credits.length;
+  const id1 = insertRawCredit_({ saldo_pendiente: 1000, fecha_vencimiento: daysAgoStr_(2) });
+  const id2 = insertRawCredit_({ saldo_pendiente: 0, estado: 'PAGADA' });
+  const after = doPostRaw('credits.list', {}, adminToken).credits.length;
+  assertEqual(after, before + 2, 'exactamente 2 filas nuevas -- ninguna normalización debe crear o duplicar filas');
+  const ids = doPostRaw('credits.list', {}, adminToken).credits.map((c) => c.id);
+  assertEqual(ids.filter((x) => x === id1).length, 1);
+  assertEqual(ids.filter((x) => x === id2).length, 1);
+});
+
+test('CXC_UNA_CUENTA_VENCIDA_NUNCA_SE_CUENTA_TAMBIEN_COMO_PAGADA_O_ANULADA', () => {
+  // Base de los KPIs de Dashboard/Reportes: cada cuenta expuesta por
+  // credits.list tiene EXACTAMENTE un estado -- nunca puede satisfacer
+  // dos filtros distintos a la vez (ej. ser 'VENCIDA' Y 'PAGADA').
+  const idVencida = insertRawCredit_({ saldo_pendiente: 2500, fecha_vencimiento: daysAgoStr_(5) });
+  const idPagada = insertRawCredit_({ saldo_pendiente: 0, estado: 'PAGADA' });
+  const idAnulada = insertRawCredit_({ saldo_pendiente: 3000, fecha_vencimiento: daysAgoStr_(10), estado: 'ANULADA' });
+
+  const list = doPostRaw('credits.list', {}, adminToken).credits;
+  const vencida = list.find((c) => c.id === idVencida);
+  const pagada = list.find((c) => c.id === idPagada);
+  const anulada = list.find((c) => c.id === idAnulada);
+
+  assertEqual(vencida.estado, 'VENCIDA');
+  assertEqual(pagada.estado, 'PAGADA');
+  assertEqual(anulada.estado, 'ANULADA');
+
+  // Mismo filtro EXACTO que ya usan DashboardView.tsx/CreditsView.tsx.
+  const overdue = list.filter((c) => c.estado === 'VENCIDA');
+  assert(overdue.some((c) => c.id === idVencida), 'la cuenta vencida debe aparecer en el filtro de vencidas');
+  assert(!overdue.some((c) => c.id === idPagada), 'una cuenta pagada NUNCA debe aparecer como vencida');
+  assert(!overdue.some((c) => c.id === idAnulada), 'una cuenta anulada NUNCA debe aparecer como vencida');
+});
+
+/* ---------------------------------------------------------------
+   Flujo real end-to-end: venta a crédito -> PENDIENTE -> (paso del
+   tiempo simulado) -> VENCIDA -> abono parcial (conserva VENCIDA) ->
+   abono final -> PAGADA. Parte 7 y Parte 16 de la fase.
+   --------------------------------------------------------------- */
+
+test('CXC_E2E_ABONO_PARCIAL_SOBRE_CUENTA_VENCIDA_CONSERVA_VENCIDA', () => {
+  const sale = createTestCreditSale_();
+  const creditId = sale.cuentaCobrarId;
+  assert(!!creditId, 'la venta a crédito debe generar una cuenta por cobrar real');
+
+  let credit = creditFromList_(creditId);
+  assertEqual(credit.estado, 'PENDIENTE', 'recién creada, sin vencer, debe ser PENDIENTE');
+  assertEqual(credit.saldoPendiente, 2000);
+
+  const montoOriginalAntes = credit.montoOriginal;
+  const fechaCreacionAntes = credit.fechaCreacion;
+  const clienteAntes = credit.clienteNombre;
+  const numeroVentaAntes = credit.numeroVenta;
+
+  // Avanza la fecha comercial simulada: se muta SOLO fecha_vencimiento,
+  // el mismo mecanismo que ya usan otras pruebas de este archivo para
+  // simular el paso del tiempo (ej. resetVarT01Stock para stock).
+  runInContext(`DbHelper.updateRowById('Creditos', '${creditId}', { fecha_vencimiento: ${JSON.stringify(daysAgoStr_(3))} })`);
+
+  credit = creditFromList_(creditId);
+  assertEqual(credit.estado, 'VENCIDA', 'tras pasar la fecha de vencimiento, debe pasar a VENCIDA');
+  // Parte 13 de la fase (regresión): cambiar de estado por el paso del
+  // tiempo NUNCA debe alterar los datos financieros/históricos.
+  assertEqual(credit.montoOriginal, montoOriginalAntes);
+  assertEqual(credit.saldoPendiente, 2000);
+  assertEqual(credit.fechaCreacion, fechaCreacionAntes);
+  assertEqual(credit.clienteNombre, clienteAntes);
+  assertEqual(credit.numeroVenta, numeroVentaAntes);
+
+  // Abono parcial (800 de 2000) -- Parte 7: NO debe bajar a PARCIAL
+  // porque la fecha de vencimiento ya pasó.
+  const abono1 = doPostRaw('credits.registerAbono', { cuentaCobrarId: creditId, monto: 800, metodoPago: 'EFECTIVO' }, adminToken);
+  assert(abono1.success === true, JSON.stringify(abono1));
+  assertEqual(abono1.saldoRestante, 1200);
+
+  credit = creditFromList_(creditId);
+  assertEqual(credit.saldoPendiente, 1200, 'el saldo debe reflejar el abono real');
+  assertEqual(credit.estado, 'VENCIDA', 'un abono parcial sobre una cuenta vencida debe conservar VENCIDA, nunca bajar a PARCIAL');
+  assertEqual(credit.abonos.length, 1);
+
+  // Abono final (1200 restantes) -- debe saldar la cuenta.
+  const abono2 = doPostRaw('credits.registerAbono', { cuentaCobrarId: creditId, monto: 1200, metodoPago: 'EFECTIVO' }, adminToken);
+  assert(abono2.success === true, JSON.stringify(abono2));
+  assertEqual(abono2.saldoRestante, 0);
+
+  credit = creditFromList_(creditId);
+  assertEqual(credit.saldoPendiente, 0);
+  assertEqual(credit.estado, 'PAGADA', 'saldo en 0 debe ser PAGADA, incluso viniendo de VENCIDA');
+  assertEqual(credit.abonos.length, 2, 'el historial de abonos debe conservar ambos recibos');
+  assertEqual(credit.montoOriginal, montoOriginalAntes, 'saldar la cuenta nunca debe alterar el monto original');
+});
+
+test('CXC_E2E_VENTA_ANULADA_NUNCA_APARECE_COMO_VENCIDA', () => {
+  const sale = createTestCreditSale_();
+  const creditId = sale.cuentaCobrarId;
+
+  const voidRes = doPostRaw('sales.void', { saleId: sale.saleId, motivo: 'Prueba de anulación para normalización CxC' }, adminToken);
+  assert(voidRes.success === true, JSON.stringify(voidRes));
+
+  let credit = creditFromList_(creditId);
+  assertEqual(credit.estado, 'ANULADA');
+
+  // Avanza la fecha de vencimiento al pasado -- una cuenta anulada NUNCA
+  // debe reinterpretarse como vencida, sin importar cuánto tiempo pase.
+  runInContext(`DbHelper.updateRowById('Creditos', '${creditId}', { fecha_vencimiento: ${JSON.stringify(daysAgoStr_(60))} })`);
+  credit = creditFromList_(creditId);
+  assertEqual(credit.estado, 'ANULADA', 'una cuenta anulada nunca debe pasar a VENCIDA, sin importar la fecha');
 });
 
 /* ------------------------------------------------------------

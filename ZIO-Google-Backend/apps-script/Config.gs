@@ -75,6 +75,22 @@ function getNowFormatted() {
 }
 
 /**
+ * FASE (normalización de estados de CxC / VENCIDA): fecha comercial
+ * (America/Santo_Domingo, mismo CONFIG.TIMEZONE que ya usa
+ * getNowFormatted()) en formato "YYYY-MM-DD" -- sin la hora, para poder
+ * comparar DÍAS comerciales completos sin que una diferencia de horas
+ * dentro del mismo día cuente como "ya vencido". Nunca usar
+ * `new Date().toISOString()` ni la zona horaria del servidor de Apps
+ * Script para esta comparación -- ver CreditsController.gs
+ * (normalizeReceivableStatus_), único lugar que la usa hoy.
+ * @param {Date} date
+ * @returns {string} ej. "2026-09-06"
+ */
+function toBusinessDateStr_(date) {
+  return Utilities.formatDate(date, CONFIG.TIMEZONE, 'yyyy-MM-dd');
+}
+
+/**
  * FASE 3.6 (corrección de bloqueante): regla financiera única de
  * redondeo monetario, reutilizada por cualquier controlador que calcule
  * dinero (SalesController, CreditsController, CashController, etc.) para
