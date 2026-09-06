@@ -21,6 +21,7 @@ import {
   UserRole,
   PermissionCode,
   PosWorkingState,
+  PosProductViewMode,
 } from '../types';
 // FASE 3.6B: solo INITIAL_SETTINGS sigue siendo un import real -- es
 // configuración de UI legítima, no un catálogo/directorio de negocio. El
@@ -84,6 +85,13 @@ const STORAGE_KEYS = {
   // ninguna verificación de permiso (App.tsx valida el permiso del usuario
   // real antes de restaurar la vista).
   CURRENT_VIEW: 'zio_current_view',
+  // FASE UX POS (autofocus + vista cuadrícula/lista): igual que
+  // CURRENT_VIEW, esto es solo una preferencia de UX de NAVEGACIÓN/
+  // VISUALIZACIÓN -- nunca stock, precio, carrito ni ninguna regla de
+  // negocio. Ambas vistas del POS leen exactamente el mismo catálogo y
+  // usan la misma función de agregar al carrito; esta clave solo decide
+  // cómo se dibuja esa lista.
+  POS_PRODUCT_VIEW: 'zio_pos_product_view',
 };
 
 class StorageService {
@@ -289,6 +297,19 @@ class StorageService {
   }
   public saveCurrentView(view: string): void {
     this.set(STORAGE_KEYS.CURRENT_VIEW, view);
+  }
+
+  // FASE UX POS (Requerimiento 4 -- persistencia de la preferencia de
+  // vista): mismo patrón que getCurrentView/saveCurrentView de arriba.
+  // Cualquier valor inesperado o ausente (primera visita, dato corrupto)
+  // cae de forma segura a 'grid' -- la apariencia actual del POS nunca
+  // cambia para un usuario que no ha elegido explícitamente 'list'.
+  public getPosProductView(): PosProductViewMode {
+    const stored = this.get<PosProductViewMode | null>(STORAGE_KEYS.POS_PRODUCT_VIEW, null);
+    return stored === 'grid' || stored === 'list' ? stored : 'grid';
+  }
+  public savePosProductView(mode: PosProductViewMode): void {
+    this.set(STORAGE_KEYS.POS_PRODUCT_VIEW, mode);
   }
 
   // Role Permissions

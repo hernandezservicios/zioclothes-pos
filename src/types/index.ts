@@ -687,6 +687,18 @@ export interface PosWorkingState {
   applyTax: boolean;
 }
 
+/**
+ * FASE UX POS (autofocus + vista cuadrícula/lista): preferencia
+ * puramente visual de cómo se muestra el catálogo de productos en el
+ * POS -- nunca decide stock, precio, variantes ni lógica de venta. Vive
+ * en su propia clave de localStorage (ver storageService), separada de
+ * `PosWorkingState` (eso es el carrito/cliente EN PROGRESO de una venta,
+ * con un ciclo de vida distinto: se limpia al completar/cancelar una
+ * venta, mientras que esta preferencia de vista persiste indefinidamente
+ * entre sesiones).
+ */
+export type PosProductViewMode = 'grid' | 'list';
+
 export interface ToastNotification {
   id: string;
   tipo: 'exito' | 'informacion' | 'advertencia' | 'error';

@@ -1,5 +1,5 @@
-import React, { useState, useMemo, useEffect } from 'react';
-import { Product, ProductVariant, Customer, SaleItem, Sale } from '../../types';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
+import { Product, ProductVariant, Customer, SaleItem, Sale, PosProductViewMode } from '../../types';
 import { storageService } from '../../services/storageService';
 import { customersApi } from '../../services/customersApi';
 import { useAuth } from '../../context/AuthContext';
@@ -26,6 +26,8 @@ import {
   AlertCircle,
   X,
   CreditCard,
+  LayoutGrid,
+  List,
 } from 'lucide-react';
 
 /**
@@ -81,6 +83,50 @@ export const POSView: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('TODOS');
 
+  // FASE UX POS (Requerimiento 1 -- autofocus del buscador): referencia
+  // controlada (useRef + focus()) al input de búsqueda, nunca el
+  // atributo `autoFocus` de React -- así el mismo `focusSearchInput()` se
+  // puede reutilizar también para devolver el foco al catálogo cuando
+  // corresponda (cerrar un modal), no solo al montar la pantalla.
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
+  const focusSearchInput = () => {
+    // requestAnimationFrame: espera a que el DOM del modal que se está
+    // cerrando termine de desmontarse antes de mover el foco, para no
+    // competir con el propio manejo de foco del navegador al remover un
+    // elemento enfocado (evita "robar" el foco a mitad de una transición).
+    requestAnimationFrame(() => {
+      searchInputRef.current?.focus({ preventScroll: true });
+    });
+  };
+
+  // Foco automático al montar la pantalla del POS -- cubre tanto la
+  // primera entrada como un F5 (recarga completa), ya que un F5 vuelve a
+  // montar POSView desde cero y este efecto corre una sola vez, después
+  // del primer render (deps []). Abrir/cerrar un modal NO desmonta
+  // POSView, así que este efecto nunca vuelve a dispararse por eso -- no
+  // compite por el foco con un modal legítimamente abierto (Requerimiento
+  // 1.8) y no genera loops de foco (Requerimiento 1.6).
+  useEffect(() => {
+    focusSearchInput();
+  }, []);
+
+  // FASE UX POS (Requerimiento 2/3/4 -- vista Cuadrícula/Lista): decide
+  // ÚNICAMENTE cómo se dibuja `filteredProducts` más abajo. Ambos modos
+  // leen el mismo arreglo y usan exactamente la misma función de agregar
+  // al carrito (handleAddToCart vía VariantSelectorModal) -- nunca una
+  // segunda fuente de datos, carrito o lógica de variantes. La
+  // preferencia se hidrata sincrónicamente desde storageService
+  // (arquitectura de preferencias de UI ya existente, ver
+  // getCurrentView/saveCurrentView) para que el primer render ya respete
+  // la última elección del usuario, sin parpadeo.
+  const [viewMode, setViewMode] = useState<PosProductViewMode>(() => storageService.getPosProductView());
+
+  const handleSetViewMode = (mode: PosProductViewMode) => {
+    setViewMode(mode);
+    storageService.savePosProductView(mode);
+  };
+
   // Cart State
   // PARTE 5 (Hydration-First / F5): se hidrata SINCRÓNICAMENTE desde
   // storageService en la inicialización del estado (no en un useEffect
@@ -120,6 +166,15 @@ export const POSView: React.FC = () => {
   const [completedSale, setCompletedSale] = useState<Sale | null>(null);
   const [newCustomerModalOpen, setNewCustomerModalOpen] = useState<boolean>(false);
   const [mobileCartOpen, setMobileCartOpen] = useState<boolean>(false);
+
+  // Requerimiento 1.9: cerrar este modal (cancelar o tras crear el
+  // cliente con éxito) regresa al catálogo POS -- el buscador recupera
+  // el foco. Un único helper para los tres puntos de cierre (botón X,
+  // botón Cancelar, y el cierre automático tras guardar con éxito).
+  const closeNewCustomerModal = () => {
+    setNewCustomerModalOpen(false);
+    focusSearchInput();
+  };
 
   // New Customer Form State
   const [newCustNombre, setNewCustNombre] = useState('');
@@ -485,7 +540,7 @@ export const POSView: React.FC = () => {
       setSelectedCustomer(created);
     }
 
-    setNewCustomerModalOpen(false);
+    closeNewCustomerModal();
     setNewCustNombre('');
     setNewCustApellido('');
     setNewCustDoc('');
@@ -507,6 +562,7 @@ export const POSView: React.FC = () => {
             </div>
 
             <input
+              ref={searchInputRef}
               type="text"
               placeholder="Buscar por nombre, color, SKU o escanear código de barras / Serial / IMEI (Enter para agregar)..."
               value={searchQuery}
@@ -538,105 +594,227 @@ export const POSView: React.FC = () => {
           </form>
         </div>
 
-        {/* Category Pills Bar */}
-        <div className="px-4 py-2.5 bg-[#FAF8F4] border-b border-[#E4DDD2] overflow-x-auto flex gap-2 no-scrollbar">
-          <button
-            type="button"
-            onClick={() => setSelectedCategory('TODOS')}
-            className={`px-3.5 py-1.5 rounded-xl text-xs font-bold whitespace-nowrap transition ${
-              selectedCategory === 'TODOS'
-                ? 'bg-[#2F2A25] text-[#FAF8F4] shadow-xs'
-                : 'bg-white text-[#2F2A25] border border-[#E4DDD2] hover:bg-[#F6F1E8]'
-            }`}
-          >
-            Todos los Productos
-          </button>
-          {categories.map((cat) => (
+        {/* Category Pills Bar + View Mode Toggle */}
+        <div className="px-4 py-2.5 bg-[#FAF8F4] border-b border-[#E4DDD2] flex items-center gap-2">
+          <div className="flex-1 min-w-0 overflow-x-auto flex gap-2 no-scrollbar">
             <button
-              key={cat.id}
               type="button"
-              onClick={() => setSelectedCategory(cat.id)}
-              className={`px-3.5 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition ${
-                selectedCategory === cat.id
+              onClick={() => setSelectedCategory('TODOS')}
+              className={`px-3.5 py-1.5 rounded-xl text-xs font-bold whitespace-nowrap transition ${
+                selectedCategory === 'TODOS'
                   ? 'bg-[#2F2A25] text-[#FAF8F4] shadow-xs'
                   : 'bg-white text-[#2F2A25] border border-[#E4DDD2] hover:bg-[#F6F1E8]'
               }`}
             >
-              {cat.nombre}
+              Todos los Productos
             </button>
-          ))}
+            {categories.map((cat) => (
+              <button
+                key={cat.id}
+                type="button"
+                onClick={() => setSelectedCategory(cat.id)}
+                className={`px-3.5 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition ${
+                  selectedCategory === cat.id
+                    ? 'bg-[#2F2A25] text-[#FAF8F4] shadow-xs'
+                    : 'bg-white text-[#2F2A25] border border-[#E4DDD2] hover:bg-[#F6F1E8]'
+                }`}
+              >
+                {cat.nombre}
+              </button>
+            ))}
+          </div>
+
+          {/* FASE UX POS (Requerimiento 2/3/7): selector Cuadrícula/Lista.
+              Solo cambia la presentación de `filteredProducts` más abajo --
+              mismos datos, mismo `handleAddToCart` en ambos modos. */}
+          <div className="shrink-0 flex bg-white border border-[#E4DDD2] p-1 rounded-xl">
+            <button
+              type="button"
+              onClick={() => handleSetViewMode('grid')}
+              aria-label="Ver catálogo en cuadrícula"
+              aria-pressed={viewMode === 'grid'}
+              title="Vista Cuadrícula"
+              className={`p-1.5 rounded-lg transition cursor-pointer ${
+                viewMode === 'grid' ? 'bg-[#2F2A25] text-[#FAF8F4]' : 'text-[#756E65] hover:text-[#2F2A25]'
+              }`}
+            >
+              <LayoutGrid className="w-3.5 h-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => handleSetViewMode('list')}
+              aria-label="Ver catálogo en lista"
+              aria-pressed={viewMode === 'list'}
+              title="Vista Lista"
+              className={`p-1.5 rounded-lg transition cursor-pointer ${
+                viewMode === 'list' ? 'bg-[#2F2A25] text-[#FAF8F4]' : 'text-[#756E65] hover:text-[#2F2A25]'
+              }`}
+            >
+              <List className="w-3.5 h-3.5" />
+            </button>
+          </div>
         </div>
 
-        {/* Product Cards Grid */}
+        {/* Product Cards Grid / List (Requerimiento 2: misma fuente de
+            datos `filteredProducts` y mismo `handleAddToCart` en ambos
+            modos, solo cambia la presentación) */}
         <div className="flex-1 overflow-y-auto p-4">
-          <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-3.5">
-            {(filteredProducts || []).map((prod) => {
-              const totalStock = (prod.variantes || []).reduce((sum, v) => sum + v.stock, 0);
-              const isAvailable = totalStock > 0;
-              const isLow = totalStock > 0 && totalStock <= (prod.stockMinimo || 6);
+          {viewMode === 'grid' ? (
+            <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-3.5">
+              {(filteredProducts || []).map((prod) => {
+                const totalStock = (prod.variantes || []).reduce((sum, v) => sum + v.stock, 0);
+                const isAvailable = totalStock > 0;
+                const isLow = totalStock > 0 && totalStock <= (prod.stockMinimo || 6);
 
-              return (
-                <div
-                  key={prod.id}
-                  onClick={() => setSelectedProductForVariant(prod)}
-                  className="group cursor-pointer bg-white border border-[#E4DDD2] hover:border-[#2F2A25] rounded-2xl overflow-hidden flex flex-col justify-between p-3 transition-all hover:shadow-md"
-                >
-                  <div className="space-y-2">
-                    {/* Image with status badge */}
-                    <div className="relative aspect-4/3 rounded-xl overflow-hidden bg-[#F6F1E8] border border-[#E4DDD2]/60">
+                return (
+                  <div
+                    key={prod.id}
+                    onClick={() => setSelectedProductForVariant(prod)}
+                    className="group cursor-pointer bg-white border border-[#E4DDD2] hover:border-[#2F2A25] rounded-2xl overflow-hidden flex flex-col justify-between p-3 transition-all hover:shadow-md"
+                  >
+                    <div className="space-y-2">
+                      {/* Image with status badge */}
+                      <div className="relative aspect-4/3 rounded-xl overflow-hidden bg-[#F6F1E8] border border-[#E4DDD2]/60">
+                        {prod.imagenUrl ? (
+                          <img
+                            src={toDisplayableImageUrl(prod.imagenUrl)}
+                            alt={prod.nombre}
+                            className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                          />
+                        ) : (
+                          <div className="w-full h-full flex items-center justify-center text-[#756E65]">
+                            <ShoppingBag className="w-8 h-8 opacity-40" />
+                          </div>
+                        )}
+
+                        {/* Stock Pill Badge */}
+                        <span
+                          className={`absolute top-2 right-2 text-[10px] font-bold px-2 py-0.5 rounded-full border shadow-xs ${
+                            !isAvailable
+                              ? 'bg-rose-100 text-rose-800 border-rose-200'
+                              : isLow
+                              ? 'bg-amber-100 text-amber-900 border-amber-200'
+                              : 'bg-emerald-100 text-emerald-900 border-emerald-200'
+                          }`}
+                        >
+                          {!isAvailable ? 'Agotado' : `${totalStock} en stock`}
+                        </span>
+                      </div>
+
+                      {/* Info */}
+                      <div>
+                        <span className="text-[10px] uppercase tracking-wider text-[#756E65] font-semibold">
+                          {prod.marca}
+                        </span>
+                        <h4 className="text-xs font-bold text-[#2F2A25] line-clamp-1 group-hover:text-[#C2410C] transition">
+                          {prod.nombre}
+                        </h4>
+                        <p className="text-[10px] text-[#756E65] font-mono">{prod.sku}</p>
+                      </div>
+                    </div>
+
+                    {/* Price & Action */}
+                    <div className="pt-2 mt-2 border-t border-[#E4DDD2]/60 flex items-center justify-between">
+                      <div>
+                        <span className="text-xs font-bold text-[#2F2A25]">
+                          {formatCurrency(prod.precio, settings.simboloMoneda)}
+                        </span>
+                      </div>
+                      <span className="text-[10px] font-bold text-[#756E65] group-hover:text-[#2F2A25] bg-[#F6F1E8] px-2 py-1 rounded-lg">
+                        {(prod.variantes || []).length} tallas/colores
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="flex flex-col gap-2">
+              {(filteredProducts || []).map((prod) => {
+                const totalStock = (prod.variantes || []).reduce((sum, v) => sum + v.stock, 0);
+                const isAvailable = totalStock > 0;
+                const isLow = totalStock > 0 && totalStock <= (prod.stockMinimo || 6);
+                const category = categories.find((c) => c.id === prod.categoriaId);
+
+                return (
+                  <div
+                    key={prod.id}
+                    onClick={() => setSelectedProductForVariant(prod)}
+                    className="group cursor-pointer bg-white border border-[#E4DDD2] hover:border-[#2F2A25] rounded-xl overflow-hidden flex items-center gap-3 p-2.5 transition-all hover:shadow-xs"
+                  >
+                    {/* Imagen pequeña */}
+                    <div className="relative w-12 h-12 shrink-0 rounded-lg overflow-hidden bg-[#F6F1E8] border border-[#E4DDD2]/60">
                       {prod.imagenUrl ? (
                         <img
                           src={toDisplayableImageUrl(prod.imagenUrl)}
                           alt={prod.nombre}
-                          className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                          className="w-full h-full object-cover"
                         />
                       ) : (
                         <div className="w-full h-full flex items-center justify-center text-[#756E65]">
-                          <ShoppingBag className="w-8 h-8 opacity-40" />
+                          <ShoppingBag className="w-4 h-4 opacity-40" />
                         </div>
                       )}
-
-                      {/* Stock Pill Badge */}
-                      <span
-                        className={`absolute top-2 right-2 text-[10px] font-bold px-2 py-0.5 rounded-full border shadow-xs ${
-                          !isAvailable
-                            ? 'bg-rose-100 text-rose-800 border-rose-200'
-                            : isLow
-                            ? 'bg-amber-100 text-amber-900 border-amber-200'
-                            : 'bg-emerald-100 text-emerald-900 border-emerald-200'
-                        }`}
-                      >
-                        {!isAvailable ? 'Agotado' : `${totalStock} en stock`}
-                      </span>
                     </div>
 
-                    {/* Info */}
-                    <div>
-                      <span className="text-[10px] uppercase tracking-wider text-[#756E65] font-semibold">
-                        {prod.marca}
-                      </span>
-                      <h4 className="text-xs font-bold text-[#2F2A25] line-clamp-1 group-hover:text-[#C2410C] transition">
+                    {/* Nombre + Código + Categoría (si existe) */}
+                    <div className="flex-1 min-w-0">
+                      <h4 className="text-xs font-bold text-[#2F2A25] truncate group-hover:text-[#C2410C] transition">
                         {prod.nombre}
                       </h4>
-                      <p className="text-[10px] text-[#756E65] font-mono">{prod.sku}</p>
+                      <div className="flex items-center gap-1.5 text-[10px] text-[#756E65]">
+                        <span className="font-mono truncate">{prod.sku}</span>
+                        {/* Categoría es lo primero que se oculta en pantallas
+                            angostas (Requerimiento 6: prioridad es imagen,
+                            nombre, precio, stock, acción). */}
+                        {category && (
+                          <span className="hidden sm:inline uppercase tracking-wider font-semibold truncate">
+                            • {category.nombre}
+                          </span>
+                        )}
+                      </div>
                     </div>
-                  </div>
 
-                  {/* Price & Action */}
-                  <div className="pt-2 mt-2 border-t border-[#E4DDD2]/60 flex items-center justify-between">
-                    <div>
-                      <span className="text-xs font-bold text-[#2F2A25]">
+                    {/* Precio */}
+                    <div className="text-right shrink-0">
+                      <span className="text-xs font-bold text-[#2F2A25] whitespace-nowrap">
                         {formatCurrency(prod.precio, settings.simboloMoneda)}
                       </span>
                     </div>
-                    <span className="text-[10px] font-bold text-[#756E65] group-hover:text-[#2F2A25] bg-[#F6F1E8] px-2 py-1 rounded-lg">
-                      {(prod.variantes || []).length} tallas/colores
+
+                    {/* Stock */}
+                    <span
+                      className={`shrink-0 text-[10px] font-bold px-2 py-0.5 rounded-full border shadow-2xs whitespace-nowrap ${
+                        !isAvailable
+                          ? 'bg-rose-100 text-rose-800 border-rose-200'
+                          : isLow
+                          ? 'bg-amber-100 text-amber-900 border-amber-200'
+                          : 'bg-emerald-100 text-emerald-900 border-emerald-200'
+                      }`}
+                    >
+                      {!isAvailable ? 'Agotado' : totalStock}
                     </span>
+
+                    {/* Acción: misma función que la vista Cuadrícula --
+                        abre el mismo VariantSelectorModal, que llama al
+                        mismo handleAddToCart. */}
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setSelectedProductForVariant(prod);
+                      }}
+                      aria-label={`Agregar ${prod.nombre} al carrito`}
+                      title="Agregar al carrito"
+                      className="shrink-0 p-1.5 rounded-lg bg-[#F6F1E8] text-[#2F2A25] group-hover:bg-[#2F2A25] group-hover:text-[#FAF8F4] transition cursor-pointer"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                    </button>
                   </div>
-                </div>
-              );
-            })}
-          </div>
+                );
+              })}
+            </div>
+          )}
 
           {/* FASE 3.6C: catálogo real vacío es un estado válido -- se
               distingue de "sin resultados para este filtro/búsqueda" para
@@ -1034,7 +1212,13 @@ export const POSView: React.FC = () => {
       {selectedProductForVariant && (
         <VariantSelectorModal
           product={selectedProductForVariant}
-          onClose={() => setSelectedProductForVariant(null)}
+          onClose={() => {
+            // Requerimiento 1.9: cerrar este modal (cancelar o tras
+            // agregar al carrito) regresa al catálogo POS -- el buscador
+            // recupera el foco.
+            setSelectedProductForVariant(null);
+            focusSearchInput();
+          }}
           onAddToCart={handleAddToCart}
         />
       )}
@@ -1048,7 +1232,10 @@ export const POSView: React.FC = () => {
           total={grandTotal}
           applyTax={applyTax}
           selectedCustomer={selectedCustomer}
-          onClose={() => setPaymentModalOpen(false)}
+          onClose={() => {
+            setPaymentModalOpen(false);
+            focusSearchInput();
+          }}
           onSuccess={(sale) => {
             setPaymentModalOpen(false);
             setCartItems([]);
@@ -1090,7 +1277,15 @@ export const POSView: React.FC = () => {
       )}
 
       {completedSale && (
-        <ReceiptModal sale={completedSale} onClose={() => setCompletedSale(null)} />
+        <ReceiptModal
+          sale={completedSale}
+          onClose={() => {
+            // Requerimiento 1.9: cierre del recibo -- último paso del
+            // flujo de venta antes de volver al catálogo POS.
+            setCompletedSale(null);
+            focusSearchInput();
+          }}
+        />
       )}
 
       {/* New Customer Modal */}
@@ -1101,7 +1296,7 @@ export const POSView: React.FC = () => {
               <h3 className="text-sm font-bold text-[#2F2A25]">Registrar Nuevo Cliente Rápido</h3>
               <button
                 type="button"
-                onClick={() => setNewCustomerModalOpen(false)}
+                onClick={closeNewCustomerModal}
                 className="text-[#756E65] p-1"
               >
                 <X className="w-5 h-5" />
@@ -1163,7 +1358,7 @@ export const POSView: React.FC = () => {
               <div className="flex gap-2 pt-2">
                 <button
                   type="button"
-                  onClick={() => setNewCustomerModalOpen(false)}
+                  onClick={closeNewCustomerModal}
                   disabled={creatingQuickCustomer}
                   className="flex-1 py-2 rounded-xl bg-white border border-[#E4DDD2] text-[#756E65] disabled:opacity-50"
                 >
