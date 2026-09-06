@@ -236,7 +236,12 @@ export const POSView: React.FC = () => {
 
     for (const prod of products || []) {
       if (prod.estado !== 'ACTIVO') continue;
-      const prodVariants = prod.variantes || [];
+      // FASE (corrección definitiva de variantes -- guardado individual,
+      // Parte 11): una variante eliminada se marca INACTIVO en el backend
+      // -- sin este filtro, escanear su código de barras/SKU antiguo la
+      // seguía agregando directo al carrito como si nunca se hubiera
+      // eliminado.
+      const prodVariants = (prod.variantes || []).filter((v) => v.estado === 'ACTIVO');
 
       // Check variant exact barcode or SKU first
       const vMatch = prodVariants.find(
@@ -297,7 +302,9 @@ export const POSView: React.FC = () => {
     // 2. If no exact barcode match, check if filtered search narrowed down to 1 single product
     if (filteredProducts.length === 1) {
       const singleProd = filteredProducts[0];
-      const prodVariants = singleProd.variantes || [];
+      // Parte 11: idem arriba -- nunca ofrecer para la venta una variante
+      // ya eliminada (INACTIVO) desde ProductFormModal.
+      const prodVariants = (singleProd.variantes || []).filter((v) => v.estado === 'ACTIVO');
       if (prodVariants.length === 1) {
         const v = prodVariants[0];
         if (v.stock <= 0) {
@@ -662,7 +669,12 @@ export const POSView: React.FC = () => {
           {viewMode === 'grid' ? (
             <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-3.5">
               {(filteredProducts || []).map((prod) => {
-                const totalStock = (prod.variantes || []).reduce((sum, v) => sum + v.stock, 0);
+                // Parte 11 (corrección definitiva de variantes): una
+                // variante eliminada (INACTIVO) ya no debe contarse como
+                // stock disponible ni como una combinación vendible en el
+                // catálogo del POS.
+                const activeVariants = (prod.variantes || []).filter((v) => v.estado === 'ACTIVO');
+                const totalStock = activeVariants.reduce((sum, v) => sum + v.stock, 0);
                 const isAvailable = totalStock > 0;
                 const isLow = totalStock > 0 && totalStock <= (prod.stockMinimo || 6);
 
@@ -721,7 +733,7 @@ export const POSView: React.FC = () => {
                         </span>
                       </div>
                       <span className="text-[10px] font-bold text-[#756E65] group-hover:text-[#2F2A25] bg-[#F6F1E8] px-2 py-1 rounded-lg">
-                        {(prod.variantes || []).length} tallas/colores
+                        {activeVariants.length} tallas/colores
                       </span>
                     </div>
                   </div>
@@ -731,7 +743,11 @@ export const POSView: React.FC = () => {
           ) : (
             <div className="flex flex-col gap-2">
               {(filteredProducts || []).map((prod) => {
-                const totalStock = (prod.variantes || []).reduce((sum, v) => sum + v.stock, 0);
+                // Parte 11: idem vista de cuadrícula -- excluye variantes
+                // eliminadas (INACTIVO) del stock mostrado.
+                const totalStock = (prod.variantes || [])
+                  .filter((v) => v.estado === 'ACTIVO')
+                  .reduce((sum, v) => sum + v.stock, 0);
                 const isAvailable = totalStock > 0;
                 const isLow = totalStock > 0 && totalStock <= (prod.stockMinimo || 6);
                 const category = categories.find((c) => c.id === prod.categoriaId);

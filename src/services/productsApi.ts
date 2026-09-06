@@ -173,6 +173,13 @@ class ProductsApi {
       stock?: number;
       estado?: string;
     }>;
+    // FASE (corrección definitiva de variantes -- guardado individual,
+    // Parte 6/11): ids reales (VAR-000123) de variantes eliminadas
+    // explícitamente por el usuario -- ProductsController.gs las marca
+    // INACTIVO (soft-delete). Se envía tal cual a products.save, el
+    // backend ya acepta cualquier clave nueva sin romper nada (mismo
+    // mecanismo genérico de siempre).
+    deletedVariantIds?: string[];
   }): Promise<ApiResponse<{ productId: string }>> {
     const token = this.token();
     if (!token) return { success: false, message: 'No hay sesión activa.', errorCode: 'AUTH_REQUIRED' };

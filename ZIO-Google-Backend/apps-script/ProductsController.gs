@@ -156,110 +156,260 @@ const ProductsController = {
   },
 
   /**
-   * Cuerpo transaccional original de handleSaveProduct (sin cambios de
-   * comportamiento respecto a antes de la FASE 2) -- extraído a un método
-   * aparte solo para poder envolver la llamada completa en el try/catch
-   * de arriba sin anidar aún más lógica dentro del propio candado.
+   * FASE (corrección definitiva de variantes -- guardado individual):
+   * clave normalizada y estable de una combinación talla/color, usada de
+   * forma consistente para detectar duplicados entre variantes existentes
+   * y entrantes ANTES de escribir nada. Espejo exacto, del lado del
+   * backend, de `getVariantKey` en ProductFormModal.tsx (mismo criterio:
+   * nunca confiar en el tipo declarado -- Sheets puede devolver una talla
+   * numérica como number real -- y nunca depender de mayúsculas/espacios
+   * para decidir si dos combinaciones son "la misma"). El backend NUNCA
+   * confía en que el frontend ya validó esto -- se re-calcula aquí desde
+   * cero con los valores crudos recibidos/almacenados.
+   */
+  getVariantKey_(talla, color) {
+    const clean = (val) => {
+      if (val === undefined || val === null) return '';
+      return String(val).trim().toUpperCase();
+    };
+    return `${clean(talla)}|${clean(color)}`;
+  },
+
+  /**
+   * Compara un `variantRecord` recién calculado contra la fila cruda que
+   * YA existe en la hoja `Variantes` para el mismo id. Si son iguales en
+   * todos los campos relevantes, el guardado NO debe escribir nada --
+   * ver la Parte 6/8 de esta fase: reenviar sin cambios una variante
+   * existente ya no debe costar una escritura real a Sheets (esa
+   * `updateRowById` redundante, multiplicada por cada variante sin
+   * cambios de un producto grande, es la causa raíz confirmada del
+   * timeout "El servidor tardó demasiado en responder").
+   */
+  variantRecordUnchanged_(fresh, storedRaw) {
+    if (!storedRaw) return false;
+    const numEq = (a, b) => {
+      const na = Number(a);
+      const nb = Number(b);
+      if (!isNaN(na) && !isNaN(nb)) return na === nb;
+      return String(a) === String(b);
+    };
+    return (
+      String(fresh.sku) === String(storedRaw.sku || '') &&
+      String(fresh.codigo_barras) === String(storedRaw.codigo_barras || '') &&
+      String(fresh.color) === String(storedRaw.color || '') &&
+      String(fresh.talla) === String(storedRaw.talla || '') &&
+      numEq(fresh.costo, storedRaw.costo) &&
+      numEq(fresh.precio, storedRaw.precio) &&
+      numEq(fresh.stock, storedRaw.stock) &&
+      String(fresh.estado) === String(storedRaw.estado || 'ACTIVO')
+    );
+  },
+
+  /**
+   * Cuerpo transaccional de handleSaveProduct.
+   *
+   * FASE (corrección definitiva de variantes -- guardado individual):
+   * reescrito para que el guardado sea INCREMENTAL y ATÓMICO de verdad --
+   * antes de esta fase, esta función (a) volvía a escribir con
+   * `updateRowById` cada variante existente en CADA guardado, aunque el
+   * usuario solo hubiera agregado una nueva (causa raíz del timeout: cada
+   * `updateRowById` relee la hoja `Variantes` completa desde cero); (b)
+   * insertaba las variantes nuevas una por una con `insertRow` (2
+   * llamadas reales a Sheets por variante nueva); (c) nunca detectaba
+   * combinaciones talla/color duplicadas -- dos variantes con ids
+   * distintos y la misma combinación se guardaban ambas sin aviso; (d) no
+   * usaba el motor de transacciones (`DbHelper.beginTx/rollback`) -- si
+   * la variante 15 de 30 lanzaba un error, las primeras 14 ya quedaban
+   * escritas permanentemente en Sheets, sin ninguna compensación.
+   *
+   * Ahora: se valida TODO (incluida la duplicación de combinaciones)
+   * antes de generar ningún ID nuevo o escribir ninguna fila; los
+   * inserts de variantes nuevas se agrupan en una sola llamada
+   * `DbHelper.insertRows` (antes N llamadas `insertRow`); las variantes
+   * existentes sin cambios reales se omiten por completo (0 escrituras);
+   * y toda la operación (fila de Productos + altas/bajas/cambios de
+   * Variantes) queda registrada en una transacción de compensación real
+   * -- si cualquier paso falla, `DbHelper.rollback` deshace exactamente
+   * lo que ya se había escrito en esta misma llamada, nunca deja el
+   * producto a medio guardar.
    */
   saveProductTransaction_(data, user, oldImagenUrl) {
     return LockServiceHelper.runWithLock(CONFIG.LOCK_TIMEOUT_MS, () => {
       const isUpdate = !!data.id;
-      let productId = data.id;
+      const productId = data.id;
 
-      // Find category name
-      const categories = DbHelper.getAllRows('Categorias');
-      const cat = categories.find(c => c.id === data.categoriaId);
-      const catName = cat ? cat.nombre : 'General';
+      // ---- Carga de variantes existentes + normalización del payload ----
+      // Se hace ANTES de generar ningún Sequences.getNext (Parte 14: nunca
+      // confiar solo en la validación del frontend, y nunca gastar un
+      // número de secuencia real en una operación que va a ser rechazada).
+      const existingVariants = isUpdate
+        ? DbHelper.findRows('Variantes', v => String(v.producto_id).trim() === String(productId).trim())
+        : [];
+      const existingVariantsById = {};
+      existingVariants.forEach(ev => { existingVariantsById[String(ev.id)] = ev; });
 
-      if (!isUpdate) {
-        productId = Sequences.getNext('PRD');
+      const deletedVariantIds = Array.isArray(data.deletedVariantIds)
+        ? Array.from(new Set(data.deletedVariantIds.map(id => String(id).trim()).filter(Boolean)))
+        : [];
+
+      const rawIncoming = Array.isArray(data.variantes) ? data.variantes : [];
+      // Parte 11 (defensivo): si el mismo id llega simultáneamente en
+      // `variantes` (para actualizar) y en `deletedVariantIds` (para
+      // eliminar), la eliminación explícita del usuario tiene prioridad --
+      // se descarta de la lista de "a procesar como alta/cambio".
+      const incomingVariants = rawIncoming.filter(v => !v.id || deletedVariantIds.indexOf(String(v.id)) === -1);
+
+      // ---- Parte 5/14: detección de duplicados talla/color ANTES de escribir ----
+      const keyOwners = {}; // key normalizada -> [ids o '(nueva)'] que la reclaman
+      const seenIncomingIds = {};
+      incomingVariants.forEach(v => {
+        const key = this.getVariantKey_(v.talla, v.color);
+        if (v.id) seenIncomingIds[String(v.id)] = true;
+        (keyOwners[key] || (keyOwners[key] = [])).push(v.id ? String(v.id) : '(nueva)');
+      });
+      existingVariants.forEach(ev => {
+        const evId = String(ev.id);
+        if (deletedVariantIds.indexOf(evId) !== -1) return; // se está eliminando en esta misma llamada, no cuenta
+        // Parte 11: una variante YA eliminada (INACTIVO) en un guardado
+        // ANTERIOR tampoco debe seguir "ocupando" su combinación para
+        // siempre -- de lo contrario sería imposible volver a dar de alta
+        // S/Negro después de haberla eliminado una vez, contradiciendo el
+        // propósito mismo del soft-delete.
+        if (String(ev.estado || 'ACTIVO') === 'INACTIVO') return;
+        if (seenIncomingIds[evId]) return; // ya representada arriba por la entrada entrante
+        const key = this.getVariantKey_(ev.talla, ev.color);
+        (keyOwners[key] || (keyOwners[key] = [])).push(evId);
+      });
+      const duplicateKey = Object.keys(keyOwners).find(k => keyOwners[k].length > 1);
+      if (duplicateKey) {
+        const parts = duplicateKey.split('|');
+        throw new Error(`VARIANTE_DUPLICADA: No se puede guardar: ya existe la variante ${parts[0] || 'U'} / ${parts[1] || 'Único'}.`);
       }
 
-      // Generate base SKU if not provided
-      let baseSku = data.sku;
-      if (!baseSku) {
-        const cleanName = data.nombre.replace(/[^a-zA-Z0-9]/g, '').substring(0, 3).toUpperCase() || 'PRE';
-        baseSku = `ZIO-${cleanName}-${Math.floor(100 + Math.random() * 900)}`;
-      }
+      // ---- A partir de aquí la operación es válida: recién ahora se
+      // generan IDs reales y se escribe ----
+      const tx = DbHelper.beginTx();
+      try {
+        let finalProductId = productId;
+        let previousProductRow = null;
 
-      const productRecord = {
-        id: productId,
-        sku: baseSku,
-        codigo_barras: data.codigoBarras || '',
-        nombre: data.nombre.trim(),
-        descripcion: (data.descripcion || '').trim(),
-        categoria_id: data.categoriaId,
-        categoria_nombre: catName,
-        marca: data.marca || 'ZIO CLOTHES',
-        proveedor_id: data.proveedorId || '',
-        costo: Number(data.costo) || 0,
-        precio: Number(data.precio) || 0,
-        precio_especial: data.precioEspecial ? Number(data.precioEspecial) : '',
-        impuesto: data.impuesto !== undefined ? Number(data.impuesto) : CONFIG.DEFAULT_TAX_RATE,
-        descuento_maximo: data.descuentoMaximo ? Number(data.descuentoMaximo) : 0,
-        stock_minimo: data.stockMinimo !== undefined ? Number(data.stockMinimo) : 5,
-        estado: data.estado || 'ACTIVO',
-        imagen_url: data.imagenUrl || '',
-        // FASE (normalización comercial -- variantes opcionales): se
-        // guarda tal cual lo que decidió el usuario en el formulario. Si
-        // no se envía (compatibilidad con integraciones antiguas), se deja
-        // como cadena vacía en vez de asumir TRUE/FALSE -- mismo criterio
-        // de "no inventar un valor" que ya se aplica a imagen_url/etc.
-        tiene_variantes: data.tieneVariantes === true ? 'TRUE' : (data.tieneVariantes === false ? 'FALSE' : ''),
-        creado_en: data.creadoEn || getNowFormatted()
-      };
+        // Find category name
+        const categories = DbHelper.getAllRows('Categorias');
+        const cat = categories.find(c => c.id === data.categoriaId);
+        const catName = cat ? cat.nombre : 'General';
 
-      if (isUpdate) {
-        DbHelper.updateRowById('Productos', productId, productRecord);
-      } else {
-        DbHelper.insertRow('Productos', productRecord);
-      }
+        if (isUpdate) {
+          previousProductRow = DbHelper.findById('Productos', finalProductId);
+        } else {
+          finalProductId = Sequences.getNext('PRD');
+        }
 
-      // Process variants
-      const incomingVariants = Array.isArray(data.variantes) ? data.variantes : [];
-      const existingVariants = DbHelper.findRows('Variantes', v => v.producto_id === productId);
+        // Generate base SKU if not provided
+        let baseSku = data.sku;
+        if (!baseSku) {
+          const cleanName = data.nombre.replace(/[^a-zA-Z0-9]/g, '').substring(0, 3).toUpperCase() || 'PRE';
+          baseSku = `ZIO-${cleanName}-${Math.floor(100 + Math.random() * 900)}`;
+        }
 
-      for (let i = 0; i < incomingVariants.length; i++) {
-        const v = incomingVariants[i];
-        const variantId = v.id || Sequences.getNext('VAR');
-        const varSku = v.sku || `${baseSku}-${(v.color || 'COL').substring(0, 3).toUpperCase()}-${v.talla || 'U'}`;
-        const barcode = v.codigoBarras || `74600${Math.floor(1000000 + Math.random() * 9000000)}`;
-
-        const variantRecord = {
-          id: variantId,
-          producto_id: productId,
-          sku: varSku,
-          codigo_barras: barcode,
-          color: v.color || 'Único',
-          talla: v.talla || 'U',
-          costo: v.costo !== undefined ? Number(v.costo) : productRecord.costo,
-          precio: v.precio !== undefined ? Number(v.precio) : productRecord.precio,
-          stock: v.stock !== undefined ? Number(v.stock) : 0,
-          estado: v.estado || 'ACTIVO'
+        const productRecord = {
+          id: finalProductId,
+          sku: baseSku,
+          codigo_barras: data.codigoBarras || '',
+          nombre: data.nombre.trim(),
+          descripcion: (data.descripcion || '').trim(),
+          categoria_id: data.categoriaId,
+          categoria_nombre: catName,
+          marca: data.marca || 'ZIO CLOTHES',
+          proveedor_id: data.proveedorId || '',
+          costo: Number(data.costo) || 0,
+          precio: Number(data.precio) || 0,
+          precio_especial: data.precioEspecial ? Number(data.precioEspecial) : '',
+          impuesto: data.impuesto !== undefined ? Number(data.impuesto) : CONFIG.DEFAULT_TAX_RATE,
+          descuento_maximo: data.descuentoMaximo ? Number(data.descuentoMaximo) : 0,
+          stock_minimo: data.stockMinimo !== undefined ? Number(data.stockMinimo) : 5,
+          estado: data.estado || 'ACTIVO',
+          imagen_url: data.imagenUrl || '',
+          tiene_variantes: data.tieneVariantes === true ? 'TRUE' : (data.tieneVariantes === false ? 'FALSE' : ''),
+          creado_en: data.creadoEn || getNowFormatted()
         };
 
-        const existingVar = existingVariants.find(ev => ev.id === variantId);
-        if (existingVar) {
-          DbHelper.updateRowById('Variantes', variantId, variantRecord);
+        if (isUpdate) {
+          DbHelper.recordUpdate(tx, 'Productos', finalProductId, previousProductRow);
+          DbHelper.updateRowById('Productos', finalProductId, productRecord);
         } else {
-          DbHelper.insertRow('Variantes', variantRecord);
+          DbHelper.insertRow('Productos', productRecord);
+          DbHelper.recordInsert(tx, 'Productos', finalProductId);
         }
+
+        // ---- Parte 11: eliminación (soft-delete, mismo mecanismo que ya
+        // usa handleDeleteProduct -- nunca borrado físico, preserva
+        // Kardex/Ventas/Devoluciones que referencian variante_id) ----
+        deletedVariantIds.forEach(delId => {
+          const stored = existingVariantsById[delId];
+          if (!stored || String(stored.estado || 'ACTIVO') === 'INACTIVO') return; // ya inactiva o no existe: nada que hacer
+          DbHelper.recordUpdate(tx, 'Variantes', delId, stored);
+          DbHelper.updateRowById('Variantes', delId, { estado: 'INACTIVO' });
+        });
+
+        // ---- Altas (nuevas) en un solo batch + cambios reales en existentes ----
+        const toInsert = [];
+        incomingVariants.forEach(v => {
+          const existingVar = v.id ? existingVariantsById[String(v.id)] : null;
+          const variantId = existingVar ? existingVar.id : Sequences.getNext('VAR');
+          const varSku = v.sku || `${baseSku}-${(v.color || 'COL').substring(0, 3).toUpperCase()}-${v.talla || 'U'}`;
+          const barcode = v.codigoBarras || `74600${Math.floor(1000000 + Math.random() * 9000000)}`;
+
+          const variantRecord = {
+            id: variantId,
+            producto_id: finalProductId,
+            sku: varSku,
+            codigo_barras: barcode,
+            color: v.color || 'Único',
+            talla: v.talla || 'U',
+            costo: v.costo !== undefined ? Number(v.costo) : productRecord.costo,
+            precio: v.precio !== undefined ? Number(v.precio) : productRecord.precio,
+            stock: v.stock !== undefined ? Number(v.stock) : 0,
+            estado: v.estado || 'ACTIVO'
+          };
+
+          if (existingVar) {
+            // Parte 6/8: si nada cambió realmente, no se escribe -- se
+            // evita la relectura completa de la hoja que hace
+            // updateRowById en cada llamada.
+            if (this.variantRecordUnchanged_(variantRecord, existingVar)) return;
+            DbHelper.recordUpdate(tx, 'Variantes', variantId, existingVar);
+            DbHelper.updateRowById('Variantes', variantId, variantRecord);
+          } else {
+            toInsert.push(variantRecord);
+          }
+        });
+
+        if (toInsert.length > 0) {
+          // Parte 7: una sola llamada por lote en vez de N `insertRow`
+          // independientes -- DbHelper.insertRows ya existe (FASE B) y
+          // hace un único setValues() para todas las filas.
+          DbHelper.insertRows('Variantes', toInsert);
+          toInsert.forEach(rec => DbHelper.recordInsert(tx, 'Variantes', rec.id));
+        }
+
+        AuditController.log(
+          user,
+          isUpdate ? 'PRODUCT_UPDATED' : 'PRODUCT_CREATED',
+          'PRODUCTOS',
+          'Product',
+          finalProductId,
+          `${isUpdate ? 'Actualización' : 'Creación'} de prenda: ${productRecord.nombre} (${finalProductId})`
+        );
+
+        return {
+          success: true,
+          message: `Prenda ${isUpdate ? 'actualizada' : 'creada'} exitosamente.`,
+          productId: finalProductId
+        };
+      } catch (err) {
+        DbHelper.rollback(tx, err);
+        throw err;
       }
-
-      AuditController.log(
-        user,
-        isUpdate ? 'PRODUCT_UPDATED' : 'PRODUCT_CREATED',
-        'PRODUCTOS',
-        'Product',
-        productId,
-        `${isUpdate ? 'Actualización' : 'Creación'} de prenda: ${productRecord.nombre} (${productId})`
-      );
-
-      return {
-        success: true,
-        message: `Prenda ${isUpdate ? 'actualizada' : 'creada'} exitosamente.`,
-        productId: productId
-      };
     });
   },
 

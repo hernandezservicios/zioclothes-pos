@@ -31,6 +31,24 @@ const APPS_SCRIPT_DIR = path.join(__dirname, '..', 'apps-script');
    harness del backend legado -- MockSheet/MockRange/MockSpreadsheet)
    ------------------------------------------------------------ */
 
+/* FASE (corrección definitiva de variantes -- guardado individual, Parte
+ * 16/17): contador de escrituras reales a Sheets, expuesto solo a este
+ * arnés de pruebas (nunca a los .gs, que no lo referencian). Permite
+ * verificar EMPÍRICAMENTE -- no por inferencia -- que guardar 30
+ * variantes nuevas ya no dispara 30 `appendRow`/`setValues`
+ * independientes (la causa raíz confirmada del timeout), sino un único
+ * `setValues` por lote vía DbHelper.insertRows.
+ */
+// Contadores por hoja -- necesario porque una sola llamada a
+// products.save también escribe, de forma legítima y sin relación con
+// esta fase, en 'Auditoria' (AuditController.log) y a veces en
+// 'Sequences' (Sequences.getNext, solo la primera vez que se usa un
+// prefijo en toda la corrida) -- un contador global mezclaría esas
+// escrituras con las de 'Variantes'/'Productos', que son las únicas que
+// esta fase promete optimizar.
+const sheetCallStats = { setValuesCallsBySheet: {}, appendRowCallsBySheet: {} };
+function resetSheetCallStats() { sheetCallStats.setValuesCallsBySheet = {}; sheetCallStats.appendRowCallsBySheet = {}; }
+
 class MockRange {
   constructor(sheet, row, col, numRows, numCols) {
     this.sheet = sheet;
@@ -58,6 +76,8 @@ class MockRange {
     return this.getValues()[0][0];
   }
   setValues(values) {
+    const name = this.sheet.name;
+    sheetCallStats.setValuesCallsBySheet[name] = (sheetCallStats.setValuesCallsBySheet[name] || 0) + 1;
     for (let r = 0; r < values.length; r++) {
       const actualRow = this.row + r - 1;
       if (!this.sheet.data[actualRow]) this.sheet.data[actualRow] = [];
@@ -95,7 +115,10 @@ class MockSheet {
   getDataRange() {
     return new MockRange(this, 1, 1, this.data.length, this.getLastColumn());
   }
-  appendRow(rowArr) { this.data.push(rowArr.slice()); }
+  appendRow(rowArr) {
+    sheetCallStats.appendRowCallsBySheet[this.name] = (sheetCallStats.appendRowCallsBySheet[this.name] || 0) + 1;
+    this.data.push(rowArr.slice());
+  }
   deleteRow(rowIndex) { this.data.splice(rowIndex - 1, 1); }
   setFrozenRows() { return this; }
   autoResizeColumns() { return this; }
@@ -2339,11 +2362,16 @@ test('PRODUCT_SAVE_REPLACING_MANAGED_IMAGE_TRASHES_OLD_ONE_AFTER_SUCCESSFUL_SAVE
   }, adminToken);
   assert(createRes.success === true, JSON.stringify(createRes));
   const productId = createRes.productId;
+  // FASE (corrección definitiva de variantes): products.save ahora
+  // identifica variantes existentes por id -- una actualización debe
+  // reenviar el id real ya asignado, igual que hace el frontend real,
+  // para no chocar con la nueva validación de duplicados por talla/color.
+  const existingVarId = runInContext(`DbHelper.findRows('Variantes', v => v.producto_id === '${productId}')[0].id`);
 
   const updateRes = doPostRaw('products.save', {
     id: productId, nombre: 'Producto Reemplazo De Imagen', categoriaId: 'CAT-T01',
     imagenUrl: driveUrlThumb(newFileId), // formato de visualización (thumbnail) -- también debe reconocerse
-    variantes: [{ color: 'Negro', talla: 'M', stock: 3, precio: 500, costo: 250 }],
+    variantes: [{ id: existingVarId, color: 'Negro', talla: 'M', stock: 3, precio: 500, costo: 250 }],
   }, adminToken);
   assert(updateRes.success === true, JSON.stringify(updateRes));
 
@@ -2364,11 +2392,12 @@ test('PRODUCT_SAVE_WITHOUT_CHANGING_IMAGE_DOES_NOT_TRIGGER_CLEANUP', () => {
     variantes: [{ color: 'Azul', talla: 'S', stock: 2, precio: 400, costo: 200 }],
   }, adminToken);
   assert(createRes.success === true, JSON.stringify(createRes));
+  const existingVarId = runInContext(`DbHelper.findRows('Variantes', v => v.producto_id === '${createRes.productId}')[0].id`);
 
   const updateRes = doPostRaw('products.save', {
     id: createRes.productId, nombre: 'Producto Sin Cambiar Foto (editado)', categoriaId: 'CAT-T01',
     imagenUrl: driveUrlUc(fileId), // misma URL -- el usuario no tocó la foto, solo editó el nombre
-    variantes: [{ color: 'Azul', talla: 'S', stock: 2, precio: 450, costo: 200 }],
+    variantes: [{ id: existingVarId, color: 'Azul', talla: 'S', stock: 2, precio: 450, costo: 200 }],
   }, adminToken);
   assert(updateRes.success === true, JSON.stringify(updateRes));
 
@@ -2385,11 +2414,12 @@ test('PRODUCT_SAVE_REMOVING_IMAGE_TRASHES_OLD_MANAGED_FILE', () => {
     variantes: [{ color: 'Verde', talla: 'L', stock: 1, precio: 300, costo: 150 }],
   }, adminToken);
   assert(createRes.success === true, JSON.stringify(createRes));
+  const existingVarId = runInContext(`DbHelper.findRows('Variantes', v => v.producto_id === '${createRes.productId}')[0].id`);
 
   const updateRes = doPostRaw('products.save', {
     id: createRes.productId, nombre: 'Producto Con Foto Eliminada Despues', categoriaId: 'CAT-T01',
     imagenUrl: '', // el usuario eliminó explícitamente la foto
-    variantes: [{ color: 'Verde', talla: 'L', stock: 1, precio: 300, costo: 150 }],
+    variantes: [{ id: existingVarId, color: 'Verde', talla: 'L', stock: 1, precio: 300, costo: 150 }],
   }, adminToken);
   assert(updateRes.success === true, JSON.stringify(updateRes));
 
@@ -2403,13 +2433,14 @@ test('PRODUCT_SAVE_REPLACING_EXTERNAL_URL_NEVER_THROWS_OR_TOUCHES_DRIVE', () => 
     variantes: [{ color: 'Blanco', talla: 'M', stock: 1, precio: 300, costo: 150 }],
   }, adminToken);
   assert(createRes.success === true, JSON.stringify(createRes));
+  const existingVarId1 = runInContext(`DbHelper.findRows('Variantes', v => v.producto_id === '${createRes.productId}')[0].id`);
 
   const newFileId = 'FILE-REPLACING-EXTERNAL-01';
   runInContext(`__mockDrive.createFile('${newFileId}', ${JSON.stringify(managedFolderId)})`);
   const updateRes = doPostRaw('products.save', {
     id: createRes.productId, nombre: 'Producto Con URL Externa', categoriaId: 'CAT-T01',
     imagenUrl: driveUrlUc(newFileId),
-    variantes: [{ color: 'Blanco', talla: 'M', stock: 1, precio: 300, costo: 150 }],
+    variantes: [{ id: existingVarId1, color: 'Blanco', talla: 'M', stock: 1, precio: 300, costo: 150 }],
   }, adminToken);
   // El objetivo principal de este test: reemplazar una URL externa nunca
   // debe hacer explotar products.save intentando un DriveApp.getFileById
@@ -2425,13 +2456,14 @@ test('PRODUCT_SAVE_REPLACING_HISTORIC_BASE64_NEVER_THROWS_OR_TOUCHES_DRIVE', () 
     variantes: [{ color: 'Gris', talla: 'S', stock: 1, precio: 300, costo: 150 }],
   }, adminToken);
   assert(createRes.success === true, JSON.stringify(createRes));
+  const existingVarId2 = runInContext(`DbHelper.findRows('Variantes', v => v.producto_id === '${createRes.productId}')[0].id`);
 
   const newFileId = 'FILE-REPLACING-BASE64-01';
   runInContext(`__mockDrive.createFile('${newFileId}', ${JSON.stringify(managedFolderId)})`);
   const updateRes = doPostRaw('products.save', {
     id: createRes.productId, nombre: 'Producto Con Base64 Historico', categoriaId: 'CAT-T01',
     imagenUrl: driveUrlThumb(newFileId),
-    variantes: [{ color: 'Gris', talla: 'S', stock: 1, precio: 300, costo: 150 }],
+    variantes: [{ id: existingVarId2, color: 'Gris', talla: 'S', stock: 1, precio: 300, costo: 150 }],
   }, adminToken);
   assert(updateRes.success === true, JSON.stringify(updateRes));
   assert(runInContext(`__mockDrive.isTrashed('${newFileId}')`) === false, 'la imagen nueva activa nunca debe tocarse');
@@ -2671,13 +2703,14 @@ test('PRODUCT_SAVE_REPLACING_IMAGE_NEVER_TRASHES_FILE_CURRENTLY_USED_AS_COMPANY_
     variantes: [{ color: 'Negro', talla: 'M', stock: 1, precio: 300, costo: 150 }],
   }, adminToken);
   assert(createRes.success === true, JSON.stringify(createRes));
+  const existingVarId3 = runInContext(`DbHelper.findRows('Variantes', v => v.producto_id === '${createRes.productId}')[0].id`);
 
   const newFileId = 'FILE-PRODUCT-REPLACING-SHARED-01';
   runInContext(`__mockDrive.createFile('${newFileId}', ${JSON.stringify(managedFolderId)})`);
   const updateRes = doPostRaw('products.save', {
     id: createRes.productId, nombre: 'Producto Que Comparte Archivo Con El Logo', categoriaId: 'CAT-T01',
     imagenUrl: driveUrlThumb(newFileId),
-    variantes: [{ color: 'Negro', talla: 'M', stock: 1, precio: 300, costo: 150 }],
+    variantes: [{ id: existingVarId3, color: 'Negro', talla: 'M', stock: 1, precio: 300, costo: 150 }],
   }, adminToken);
   assert(updateRes.success === true, JSON.stringify(updateRes));
 
@@ -5268,6 +5301,800 @@ test('RESTORE_NEVER_INCLUDES_USERS_PASSWORDS_OR_SECRETS_IN_WRITTEN_SHEETS', () =
 
   const injected = runInContext(`DbHelper.findById('Usuarios', 'USR-INYECTADO')`);
   assert(!injected, 'un usuario inyectado en el backup jamás debe terminar escrito en la hoja Usuarios real');
+});
+
+/* ================================================================
+   FASE (CORRECCIÓN DEFINITIVA DE VARIANTES -- GUARDADO INDIVIDUAL)
+
+   Suite de regresión para el rediseño de ProductsController.gs
+   (saveProductTransaction_): guardado incremental (existentes/nuevas/
+   eliminadas), detección de duplicados talla/color con clave
+   normalizada, inserción por lote de variantes nuevas, omisión de
+   escrituras redundantes sobre variantes sin cambios reales, atomicidad
+   real vía DbHelper.beginTx/rollback, y soft-delete de variantes
+   individuales. Todas las llamadas usan doPostRaw('products.save', ...)
+   -- el mismo contrato HTTP real que usa el frontend -- nunca se invoca
+   ProductsController directamente salvo para leer helpers puros
+   (getVariantKey_) sin efectos secundarios.
+   ================================================================ */
+
+function getProductFull_(productId) {
+  const list = doPostRaw('products.list', {}, adminToken);
+  return list.products.find(p => p.id === productId);
+}
+
+test('VARIANT_GETVARIANTKEY_NORMALIZES_CASE_WHITESPACE_AND_NUMBERS', () => {
+  const k1 = runInContext(`ProductsController.getVariantKey_('S', 'Negro')`);
+  const k2 = runInContext(`ProductsController.getVariantKey_(' s ', ' negro ')`);
+  assertEqual(k1, k2, 'la clave debe ser insensible a mayúsculas/espacios');
+
+  const k3 = runInContext(`ProductsController.getVariantKey_(32, 'Negro')`);
+  const k4 = runInContext(`ProductsController.getVariantKey_('32', 'Negro')`);
+  assertEqual(k3, k4, 'una talla numérica y su equivalente string deben producir la misma clave');
+});
+
+test('VARIANT_INCREMENTAL_ADD_S_NEGRO_THEN_M_NEGRO_THEN_L_BLANCO_ACROSS_3_SAVES', () => {
+  // Escenario textual exacto de la fase: "Camiseta Test" -- se crea con
+  // S+Negro, se reabre y se agrega SOLO M+Negro, se reabre y se agrega
+  // SOLO L+Blanco. En ningún momento debe forzarse la matriz completa
+  // (S+Negro/S+Blanco/M+Negro/M+Blanco/L+Negro/L+Blanco).
+  const create = doPostRaw('products.save', {
+    nombre: 'Camiseta Test Incremental', categoriaId: 'CAT-T01', tieneVariantes: true,
+    variantes: [{ talla: 'S', color: 'Negro', stock: 11, costo: 300, precio: 700, estado: 'ACTIVO' }],
+  }, adminToken);
+  assert(create.success === true, JSON.stringify(create));
+  const productId = create.productId;
+
+  let prod = getProductFull_(productId);
+  assertEqual(prod.variantes.length, 1, 'tras el primer guardado solo debe existir S/Negro');
+  const sNegroId = prod.variantes[0].id;
+  assertEqual(prod.variantes[0].stock, 11);
+
+  // Reabrir (simulado: se reenvía la variante existente TAL CUAL, como
+  // hace ProductFormModal al cargar editingProduct.variantes) + 1 nueva.
+  const save2 = doPostRaw('products.save', {
+    id: productId, nombre: 'Camiseta Test Incremental', categoriaId: 'CAT-T01', tieneVariantes: true,
+    variantes: [
+      { id: sNegroId, talla: 'S', color: 'Negro', stock: 11, costo: 300, precio: 700, estado: 'ACTIVO' },
+      { talla: 'M', color: 'Negro', stock: 7, costo: 300, precio: 700, estado: 'ACTIVO' },
+    ],
+  }, adminToken);
+  assert(save2.success === true, JSON.stringify(save2));
+
+  prod = getProductFull_(productId);
+  assertEqual(prod.variantes.length, 2, 'tras el segundo guardado deben existir exactamente S/Negro y M/Negro -- nunca la matriz completa');
+  const byKey2 = {};
+  prod.variantes.forEach(v => { byKey2[`${v.talla}|${v.color}`] = v; });
+  assert(!!byKey2['S|Negro'] && !!byKey2['M|Negro'], 'deben existir S/Negro y M/Negro: ' + JSON.stringify(prod.variantes));
+  assertEqual(byKey2['S|Negro'].stock, 11, 'el stock de S/Negro no debe alterarse al agregar M/Negro');
+  assertEqual(byKey2['S|Negro'].id, sNegroId, 'S/Negro debe conservar su mismo id real');
+  const mNegroId = byKey2['M|Negro'].id;
+
+  // Tercer guardado: se reenvían las 2 existentes tal cual + 1 nueva (L/Blanco).
+  const save3 = doPostRaw('products.save', {
+    id: productId, nombre: 'Camiseta Test Incremental', categoriaId: 'CAT-T01', tieneVariantes: true,
+    variantes: [
+      { id: sNegroId, talla: 'S', color: 'Negro', stock: 11, costo: 300, precio: 700, estado: 'ACTIVO' },
+      { id: mNegroId, talla: 'M', color: 'Negro', stock: 7, costo: 300, precio: 700, estado: 'ACTIVO' },
+      { talla: 'L', color: 'Blanco', stock: 3, costo: 300, precio: 700, estado: 'ACTIVO' },
+    ],
+  }, adminToken);
+  assert(save3.success === true, JSON.stringify(save3));
+
+  prod = getProductFull_(productId);
+  assertEqual(prod.variantes.length, 3, 'tras el tercer guardado deben existir EXACTAMENTE 3 variantes -- nunca las 6 de la matriz completa');
+  const byKey3 = {};
+  prod.variantes.forEach(v => { byKey3[`${v.talla}|${v.color}`] = v; });
+  assert(!byKey3['S|Blanco'] && !byKey3['M|Blanco'] && !byKey3['L|Negro'], 'jamás debe forzarse ninguna combinación no pedida explícitamente: ' + JSON.stringify(prod.variantes));
+  assertEqual(byKey3['S|Negro'].id, sNegroId, 'S/Negro conserva su id original en el 3er guardado');
+  assertEqual(byKey3['S|Negro'].stock, 11, 'stock de S/Negro intacto tras 2 guardados posteriores');
+  assertEqual(byKey3['M|Negro'].id, mNegroId, 'M/Negro conserva su id original en el 3er guardado');
+  assertEqual(byKey3['M|Negro'].stock, 7, 'stock de M/Negro intacto tras el guardado siguiente');
+});
+
+test('VARIANT_RESAVING_UNCHANGED_EXISTING_VARIANT_WRITES_NOTHING_TO_SHEETS', () => {
+  // Causa raíz confirmada del timeout: reenviar una variante existente sin
+  // cambios NO debe costar ninguna escritura real -- antes, updateRowById
+  // se llamaba incondicionalmente para cada una.
+  const create = doPostRaw('products.save', {
+    nombre: 'Pantalón Sin Cambios', categoriaId: 'CAT-T01', tieneVariantes: true,
+    variantes: [{ talla: 'M', color: 'Azul', stock: 9, costo: 500, precio: 1100, estado: 'ACTIVO' }],
+  }, adminToken);
+  assert(create.success === true, JSON.stringify(create));
+  const productId = create.productId;
+  const prod = getProductFull_(productId);
+  const v = prod.variantes[0];
+
+  resetSheetCallStats();
+  const resave = doPostRaw('products.save', {
+    id: productId, nombre: 'Pantalón Sin Cambios', categoriaId: 'CAT-T01', tieneVariantes: true,
+    variantes: [{ id: v.id, talla: v.talla, color: v.color, sku: v.sku, codigoBarras: v.codigoBarras, stock: v.stock, costo: v.costo, precio: v.precio, estado: v.estado }],
+  }, adminToken);
+  assert(resave.success === true, JSON.stringify(resave));
+
+  // CERO escrituras en 'Variantes' -- ni un solo appendRow/setValues --
+  // porque la única variante reenviada no cambió ningún campo real.
+  const variantAppends = sheetCallStats.appendRowCallsBySheet['Variantes'] || 0;
+  const variantSetValues = sheetCallStats.setValuesCallsBySheet['Variantes'] || 0;
+  assertEqual(variantAppends, 0, 'no debe hacerse ningún appendRow en Variantes -- no hay variantes nuevas');
+  assertEqual(variantSetValues, 0, `no debe hacerse ningún setValues en Variantes -- la variante existente no cambió (obtenido=${variantSetValues})`);
+});
+
+test('VARIANT_MATRIX_GENERATION_AFTER_EXISTING_VARIANTS_FILLS_ONLY_MISSING_COMBINATIONS', () => {
+  // Parte 13: S/Negro y M/Negro ya existen (creados individualmente) --
+  // "Generar Combinaciones" para {S,M}×{Negro,Blanco} debe crear
+  // ÚNICAMENTE S/Blanco y M/Blanco, nunca duplicar las 2 ya existentes.
+  const create = doPostRaw('products.save', {
+    nombre: 'Suéter Matriz Parcial', categoriaId: 'CAT-T01', tieneVariantes: true,
+    variantes: [
+      { talla: 'S', color: 'Negro', stock: 4, costo: 200, precio: 500, estado: 'ACTIVO' },
+      { talla: 'M', color: 'Negro', stock: 6, costo: 200, precio: 500, estado: 'ACTIVO' },
+    ],
+  }, adminToken);
+  assert(create.success === true, JSON.stringify(create));
+  const productId = create.productId;
+  let prod = getProductFull_(productId);
+  const byKeyBefore = {};
+  prod.variantes.forEach(v => { byKeyBefore[`${v.talla}|${v.color}`] = v; });
+
+  // Simula exactamente lo que ProductFormModal.handleGenerateMatrix ahora
+  // construye: conserva las existentes (mismo id) y agrega solo las que faltan.
+  const save2 = doPostRaw('products.save', {
+    id: productId, nombre: 'Suéter Matriz Parcial', categoriaId: 'CAT-T01', tieneVariantes: true,
+    variantes: [
+      { id: byKeyBefore['S|Negro'].id, talla: 'S', color: 'Negro', stock: 4, costo: 200, precio: 500, estado: 'ACTIVO' },
+      { id: byKeyBefore['M|Negro'].id, talla: 'M', color: 'Negro', stock: 6, costo: 200, precio: 500, estado: 'ACTIVO' },
+      { talla: 'S', color: 'Blanco', stock: 8, costo: 200, precio: 500, estado: 'ACTIVO' },
+      { talla: 'M', color: 'Blanco', stock: 8, costo: 200, precio: 500, estado: 'ACTIVO' },
+    ],
+  }, adminToken);
+  assert(save2.success === true, JSON.stringify(save2));
+
+  prod = getProductFull_(productId);
+  assertEqual(prod.variantes.length, 4, 'deben existir exactamente 4 variantes, nunca 6 ni duplicados: ' + JSON.stringify(prod.variantes));
+  const keys = prod.variantes.map(v => `${v.talla}|${v.color}`).sort();
+  assertEqual(JSON.stringify(keys), JSON.stringify(['M|Blanco', 'M|Negro', 'S|Blanco', 'S|Negro']));
+  const byKeyAfter = {};
+  prod.variantes.forEach(v => { byKeyAfter[`${v.talla}|${v.color}`] = v; });
+  assertEqual(byKeyAfter['S|Negro'].id, byKeyBefore['S|Negro'].id, 'S/Negro no debe recrearse');
+  assertEqual(byKeyAfter['M|Negro'].id, byKeyBefore['M|Negro'].id, 'M/Negro no debe recrearse');
+});
+
+test('VARIANT_THIRTY_NEW_VARIANTS_SINGLE_SAVE_USES_BATCH_INSERT_NOT_30_WRITES', () => {
+  // Parte 17: simula 5 tallas × 6 colores = 30 variantes en un solo
+  // producto nuevo. Verifica 30 combinaciones únicas, 0 duplicados, Y que
+  // la inserción usa DbHelper.insertRows en lote (0 appendRow, pocos
+  // setValues) -- nunca 30 escrituras independientes.
+  const tallas = ['XS', 'S', 'M', 'L', 'XL'];
+  const colores = ['Negro', 'Blanco', 'Azul', 'Rojo', 'Verde', 'Gris'];
+  const variantes = [];
+  tallas.forEach(t => colores.forEach(c => variantes.push({ talla: t, color: c, stock: 5, costo: 300, precio: 700, estado: 'ACTIVO' })));
+  assertEqual(variantes.length, 30);
+
+  resetSheetCallStats();
+  const create = doPostRaw('products.save', {
+    nombre: 'Producto 30 Variantes', categoriaId: 'CAT-T01', tieneVariantes: true, variantes,
+  }, adminToken);
+  assert(create.success === true, JSON.stringify(create));
+
+  const variantAppends = sheetCallStats.appendRowCallsBySheet['Variantes'] || 0;
+  const variantSetValues = sheetCallStats.setValuesCallsBySheet['Variantes'] || 0;
+  assertEqual(variantAppends, 0, 'las 30 variantes nuevas deben insertarse por lote (insertRows), nunca con 30 appendRow independientes en Variantes');
+  assertEqual(variantSetValues, 1, `las 30 variantes nuevas deben escribirse en un único setValues por lote (obtenido=${variantSetValues})`);
+
+  const prod = getProductFull_(create.productId);
+  assertEqual(prod.variantes.length, 30, 'deben existir exactamente 30 variantes');
+  const uniqueKeys = new Set(prod.variantes.map(v => `${v.talla}|${v.color}`.toUpperCase()));
+  assertEqual(uniqueKeys.size, 30, 'las 30 combinaciones deben ser únicas, sin duplicados');
+  assertEqual(prod.totalStock, 150, '30 variantes × 5 unidades = 150');
+
+  // Parte 17 (segunda mitad): repetir EXACTAMENTE la misma operación de 30
+  // combinaciones (reenviando los ids reales ya asignados) debe crear 0
+  // variantes nuevas -- nunca duplicar.
+  const resendVariantes = prod.variantes.map(v => ({
+    id: v.id, talla: v.talla, color: v.color, sku: v.sku, codigoBarras: v.codigoBarras,
+    stock: v.stock, costo: v.costo, precio: v.precio, estado: v.estado,
+  }));
+  const resave = doPostRaw('products.save', {
+    id: create.productId, nombre: 'Producto 30 Variantes', categoriaId: 'CAT-T01', tieneVariantes: true,
+    variantes: resendVariantes,
+  }, adminToken);
+  assert(resave.success === true, JSON.stringify(resave));
+
+  const prodAfter = getProductFull_(create.productId);
+  assertEqual(prodAfter.variantes.length, 30, 'reenviar las mismas 30 variantes no debe crear ninguna adicional');
+});
+
+test('VARIANT_DUPLICATE_TALLA_COLOR_IN_SAME_SAVE_REJECTED_WITH_VARIANTE_DUPLICADA', () => {
+  const res = doPostRaw('products.save', {
+    nombre: 'Producto Duplicado Mismo Guardado', categoriaId: 'CAT-T01', tieneVariantes: true,
+    variantes: [
+      { talla: 'S', color: 'Negro', stock: 5, costo: 100, precio: 200, estado: 'ACTIVO' },
+      { talla: 'S', color: 'Negro', stock: 5, costo: 100, precio: 200, estado: 'ACTIVO' },
+    ],
+  }, adminToken);
+  assert(res.success === false, 'dos variantes con la misma combinación en el mismo guardado deben rechazarse');
+  assertEqual(res.error.indexOf('VARIANTE_DUPLICADA'), 0, res.error);
+  assert(res.error.indexOf('S') !== -1 && res.error.toLowerCase().indexOf('negro') !== -1, `el mensaje debe identificar la combinación exacta: ${res.error}`);
+
+  const list = doPostRaw('products.list', {}, adminToken);
+  assert(!list.products.some(p => p.nombre === 'Producto Duplicado Mismo Guardado'), 'el producto rechazado no debe haberse creado (ni parcialmente)');
+});
+
+test('VARIANT_DUPLICATE_AGAINST_ALREADY_EXISTING_VARIANT_REJECTED', () => {
+  const create = doPostRaw('products.save', {
+    nombre: 'Producto Con Variante Previa', categoriaId: 'CAT-T01', tieneVariantes: true,
+    variantes: [{ talla: 'M', color: 'Rojo', stock: 5, costo: 100, precio: 200, estado: 'ACTIVO' }],
+  }, adminToken);
+  assert(create.success === true, JSON.stringify(create));
+  const productId = create.productId;
+  const before = getProductFull_(productId);
+
+  // Intenta agregar una nueva variante "M/Rojo" (mismo texto, distinto
+  // caso/espacios) sin referenciar el id existente -- debe rechazarse
+  // ANTES de escribir nada, nunca crear una segunda fila M/Rojo.
+  const res = doPostRaw('products.save', {
+    id: productId, nombre: 'Producto Con Variante Previa', categoriaId: 'CAT-T01', tieneVariantes: true,
+    variantes: [
+      { id: before.variantes[0].id, talla: 'M', color: 'Rojo', stock: 5, costo: 100, precio: 200, estado: 'ACTIVO' },
+      { talla: ' m ', color: ' ROJO ', stock: 3, costo: 100, precio: 200, estado: 'ACTIVO' },
+    ],
+  }, adminToken);
+  assert(res.success === false, 'una nueva variante que colisiona (normalizada) con una existente debe rechazarse');
+  assertEqual(res.error.indexOf('VARIANTE_DUPLICADA'), 0, res.error);
+
+  const after = getProductFull_(productId);
+  assertEqual(after.variantes.length, 1, 'debe seguir existiendo solo la variante original -- el rechazo no debe crear nada');
+});
+
+test('VARIANT_NUMERIC_TALLA_TREATED_AS_TEXT_CONSISTENTLY', () => {
+  const create = doPostRaw('products.save', {
+    nombre: 'Zapatos Talla Numerica', categoriaId: 'CAT-T01', tieneVariantes: true,
+    variantes: [{ talla: 32, color: 'Negro', stock: 4, costo: 800, precio: 1600, estado: 'ACTIVO' }],
+  }, adminToken);
+  assert(create.success === true, JSON.stringify(create));
+  const prod = getProductFull_(create.productId);
+  assertEqual(String(prod.variantes[0].talla), '32');
+
+  // Reintentar la MISMA combinación con talla string "32" debe rechazarse
+  // como duplicado -- la clave debe ser la misma sin importar el tipo original.
+  const dup = doPostRaw('products.save', {
+    id: create.productId, nombre: 'Zapatos Talla Numerica', categoriaId: 'CAT-T01', tieneVariantes: true,
+    variantes: [
+      { id: prod.variantes[0].id, talla: 32, color: 'Negro', stock: 4, costo: 800, precio: 1600, estado: 'ACTIVO' },
+      { talla: '32', color: 'Negro', stock: 2, costo: 800, precio: 1600, estado: 'ACTIVO' },
+    ],
+  }, adminToken);
+  assert(dup.success === false, 'talla numérica 32 y talla string "32" deben considerarse la misma combinación');
+  assertEqual(dup.error.indexOf('VARIANTE_DUPLICADA'), 0, dup.error);
+});
+
+test('VARIANT_NORMALIZATION_ROBUST_TO_WHITESPACE_AND_CASE', () => {
+  const create = doPostRaw('products.save', {
+    nombre: 'Gorra Normalizacion', categoriaId: 'CAT-T01', tieneVariantes: true,
+    variantes: [{ talla: '  32  ', color: '  Negro  ', stock: 4, costo: 150, precio: 300, estado: 'ACTIVO' }],
+  }, adminToken);
+  assert(create.success === true, JSON.stringify(create));
+  const prod = getProductFull_(create.productId);
+  assertEqual(String(prod.variantes[0].talla).trim(), '32', 'la talla se guarda recortada');
+
+  const dup = doPostRaw('products.save', {
+    id: create.productId, nombre: 'Gorra Normalizacion', categoriaId: 'CAT-T01', tieneVariantes: true,
+    variantes: [
+      { id: prod.variantes[0].id, talla: '32', color: 'Negro', stock: 4, costo: 150, precio: 300, estado: 'ACTIVO' },
+      { talla: '32', color: 'negro', stock: 1, costo: 150, precio: 300, estado: 'ACTIVO' },
+    ],
+  }, adminToken);
+  assert(dup.success === false, '"32"/"Negro" y "32"/"negro" deben tratarse como la misma combinación');
+  assertEqual(dup.error.indexOf('VARIANTE_DUPLICADA'), 0, dup.error);
+});
+
+test('VARIANT_NEVER_LEAKS_OBJECT_OBJECT_STRING', () => {
+  const res = doPostRaw('products.save', {
+    nombre: 'Producto Payload Malformado', categoriaId: 'CAT-T01', tieneVariantes: true,
+    variantes: [{ talla: { raro: true }, color: ['no', 'deberia', 'pasar'], stock: 1, costo: 100, precio: 200, estado: 'ACTIVO' }],
+  }, adminToken);
+  // Cualquiera de los dos desenlaces es seguro (rechazar, o aceptar
+  // convirtiendo a texto de forma segura) -- lo único inaceptable es que
+  // "[object Object]" quede escrito como talla/color real.
+  if (res.success) {
+    const prod = getProductFull_(res.productId);
+    const talla = String(prod.variantes[0].talla);
+    const color = String(prod.variantes[0].color);
+    assert(talla.indexOf('[object') === -1, `la talla nunca debe ser "[object Object]": ${talla}`);
+    assert(color.indexOf('[object') === -1 && color !== 'no,deberia,pasar', `el color nunca debe filtrar la estructura cruda: ${color}`);
+  } else {
+    assert(res.error.indexOf('[object') === -1, 'el mensaje de error tampoco debe filtrar "[object Object]"');
+  }
+});
+
+test('VARIANT_FAILED_SAVE_ROLLS_BACK_PRODUCT_AND_EXISTING_VARIANT_UPDATE', () => {
+  // Atomicidad real (Parte 7): un producto con S/Negro (stock 10) y
+  // M/Negro (stock 5) se reguarda cambiando el precio del producto Y el
+  // stock de M/Negro (dispara un updateRowById real) mientras se agrega
+  // L/Blanco (dispara el insert por lote). Se fuerza que la actualización
+  // de M/Negro falle -- todo el guardado (incluida la fila de Productos)
+  // debe quedar exactamente como estaba antes.
+  const create = doPostRaw('products.save', {
+    nombre: 'Chaqueta Atomicidad', categoriaId: 'CAT-T01', tieneVariantes: true, precio: 1500, costo: 700,
+    variantes: [
+      { talla: 'S', color: 'Negro', stock: 10, costo: 700, precio: 1500, estado: 'ACTIVO' },
+      { talla: 'M', color: 'Negro', stock: 5, costo: 700, precio: 1500, estado: 'ACTIVO' },
+    ],
+  }, adminToken);
+  assert(create.success === true, JSON.stringify(create));
+  const productId = create.productId;
+  const before = getProductFull_(productId);
+  const byKey = {}; before.variantes.forEach(v => { byKey[`${v.talla}|${v.color}`] = v; });
+  const mNegroId = byKey['M|Negro'].id;
+
+  runInContext(`
+    (function() {
+      if (!DbHelper.__originalUpdateRowById) DbHelper.__originalUpdateRowById = DbHelper.updateRowById;
+      DbHelper.updateRowById = function(sheetName, id, updates) {
+        if (sheetName === 'Variantes' && id === '${mNegroId}') {
+          throw new Error('SIMULATED_FAILURE_VARIANTES: fallo forzado para probar rollback.');
+        }
+        return DbHelper.__originalUpdateRowById.call(DbHelper, sheetName, id, updates);
+      };
+    })();
+  `);
+
+  let res;
+  try {
+    res = doPostRaw('products.save', {
+      id: productId, nombre: 'Chaqueta Atomicidad', categoriaId: 'CAT-T01', tieneVariantes: true, precio: 1999, costo: 700,
+      variantes: [
+        { id: byKey['S|Negro'].id, talla: 'S', color: 'Negro', stock: 10, costo: 700, precio: 1999, estado: 'ACTIVO' },
+        { id: mNegroId, talla: 'M', color: 'Negro', stock: 999, costo: 700, precio: 1999, estado: 'ACTIVO' },
+        { talla: 'L', color: 'Blanco', stock: 2, costo: 700, precio: 1999, estado: 'ACTIVO' },
+      ],
+    }, adminToken);
+  } finally {
+    runInContext(`DbHelper.updateRowById = DbHelper.__originalUpdateRowById;`);
+  }
+
+  assert(res.success === false, 'el guardado debe fallar cuando falla la escritura de M/Negro');
+  assert(res.error.indexOf('SIMULATED_FAILURE_VARIANTES') !== -1, res.error);
+
+  const after = getProductFull_(productId);
+  assertEqual(after.precio, 1500, 'el precio del producto debe quedar restaurado -- el guardado no debe quedar a medias');
+  assertEqual(after.variantes.length, 2, 'no debe haberse creado L/Blanco: el fallo ocurrió antes de llegar a esa inserción por lote');
+  const afterByKey = {}; after.variantes.forEach(v => { afterByKey[`${v.talla}|${v.color}`] = v; });
+  assertEqual(afterByKey['M|Negro'].stock, 5, 'el stock de M/Negro debe quedar restaurado a su valor original, nunca a medias');
+  // S/Negro SÍ se llega a escribir realmente antes de que M/Negro falle
+  // (su precio también cambiaba en este intento, de 1500 a 1999) -- el
+  // rollback debe restaurarla exactamente igual que a M/Negro, no solo a
+  // la que nunca llegó a escribirse.
+  assertEqual(afterByKey['S|Negro'].stock, 10);
+  assertEqual(afterByKey['S|Negro'].precio, 1500, 'S/Negro ya se había escrito con el precio nuevo antes de que fallara M/Negro -- el rollback debe revertir también ese cambio');
+});
+
+test('VARIANT_FAILED_BATCH_INSERT_ON_NEW_PRODUCT_ROLLS_BACK_PRODUCT_ROW_TOO', () => {
+  // Caso más estricto de atomicidad: producto COMPLETAMENTE nuevo, todas
+  // sus variantes son altas nuevas (van al insert por lote). Si ese lote
+  // falla, ni una sola variante ni la fila del producto deben sobrevivir.
+  runInContext(`
+    (function() {
+      if (!DbHelper.__originalInsertRows) DbHelper.__originalInsertRows = DbHelper.insertRows;
+      DbHelper.insertRows = function(sheetName, rows) {
+        if (sheetName === 'Variantes' && rows.some(r => r.sku === '__FORZAR_FALLO_LOTE__')) {
+          throw new Error('SIMULATED_FAILURE_BATCH: fallo forzado en insertRows.');
+        }
+        return DbHelper.__originalInsertRows.call(DbHelper, sheetName, rows);
+      };
+    })();
+  `);
+
+  let res;
+  try {
+    res = doPostRaw('products.save', {
+      nombre: 'Producto Nuevo Fallo De Lote', categoriaId: 'CAT-T01', tieneVariantes: true,
+      variantes: [
+        { talla: 'S', color: 'Negro', sku: '__FORZAR_FALLO_LOTE__', stock: 5, costo: 100, precio: 200, estado: 'ACTIVO' },
+        { talla: 'M', color: 'Negro', stock: 5, costo: 100, precio: 200, estado: 'ACTIVO' },
+      ],
+    }, adminToken);
+  } finally {
+    runInContext(`DbHelper.insertRows = DbHelper.__originalInsertRows;`);
+  }
+
+  assert(res.success === false, 'debe fallar cuando el lote de inserción de variantes falla');
+  assert(res.error.indexOf('SIMULATED_FAILURE_BATCH') !== -1, res.error);
+
+  const list = doPostRaw('products.list', {}, adminToken);
+  assert(!list.products.some(p => p.nombre === 'Producto Nuevo Fallo De Lote'), 'la fila de Productos también debe quedar revertida -- nunca un producto huérfano sin variantes');
+  // El lote completo (ambas variantes) nunca llegó a escribirse -- ni
+  // siquiera la que no llevaba el marcador de fallo -- porque
+  // DbHelper.insertRows falla ANTES de escribir nada cuando cualquier fila
+  // del lote lo dispara (mismo comportamiento real de un solo
+  // Range.setValues() para todo el lote).
+  const leaked = runInContext(`DbHelper.findRows('Variantes', v => v.sku === '__FORZAR_FALLO_LOTE__').length`);
+  assertEqual(leaked, 0, 'ninguna variante del lote fallido debe haber quedado escrita');
+});
+
+test('VARIANT_DELETE_IS_SOFT_DELETE_NEVER_PHYSICAL_ROW_REMOVAL', () => {
+  const create = doPostRaw('products.save', {
+    nombre: 'Blusa Para Eliminar Variante', categoriaId: 'CAT-T01', tieneVariantes: true,
+    variantes: [
+      { talla: 'S', color: 'Negro', stock: 3, costo: 100, precio: 200, estado: 'ACTIVO' },
+      { talla: 'M', color: 'Negro', stock: 4, costo: 100, precio: 200, estado: 'ACTIVO' },
+    ],
+  }, adminToken);
+  assert(create.success === true, JSON.stringify(create));
+  const productId = create.productId;
+  const before = getProductFull_(productId);
+  const sNegro = before.variantes.find(v => v.talla === 'S');
+
+  const save2 = doPostRaw('products.save', {
+    id: productId, nombre: 'Blusa Para Eliminar Variante', categoriaId: 'CAT-T01', tieneVariantes: true,
+    variantes: before.variantes.filter(v => v.id !== sNegro.id).map(v => ({
+      id: v.id, talla: v.talla, color: v.color, sku: v.sku, codigoBarras: v.codigoBarras, stock: v.stock, costo: v.costo, precio: v.precio, estado: v.estado,
+    })),
+    deletedVariantIds: [sNegro.id],
+  }, adminToken);
+  assert(save2.success === true, JSON.stringify(save2));
+
+  // La fila SIGUE existiendo en Sheets (nunca se borra físicamente) --
+  // preserva cualquier Kardex/Venta/Devolución que ya la referencie.
+  const rawRow = runInContext(`DbHelper.findById('Variantes', '${sNegro.id}')`);
+  assert(!!rawRow, 'la fila de la variante eliminada debe seguir existiendo físicamente en la hoja Variantes');
+  assertEqual(rawRow.estado, 'INACTIVO', 'debe quedar marcada INACTIVO -- mismo mecanismo que products.delete');
+
+  const after = getProductFull_(productId);
+  const stillListed = after.variantes.find(v => v.id === sNegro.id);
+  assert(!!stillListed, 'products.list sigue devolviendo la variante (con estado INACTIVO) -- no desaparece de la fuente de verdad');
+  assertEqual(stillListed.estado, 'INACTIVO');
+});
+
+test('VARIANT_DELETED_COMBINATION_CAN_BE_RECREATED_WITHOUT_FALSE_DUPLICATE', () => {
+  // Tras eliminar S/Negro, debe poder darse de alta una NUEVA variante
+  // S/Negro sin que la ya-eliminada cuente como una colisión.
+  const create = doPostRaw('products.save', {
+    nombre: 'Falda Recrear Combinacion', categoriaId: 'CAT-T01', tieneVariantes: true,
+    variantes: [{ talla: 'S', color: 'Negro', stock: 3, costo: 100, precio: 200, estado: 'ACTIVO' }],
+  }, adminToken);
+  const productId = create.productId;
+  const before = getProductFull_(productId);
+  const oldId = before.variantes[0].id;
+
+  const del = doPostRaw('products.save', {
+    id: productId, nombre: 'Falda Recrear Combinacion', categoriaId: 'CAT-T01', tieneVariantes: true,
+    variantes: [], deletedVariantIds: [oldId],
+  }, adminToken);
+  assert(del.success === true, JSON.stringify(del));
+
+  const recreate = doPostRaw('products.save', {
+    id: productId, nombre: 'Falda Recrear Combinacion', categoriaId: 'CAT-T01', tieneVariantes: true,
+    variantes: [{ talla: 'S', color: 'Negro', stock: 9, costo: 100, precio: 200, estado: 'ACTIVO' }],
+  }, adminToken);
+  assert(recreate.success === true, `recrear S/Negro tras eliminar la anterior no debe rechazarse como duplicado: ${JSON.stringify(recreate)}`);
+
+  const after = getProductFull_(productId);
+  const activeVariants = after.variantes.filter(v => v.estado === 'ACTIVO');
+  assertEqual(activeVariants.length, 1, 'debe existir exactamente 1 variante ACTIVA (la recién creada)');
+  assert(activeVariants[0].id !== oldId, 'la variante recreada debe tener un id distinto de la eliminada (es una fila nueva)');
+  assertEqual(activeVariants[0].stock, 9);
+});
+
+test('VARIANT_DELETE_TAKES_PRECEDENCE_OVER_CONFLICTING_UPDATE_FOR_SAME_ID', () => {
+  // Defensivo (Parte 11): si el mismo id llega simultáneamente en
+  // `variantes` (para actualizar) y en `deletedVariantIds`, la eliminación
+  // explícita gana -- nunca se reactiva ni se actualiza una variante que
+  // el usuario pidió eliminar en la misma operación.
+  const create = doPostRaw('products.save', {
+    nombre: 'Short Conflicto Delete Update', categoriaId: 'CAT-T01', tieneVariantes: true,
+    variantes: [{ talla: 'S', color: 'Negro', stock: 3, costo: 100, precio: 200, estado: 'ACTIVO' }],
+  }, adminToken);
+  const productId = create.productId;
+  const vId = getProductFull_(productId).variantes[0].id;
+
+  const res = doPostRaw('products.save', {
+    id: productId, nombre: 'Short Conflicto Delete Update', categoriaId: 'CAT-T01', tieneVariantes: true,
+    variantes: [{ id: vId, talla: 'S', color: 'Negro', stock: 999, costo: 100, precio: 200, estado: 'ACTIVO' }],
+    deletedVariantIds: [vId],
+  }, adminToken);
+  assert(res.success === true, JSON.stringify(res));
+
+  const raw = runInContext(`DbHelper.findById('Variantes', '${vId}')`);
+  assertEqual(raw.estado, 'INACTIVO', 'la eliminación debe prevalecer sobre la actualización conflictiva del mismo id');
+  assertEqual(Number(raw.stock), 3, 'el stock nunca debe aplicarse desde una actualización que llegó junto a su propia eliminación');
+});
+
+test('VARIANT_ADDING_NEW_VARIANT_NEVER_RESETS_UNRELATED_EXISTING_STOCK', () => {
+  const create = doPostRaw('products.save', {
+    nombre: 'Sudadera Stock Intacto', categoriaId: 'CAT-T01', tieneVariantes: true,
+    variantes: [{ talla: 'S', color: 'Negro', stock: 11, costo: 300, precio: 700, estado: 'ACTIVO' }],
+  }, adminToken);
+  const productId = create.productId;
+  const before = getProductFull_(productId);
+
+  const save2 = doPostRaw('products.save', {
+    id: productId, nombre: 'Sudadera Stock Intacto', categoriaId: 'CAT-T01', tieneVariantes: true,
+    variantes: [
+      { id: before.variantes[0].id, talla: 'S', color: 'Negro', sku: before.variantes[0].sku, codigoBarras: before.variantes[0].codigoBarras, stock: 11, costo: 300, precio: 700, estado: 'ACTIVO' },
+      { talla: 'M', color: 'Negro', stock: 7, costo: 300, precio: 700, estado: 'ACTIVO' },
+    ],
+  }, adminToken);
+  assert(save2.success === true, JSON.stringify(save2));
+
+  const after = getProductFull_(productId);
+  const sNegro = after.variantes.find(v => v.talla === 'S' && v.color === 'Negro');
+  assertEqual(sNegro.stock, 11, 'agregar M/Negro no debe alterar el stock de S/Negro');
+});
+
+test('VARIANT_EXISTING_CODE_PRESERVED_ON_EDIT_NOT_AUTO_REPLACED', () => {
+  const create = doPostRaw('products.save', {
+    nombre: 'Bolso Codigo Preservado', categoriaId: 'CAT-T01', tieneVariantes: true,
+    variantes: [{ talla: 'U', color: 'Único', codigoBarras: '9990001112223', stock: 5, costo: 400, precio: 900, estado: 'ACTIVO' }],
+  }, adminToken);
+  const productId = create.productId;
+  const before = getProductFull_(productId);
+  assertEqual(before.variantes[0].codigoBarras, '9990001112223');
+
+  // Se reenvía la misma variante (sin tocar el código) + una nueva sin
+  // código propio -- el código original nunca debe regenerarse.
+  const save2 = doPostRaw('products.save', {
+    id: productId, nombre: 'Bolso Codigo Preservado', categoriaId: 'CAT-T01', tieneVariantes: true,
+    variantes: [
+      { id: before.variantes[0].id, talla: 'U', color: 'Único', codigoBarras: '9990001112223', stock: 8, costo: 400, precio: 900, estado: 'ACTIVO' },
+    ],
+  }, adminToken);
+  assert(save2.success === true, JSON.stringify(save2));
+  const after = getProductFull_(productId);
+  assertEqual(after.variantes[0].codigoBarras, '9990001112223', 'el código explícito ya existente nunca debe reemplazarse automáticamente');
+  assertEqual(after.variantes[0].stock, 8, 'el cambio de stock explícito sí debe aplicarse');
+});
+
+test('VARIANT_SIMPLE_PRODUCT_STILL_CREATES_SINGLE_U_UNICO_VARIANT_WITH_NEW_CONTRACT', () => {
+  // Regresión Parte 18: el contrato nuevo (deletedVariantIds opcional) no
+  // debe romper el camino de producto simple ya cubierto por
+  // PRODUCT_SAVE_SIMPLE_NO_VARIANTS_CREATES_SINGLE_IMPLICIT_VARIANT.
+  const res = doPostRaw('products.save', {
+    nombre: 'Producto Simple Con Contrato Nuevo', categoriaId: 'CAT-T01', tieneVariantes: false,
+    variantes: [{ talla: '', color: '', stock: 15, costo: 100, precio: 250, estado: 'ACTIVO' }],
+    deletedVariantIds: [],
+  }, adminToken);
+  assert(res.success === true, JSON.stringify(res));
+  const prod = getProductFull_(res.productId);
+  assertEqual(prod.variantes.length, 1);
+  assertEqual(prod.variantes[0].talla, 'U');
+  assertEqual(prod.variantes[0].color, 'Único');
+});
+
+test('VARIANT_SAME_COMBINATION_ALLOWED_ACROSS_DIFFERENT_PRODUCTS', () => {
+  // La detección de duplicados está correctamente delimitada por
+  // producto -- dos productos distintos pueden tener, cada uno, su propia
+  // variante S/Negro sin ningún conflicto entre sí.
+  const p1 = doPostRaw('products.save', {
+    nombre: 'Producto Cruzado A', categoriaId: 'CAT-T01', tieneVariantes: true,
+    variantes: [{ talla: 'S', color: 'Negro', stock: 5, costo: 100, precio: 200, estado: 'ACTIVO' }],
+  }, adminToken);
+  const p2 = doPostRaw('products.save', {
+    nombre: 'Producto Cruzado B', categoriaId: 'CAT-T01', tieneVariantes: true,
+    variantes: [{ talla: 'S', color: 'Negro', stock: 5, costo: 100, precio: 200, estado: 'ACTIVO' }],
+  }, adminToken);
+  assert(p1.success === true && p2.success === true, JSON.stringify({ p1, p2 }));
+  assert(p1.productId !== p2.productId);
+});
+
+test('VARIANT_EDITING_PRODUCT_METADATA_DOES_NOT_DISTURB_UNRELATED_EXISTING_VARIANTS', () => {
+  const create = doPostRaw('products.save', {
+    nombre: 'Vestido Metadatos', categoriaId: 'CAT-T01', tieneVariantes: true, descripcion: 'Original',
+    variantes: [
+      { talla: 'S', color: 'Negro', stock: 6, costo: 200, precio: 450, estado: 'ACTIVO' },
+      { talla: 'M', color: 'Rojo', stock: 9, costo: 200, precio: 450, estado: 'ACTIVO' },
+    ],
+  }, adminToken);
+  const productId = create.productId;
+  const before = getProductFull_(productId);
+
+  // Solo cambia la descripción del producto -- reenvía las variantes
+  // exactamente igual.
+  const save2 = doPostRaw('products.save', {
+    id: productId, nombre: 'Vestido Metadatos', categoriaId: 'CAT-T01', tieneVariantes: true, descripcion: 'Actualizada',
+    variantes: before.variantes.map(v => ({
+      id: v.id, talla: v.talla, color: v.color, sku: v.sku, codigoBarras: v.codigoBarras, stock: v.stock, costo: v.costo, precio: v.precio, estado: v.estado,
+    })),
+  }, adminToken);
+  assert(save2.success === true, JSON.stringify(save2));
+
+  const after = getProductFull_(productId);
+  assertEqual(after.descripcion, 'Actualizada');
+  assertEqual(after.variantes.length, 2, 'ninguna variante debe perderse ni duplicarse al editar solo metadatos del producto');
+  after.variantes.forEach(v => {
+    const orig = before.variantes.find(bv => bv.id === v.id);
+    assert(!!orig, `la variante ${v.id} debe conservar su identidad original`);
+    assertEqual(v.stock, orig.stock, 'el stock no debe alterarse al editar solo metadatos del producto');
+  });
+});
+
+test('VARIANT_KARDEX_MOVEMENT_SURVIVES_UNRELATED_VARIANT_SAVE', () => {
+  // Parte 18: un movimiento de Kardex ya generado (ej. por una venta) no
+  // debe verse afectado por un guardado posterior de variantes no
+  // relacionadas del mismo producto.
+  const create = doPostRaw('products.save', {
+    nombre: 'Reloj Kardex Regresion', categoriaId: 'CAT-T01', tieneVariantes: true,
+    variantes: [{ talla: 'U', color: 'Plateado', stock: 10, costo: 900, precio: 1800, estado: 'ACTIVO' }],
+  }, adminToken);
+  const productId = create.productId;
+  const before = getProductFull_(productId);
+  const varId = before.variantes[0].id;
+
+  const saleRes = doPostRaw('sales.create', buildValidSaleData({
+    aplicarImpuesto: false,
+    subtotal: 1800, descuentoTotal: 0, impuestoTotal: 0, total: 1800, costoTotal: 900,
+    items: [{ productoId: productId, varianteId: varId, nombreProducto: 'Reloj Kardex Regresion', sku: before.variantes[0].sku, talla: 'U', color: 'Plateado', cantidad: 1, precioUnitario: 1800, costoUnitario: 900, descuentoPorcentaje: 0, descuentoMonto: 0, subtotal: 1800, impuestoMonto: 0, total: 1800 }],
+    pagos: [{ metodo: 'EFECTIVO', monto: 1800 }],
+  }), adminToken);
+  assert(saleRes.success === true, JSON.stringify(saleRes));
+
+  const kardexBefore = runInContext(`DbHelper.findRows('Inventario_Kardex', k => k.variante_id === '${varId}')`).length;
+  assert(kardexBefore > 0, 'la venta debe haber generado al menos 1 movimiento de Kardex');
+
+  // Guardado no relacionado: agrega una segunda variante nueva.
+  const save2 = doPostRaw('products.save', {
+    id: productId, nombre: 'Reloj Kardex Regresion', categoriaId: 'CAT-T01', tieneVariantes: true,
+    variantes: [
+      { id: varId, talla: 'U', color: 'Plateado', stock: 9, costo: 900, precio: 1800, estado: 'ACTIVO' },
+      { talla: 'U', color: 'Dorado', stock: 4, costo: 900, precio: 1800, estado: 'ACTIVO' },
+    ],
+  }, adminToken);
+  assert(save2.success === true, JSON.stringify(save2));
+
+  const kardexAfter = runInContext(`DbHelper.findRows('Inventario_Kardex', k => k.variante_id === '${varId}')`).length;
+  assertEqual(kardexAfter, kardexBefore, 'el historial de Kardex de la variante ya vendida no debe alterarse por un guardado posterior');
+});
+
+test('VARIANT_EMPTY_DELETEDVARIANTIDS_IS_A_NOOP', () => {
+  const create = doPostRaw('products.save', {
+    nombre: 'Producto DeletedIds Vacio', categoriaId: 'CAT-T01', tieneVariantes: true,
+    variantes: [{ talla: 'S', color: 'Negro', stock: 5, costo: 100, precio: 200, estado: 'ACTIVO' }],
+  }, adminToken);
+  const productId = create.productId;
+  const before = getProductFull_(productId);
+
+  const save2 = doPostRaw('products.save', {
+    id: productId, nombre: 'Producto DeletedIds Vacio', categoriaId: 'CAT-T01', tieneVariantes: true,
+    variantes: before.variantes.map(v => ({ id: v.id, talla: v.talla, color: v.color, sku: v.sku, codigoBarras: v.codigoBarras, stock: v.stock, costo: v.costo, precio: v.precio, estado: v.estado })),
+    deletedVariantIds: [],
+  }, adminToken);
+  assert(save2.success === true, JSON.stringify(save2));
+  const after = getProductFull_(productId);
+  assertEqual(after.variantes[0].estado, 'ACTIVO', 'un arreglo deletedVariantIds vacío nunca debe desactivar nada');
+});
+
+test('VARIANT_SAVE_STILL_RUNS_INSIDE_LOCKSERVICE', () => {
+  // Parte 15: el candado global existente NO se elimina en esta fase --
+  // se verifica que LockServiceHelper.runWithLock sigue envolviendo
+  // exactamente la operación transaccional de guardado.
+  let calls = 0;
+  runInContext(`
+    (function() {
+      if (!LockServiceHelper.__originalRunWithLock) LockServiceHelper.__originalRunWithLock = LockServiceHelper.runWithLock;
+      LockServiceHelper.__lockCallCount = 0;
+      LockServiceHelper.runWithLock = function(timeoutMs, callback) {
+        LockServiceHelper.__lockCallCount++;
+        return LockServiceHelper.__originalRunWithLock.call(LockServiceHelper, timeoutMs, callback);
+      };
+    })();
+  `);
+  try {
+    const res = doPostRaw('products.save', {
+      nombre: 'Producto Verifica Lock', categoriaId: 'CAT-T01', tieneVariantes: true,
+      variantes: [{ talla: 'S', color: 'Negro', stock: 1, costo: 100, precio: 200, estado: 'ACTIVO' }],
+    }, adminToken);
+    assert(res.success === true, JSON.stringify(res));
+  } finally {
+    calls = runInContext('LockServiceHelper.__lockCallCount');
+    runInContext('LockServiceHelper.runWithLock = LockServiceHelper.__originalRunWithLock;');
+  }
+  assertEqual(calls, 1, 'products.save debe seguir ejecutándose dentro de exactamente 1 adquisición del candado global');
+});
+
+test('VARIANT_SEQUENTIAL_SAVES_CANNOT_BOTH_CREATE_SAME_COMBINATION', () => {
+  // Parte 15 (verificación posible en un arnés de un solo hilo): dos
+  // intentos de crear la MISMA combinación para el mismo producto, uno
+  // tras otro, nunca deben resultar en 2 filas -- el segundo debe
+  // detectar la ya escrita por el primero y rechazarse. La concurrencia
+  // real (2 hilos simultáneos) no es simulable en este arnés de Node de
+  // un solo hilo -- eso se reporta honestamente, no se fabrica.
+  const create = doPostRaw('products.save', {
+    nombre: 'Producto Candado Secuencial', categoriaId: 'CAT-T01', tieneVariantes: true,
+    variantes: [{ talla: 'S', color: 'Negro', stock: 1, costo: 100, precio: 200, estado: 'ACTIVO' }],
+  }, adminToken);
+  assert(create.success === true, JSON.stringify(create));
+  const productId = create.productId;
+
+  // Un segundo "cliente" que no vio la variante recién creada (no manda
+  // su id) intenta crear la misma combinación S/Negro para el MISMO producto.
+  const second = doPostRaw('products.save', {
+    id: productId, nombre: 'Producto Candado Secuencial', categoriaId: 'CAT-T01', tieneVariantes: true,
+    variantes: [{ talla: 'S', color: 'Negro', stock: 1, costo: 100, precio: 200, estado: 'ACTIVO' }],
+  }, adminToken);
+  assert(second.success === false, 'la segunda solicitud debe detectar la combinación ya escrita por la primera');
+  assertEqual(second.error.indexOf('VARIANTE_DUPLICADA'), 0, second.error);
+
+  const prod = getProductFull_(productId);
+  assertEqual(prod.variantes.filter(v => v.estado === 'ACTIVO').length, 1, 'nunca deben coexistir 2 filas ACTIVAS S/Negro para el mismo producto');
+});
+
+test('VARIANT_MATRIX_GENERATION_WITH_ALL_COMBINATIONS_ALREADY_EXISTING_CREATES_ZERO', () => {
+  const create = doPostRaw('products.save', {
+    nombre: 'Producto Matriz Ya Completa', categoriaId: 'CAT-T01', tieneVariantes: true,
+    variantes: [
+      { talla: 'S', color: 'Negro', stock: 3, costo: 100, precio: 200, estado: 'ACTIVO' },
+      { talla: 'M', color: 'Negro', stock: 4, costo: 100, precio: 200, estado: 'ACTIVO' },
+    ],
+  }, adminToken);
+  const productId = create.productId;
+  const before = getProductFull_(productId);
+
+  // "Generar Combinaciones" para exactamente {S,M}×{Negro}: ambas ya
+  // existen -- debe resultar en 0 variantes nuevas.
+  const save2 = doPostRaw('products.save', {
+    id: productId, nombre: 'Producto Matriz Ya Completa', categoriaId: 'CAT-T01', tieneVariantes: true,
+    variantes: before.variantes.map(v => ({ id: v.id, talla: v.talla, color: v.color, sku: v.sku, codigoBarras: v.codigoBarras, stock: v.stock, costo: v.costo, precio: v.precio, estado: v.estado })),
+  }, adminToken);
+  assert(save2.success === true, JSON.stringify(save2));
+  const after = getProductFull_(productId);
+  assertEqual(after.variantes.length, 2, 'ninguna combinación nueva debe crearse cuando todas ya existían');
+});
+
+test('VARIANT_DELETING_MULTIPLE_VARIANTS_IN_ONE_SAVE_DEACTIVATES_ALL_OF_THEM', () => {
+  // Equivalente backend de "Vaciar Todas": varios ids en
+  // deletedVariantIds en la misma llamada.
+  const create = doPostRaw('products.save', {
+    nombre: 'Producto Vaciar Todas', categoriaId: 'CAT-T01', tieneVariantes: true,
+    variantes: [
+      { talla: 'S', color: 'Negro', stock: 3, costo: 100, precio: 200, estado: 'ACTIVO' },
+      { talla: 'M', color: 'Blanco', stock: 4, costo: 100, precio: 200, estado: 'ACTIVO' },
+    ],
+  }, adminToken);
+  const productId = create.productId;
+  const before = getProductFull_(productId);
+  const ids = before.variantes.map(v => v.id);
+
+  const save2 = doPostRaw('products.save', {
+    id: productId, nombre: 'Producto Vaciar Todas', categoriaId: 'CAT-T01', tieneVariantes: true,
+    variantes: [], deletedVariantIds: ids,
+  }, adminToken);
+  assert(save2.success === true, JSON.stringify(save2));
+
+  ids.forEach(id => {
+    const raw = runInContext(`DbHelper.findById('Variantes', '${id}')`);
+    assert(!!raw, `la variante ${id} debe seguir existiendo físicamente`);
+    assertEqual(raw.estado, 'INACTIVO', `la variante ${id} debe quedar INACTIVA`);
+  });
+});
+
+test('VARIANT_THIRTY_VARIANT_BATCH_KEEPS_INDEPENDENT_STOCK_AND_CODES_PER_ROW', () => {
+  // Complementa la prueba de las 30 variantes: confirma que la inserción
+  // por lote no mezcla ni comparte campos entre filas -- cada variante
+  // conserva su propio stock y su propio código, generados de forma
+  // independiente.
+  const tallas = ['XS', 'S', 'M', 'L', 'XL'];
+  const colores = ['Negro', 'Blanco', 'Azul', 'Rojo', 'Verde', 'Gris'];
+  const variantes = [];
+  let stockCounter = 1;
+  tallas.forEach(t => colores.forEach(c => {
+    variantes.push({ talla: t, color: c, stock: stockCounter, costo: 300, precio: 700, estado: 'ACTIVO' });
+    stockCounter++;
+  }));
+
+  const create = doPostRaw('products.save', {
+    nombre: 'Producto 30 Variantes Independientes', categoriaId: 'CAT-T01', tieneVariantes: true, variantes,
+  }, adminToken);
+  assert(create.success === true, JSON.stringify(create));
+
+  const prod = getProductFull_(create.productId);
+  assertEqual(prod.variantes.length, 30);
+  const stocks = prod.variantes.map(v => v.stock).sort((a, b) => a - b);
+  assertEqual(JSON.stringify(stocks), JSON.stringify(Array.from({ length: 30 }, (_, i) => i + 1)), 'cada variante debe conservar su propio stock, sin mezclarse con las demás');
+  const uniqueCodes = new Set(prod.variantes.map(v => v.codigoBarras));
+  assertEqual(uniqueCodes.size, 30, 'cada variante debe recibir su propio código autogenerado, sin colisiones entre filas del mismo lote');
+  const uniqueSkus = new Set(prod.variantes.map(v => v.sku));
+  assertEqual(uniqueSkus.size, 30, 'cada variante debe recibir su propio SKU, sin colisiones entre filas del mismo lote');
 });
 
 /* ------------------------------------------------------------

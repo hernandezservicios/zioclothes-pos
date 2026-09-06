@@ -40,6 +40,38 @@ function normalizeVariantOptionName(value: unknown): string {
   return '';
 }
 
+/**
+ * FASE (corrección definitiva de variantes -- guardado individual, Parte
+ * 5): clave normalizada y estable de una combinación talla/color,
+ * reutilizada en TODO el flujo de variantes de este componente (matriz,
+ * alta individual, validación previa al guardado) en vez de comparar
+ * `v.talla === x && v.color === y` sueltos en cada sitio -- esa
+ * comparación directa (usada antes solo en handleGenerateMatrix) es
+ * sensible a mayúsculas/espacios y fue la causa real de que una variante
+ * ya existente ("Negro") no se reconociera como la misma combinación que
+ * una recién tecleada ("negro"), generando un duplicado. Reutiliza
+ * `normalizeVariantOptionName` (FASE 9) para el trim/number->string, y
+ * añade sobre eso la normalización de mayúsculas -- nunca duplica esa
+ * lógica de forma distinta.
+ */
+function getVariantKey(talla: unknown, color: unknown): string {
+  const t = normalizeVariantOptionName(talla).toUpperCase();
+  const c = normalizeVariantOptionName(color).toUpperCase();
+  return `${t}|${c}`;
+}
+
+/** Real backend variant ids always look like VAR-000123 (Sequences.gs).
+ * Los ids temporales que este componente genera al agregar una variante
+ * (individual o por matriz) mientras el usuario no ha guardado todavía
+ * usan VAR-<timestamp>-<random> -- nunca calzan este patrón. Mismo
+ * criterio ya usado por ProductsView.tsx al armar el payload de
+ * products.save; se reutiliza aquí (no se inventa un segundo criterio)
+ * para decidir si una variante ya existe en Sheets o es nueva en esta
+ * sesión del formulario. */
+function isRealVariantId(id: string | undefined | null): boolean {
+  return !!id && /^VAR-\d+$/.test(String(id));
+}
+
 interface ProductFormModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -68,6 +100,14 @@ interface ProductFormModalProps {
     codigoBarras?: string;
     tieneVariantes?: boolean;
     variantes: ProductVariant[];
+    // FASE (corrección definitiva de variantes -- guardado individual,
+    // Parte 6): ids reales (VAR-000123) de variantes que el usuario
+    // eliminó explícitamente en esta sesión del formulario (botón de
+    // basurero sobre una variante YA guardada). Nunca incluye ids
+    // temporales de variantes nuevas todavía no guardadas -- esas
+    // simplemente se quitan de `variantes` sin necesidad de avisar al
+    // backend, porque nunca llegaron a existir en Sheets.
+    deletedVariantIds?: string[];
   }) => void;
 }
 
@@ -95,6 +135,21 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
   const [stockMinimo, setStockMinimo] = useState<number | string>(5);
   const [imagenUrl, setImagenUrl] = useState('');
   const [variantes, setVariantes] = useState<ProductVariant[]>([]);
+  // FASE (corrección definitiva de variantes -- guardado individual,
+  // Parte 6/11): ids reales de variantes YA guardadas que el usuario
+  // eliminó en esta sesión del formulario -- se envían al backend junto
+  // con `variantes` para que products.save las marque INACTIVO (nunca
+  // borrado físico, ver ProductsController.gs). Se reinicia cada vez que
+  // el modal se abre (ver useEffect de abajo).
+  const [deletedVariantIds, setDeletedVariantIds] = useState<string[]>([]);
+  // Estado del formulario inline "+ Agregar variante" (Parte 3/12): alta
+  // de UNA sola combinación sin generar ninguna otra -- independiente de
+  // "Generar Combinaciones".
+  const [isAddingSingleVariant, setIsAddingSingleVariant] = useState(false);
+  const [newVariantTalla, setNewVariantTalla] = useState('');
+  const [newVariantColor, setNewVariantColor] = useState('');
+  const [newVariantCodigo, setNewVariantCodigo] = useState('');
+  const [newVariantStock, setNewVariantStock] = useState<number | string>(0);
 
   // FASE (normalización comercial -- variantes opcionales): por defecto
   // OFF para productos nuevos (Parte 6 de la fase). `stockSimple` solo
@@ -179,6 +234,17 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
     // se resetea explícitamente para que un guardado sin tocar la foto
     // nunca dispare una subida a Drive innecesaria.
     setSelectedImageFile(null);
+
+    // FASE (corrección definitiva de variantes -- guardado individual):
+    // ninguna eliminación ni formulario de alta individual pendiente
+    // sobrevive a cerrar/reabrir el modal -- se reinicia siempre, tanto
+    // para "editar" como para "nuevo producto".
+    setDeletedVariantIds([]);
+    setIsAddingSingleVariant(false);
+    setNewVariantTalla('');
+    setNewVariantColor('');
+    setNewVariantCodigo('');
+    setNewVariantStock(0);
 
     if (editingProduct) {
       setNombre(editingProduct.nombre || '');
@@ -583,13 +649,22 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
   // ==========================================
   // MATRIX COMBINATION GENERATOR (TALLA × COLOR)
   // ==========================================
+  // FASE (corrección definitiva de variantes -- guardado individual, Parte
+  // 4/13): "Generar Combinaciones" es una herramienta EXPLÍCITAMENTE
+  // OPCIONAL y ahora es puramente ADITIVA -- nunca reemplaza el arreglo
+  // completo de variantes (`setVariantes(newVars)` como antes), porque eso
+  // borraba silenciosamente cualquier variante agregada individualmente
+  // (Parte 3) o generada en una tanda anterior con otra selección de
+  // tallas/colores si no formaba parte del cruce actual. Ahora:
+  //   1. Cualquier variante YA presente (sin importar cómo se creó) cuya
+  //      combinación talla/color no está en el cruce seleccionado se deja
+  //      exactamente igual.
+  //   2. Cualquier combinación del cruce que YA existe (comparada con
+  //      `getVariantKey`, robusta a mayúsculas/espacios -- FASE 9 +
+  //      normalización de esta fase) se deja intacta: nunca se duplica, y
+  //      nunca se le resetea el stock ni el código (Parte 9/13).
+  //   3. Solo las combinaciones del cruce que NO existen todavía se crean.
   const handleGenerateMatrix = () => {
-    // FASE 9: normaliza (trim / number->string), descarta valores vacíos y
-    // elimina duplicados ANTES de validar y generar -- nunca se itera
-    // directamente sobre `selectedSizes`/`selectedColors` crudos (ver
-    // normalizeVariantOptionName arriba). Esto es lo que corrige de raíz
-    // el TypeError `s.trim is not a function`: `s`/`c` ya son siempre
-    // strings limpios en este punto, nunca el valor original sin normalizar.
     const cleanSizes: string[] = Array.from(
       new Set(selectedSizes.map((s) => normalizeVariantOptionName(s)).filter((s): s is string => s !== ''))
     );
@@ -611,49 +686,63 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
     const numBulkStock = typeof bulkStockVal === 'number' ? bulkStockVal : parseInt(bulkStockVal, 10);
     const initialStock = Number.isFinite(numBulkStock) && numBulkStock >= 0 ? numBulkStock : 6;
 
-    const newVars: ProductVariant[] = [];
+    const existingByKey = new Map<string, ProductVariant>();
+    (variantes || []).forEach((v) => existingByKey.set(getVariantKey(v.talla, v.color), v));
+
+    const merged: ProductVariant[] = [...(variantes || [])];
+    let createdCount = 0;
+    let keptCount = 0;
+
     cleanSizes.forEach((cleanSize) => {
       cleanColors.forEach((cleanColor) => {
-        const cleanSizeCode = cleanSize.replace(/[^a-zA-Z0-9]/g, '').toUpperCase() || 'SZ';
-        const cleanColorCode = cleanColor.replace(/[^a-zA-Z0-9]/g, '').substring(0, 3).toUpperCase() || 'COL';
-
-        // Preserve stock and barcodes if this combination already existed
-        const existing = (variantes || []).find((v) => v.talla === cleanSize && v.color === cleanColor);
+        const key = getVariantKey(cleanSize, cleanColor);
+        const existing = existingByKey.get(key);
 
         if (existing) {
-          newVars.push({
-            ...existing,
-            codigoBarras:
-              existing.codigoBarras ||
-              (enableVariantBarcodes
-                ? `746${Math.floor(100000000 + Math.random() * 900000000)}`
-                : codigoBarras.trim() || `746${Math.floor(100000000 + Math.random() * 900000000)}`),
-            costo: numCosto || existing.costo,
-            precio: numPrecio || existing.precio,
-          });
-        } else {
-          const variantBarcode = enableVariantBarcodes
-            ? `746${Math.floor(100000000 + Math.random() * 900000000)}`
-            : codigoBarras.trim() || `746${Math.floor(100000000 + Math.random() * 900000000)}`;
-
-          newVars.push({
-            id: `VAR-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-            productoId: editingProduct?.id || '',
-            talla: cleanSize,
-            color: cleanColor,
-            sku: `ZIO-${cleanSizeCode}-${cleanColorCode}`,
-            codigoBarras: variantBarcode,
-            stock: initialStock,
-            precio: numPrecio,
-            costo: numCosto,
-            estado: 'ACTIVO',
-          });
+          // Ya existe (individual o de una generación previa): se
+          // conserva tal cual -- nunca se toca su stock/código (Parte 9/10).
+          keptCount++;
+          return;
         }
+
+        const cleanSizeCode = cleanSize.replace(/[^a-zA-Z0-9]/g, '').toUpperCase() || 'SZ';
+        const cleanColorCode = cleanColor.replace(/[^a-zA-Z0-9]/g, '').substring(0, 3).toUpperCase() || 'COL';
+        const variantBarcode = enableVariantBarcodes
+          ? `746${Math.floor(100000000 + Math.random() * 900000000)}`
+          : codigoBarras.trim() || `746${Math.floor(100000000 + Math.random() * 900000000)}`;
+
+        const created: ProductVariant = {
+          id: `VAR-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+          productoId: editingProduct?.id || '',
+          talla: cleanSize,
+          color: cleanColor,
+          sku: `ZIO-${cleanSizeCode}-${cleanColorCode}`,
+          codigoBarras: variantBarcode,
+          stock: initialStock,
+          precio: numPrecio,
+          costo: numCosto,
+          estado: 'ACTIVO',
+        };
+        merged.push(created);
+        existingByKey.set(key, created); // evita crear un segundo duplicado si el cruce repite la combinación
+        createdCount++;
       });
     });
 
-    setVariantes(newVars);
-    showToast('Combinaciones Generadas', `Se generaron ${newVars.length} variantes (${cleanSizes.length} tallas × ${cleanColors.length} colores)`, 'exito');
+    setVariantes(merged);
+    if (createdCount === 0) {
+      showToast(
+        'Sin Combinaciones Nuevas',
+        `Las ${keptCount} combinaciones seleccionadas ya existían -- no se creó ninguna variante duplicada.`,
+        'informacion'
+      );
+    } else {
+      showToast(
+        'Combinaciones Generadas',
+        `Se crearon ${createdCount} variante(s) nueva(s)${keptCount > 0 ? ` (${keptCount} ya existían y se conservaron sin cambios)` : ''}.`,
+        'exito'
+      );
+    }
   };
 
   const handleApplyBulkStock = () => {
@@ -667,10 +756,110 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
   };
 
   const handleClearAllVariants = () => {
+    // FASE (corrección definitiva de variantes -- guardado individual,
+    // Parte 6/11): "Vaciar Todas" no solo debe limpiar la tabla en
+    // pantalla -- cualquier variante que YA existía en Sheets (id real)
+    // debe marcarse para eliminación (soft-delete) igual que si el
+    // usuario hubiera pulsado el basurero de cada una; de lo contrario
+    // el backend nunca se entera y esas filas quedan ACTIVAS para
+    // siempre, aunque hayan desaparecido de este formulario.
+    setDeletedVariantIds((prev) => {
+      const realIds = variantes.filter((v) => isRealVariantId(v.id)).map((v) => v.id);
+      return Array.from(new Set([...prev, ...realIds]));
+    });
     setVariantes([]);
     setSelectedSizes([]);
     setSelectedColors([]);
     showToast('Variantes Vaciadas', 'Se eliminaron todas las combinaciones generadas de este producto.', 'informacion');
+  };
+
+  // ==========================================
+  // ALTA INDIVIDUAL DE UNA VARIANTE ("+ Agregar variante", Parte 3/12)
+  // ==========================================
+  // Independiente de "Generar Combinaciones": agrega EXACTAMENTE una
+  // combinación talla/color sin generar ninguna otra. Esta es la
+  // funcionalidad central pedida por la fase -- un producto con S+Negro y
+  // M+Negro debe poder recibir L+Blanco sin que se fuerce la matriz
+  // completa S+Negro/S+Blanco/M+Negro/M+Blanco/L+Negro/L+Blanco.
+  const handleAddSingleVariant = () => {
+    const cleanTalla = normalizeVariantOptionName(newVariantTalla);
+    const cleanColor = normalizeVariantOptionName(newVariantColor);
+
+    if (!cleanTalla) {
+      showToast('Talla Requerida', 'Seleccione o escriba la talla de la nueva variante.', 'error');
+      return;
+    }
+    if (!cleanColor) {
+      showToast('Color Requerido', 'Seleccione o escriba el color de la nueva variante.', 'error');
+      return;
+    }
+
+    // Parte 5: nunca debe llegar a existir una combinación duplicada --
+    // se valida contra TODAS las variantes actuales (existentes + nuevas
+    // agregadas en esta misma sesión), usando la misma clave normalizada
+    // que el resto del flujo.
+    const key = getVariantKey(cleanTalla, cleanColor);
+    const collision = (variantes || []).find((v) => getVariantKey(v.talla, v.color) === key);
+    if (collision) {
+      // Identifica la combinación con la grafía YA guardada (la de
+      // `collision`), no con lo que el usuario acaba de teclear -- así el
+      // mensaje siempre coincide con lo que se ve en la tabla, sin
+      // importar mayúsculas/espacios distintos que haya tecleado esta vez.
+      showToast('Variante Duplicada', `Ya existe la variante ${collision.talla} / ${collision.color}.`, 'error');
+      return;
+    }
+
+    const numCosto = typeof costo === 'number' ? costo : parseFloat(costo) || 0;
+    const numPrecio = typeof precio === 'number' ? precio : parseFloat(precio) || 0;
+    const numStock = typeof newVariantStock === 'number' ? newVariantStock : parseInt(String(newVariantStock), 10);
+    const initialStock = Number.isFinite(numStock) && numStock >= 0 ? numStock : 0;
+
+    const cleanSizeCode = cleanTalla.replace(/[^a-zA-Z0-9]/g, '').toUpperCase() || 'SZ';
+    const cleanColorCode = cleanColor.replace(/[^a-zA-Z0-9]/g, '').substring(0, 3).toUpperCase() || 'COL';
+    const manualCode = newVariantCodigo.trim();
+    const variantBarcode =
+      manualCode ||
+      (enableVariantBarcodes
+        ? `746${Math.floor(100000000 + Math.random() * 900000000)}`
+        : codigoBarras.trim() || `746${Math.floor(100000000 + Math.random() * 900000000)}`);
+
+    const created: ProductVariant = {
+      id: `VAR-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      productoId: editingProduct?.id || '',
+      talla: cleanTalla,
+      color: cleanColor,
+      sku: `ZIO-${cleanSizeCode}-${cleanColorCode}`,
+      codigoBarras: variantBarcode,
+      stock: initialStock,
+      precio: numPrecio,
+      costo: numCosto,
+      estado: 'ACTIVO',
+    };
+
+    setVariantes((prev) => [...prev, created]);
+    setNewVariantTalla('');
+    setNewVariantColor('');
+    setNewVariantCodigo('');
+    setNewVariantStock(0);
+    setIsAddingSingleVariant(false);
+    showToast('Variante Agregada', `Se agregó ${cleanTalla} / ${cleanColor} sin afectar las demás combinaciones.`, 'exito');
+  };
+
+  // FASE (corrección definitiva de variantes -- guardado individual,
+  // Parte 11): eliminar una variante desde este formulario ya NO es un
+  // simple `filter` sobre el estado local -- si la variante tiene un id
+  // real (ya existe en Sheets), su id se agrega a `deletedVariantIds`
+  // para que products.save la marque INACTIVO (soft-delete, preserva
+  // Kardex/Ventas/Devoluciones que la referencian). Si es una variante
+  // nueva de esta misma sesión (id temporal, nunca llegó a Sheets),
+  // simplemente se quita del estado local -- no hay nada que avisarle al
+  // backend.
+  const handleRemoveVariant = (idx: number) => {
+    const target = variantes[idx];
+    if (target && isRealVariantId(target.id)) {
+      setDeletedVariantIds((prev) => (prev.includes(target.id) ? prev : [...prev, target.id]));
+    }
+    setVariantes((prev) => prev.filter((_, i) => i !== idx));
   };
 
   // ==========================================
@@ -706,6 +895,31 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
     if (tieneVariantes && (variantes || []).length === 0) {
       showToast('Variantes Requeridas', 'Debe generar al menos 1 combinación de talla y color pulsando "+ Generar Combinaciones".', 'error');
       return;
+    }
+
+    // FASE (corrección definitiva de variantes -- guardado individual,
+    // Parte 5): antes de guardar, NINGUNA combinación talla/color puede
+    // repetirse -- se valida aquí con la misma clave normalizada que usan
+    // la matriz y el alta individual, y se identifica exactamente cuál
+    // combinación está duplicada en el mensaje (nunca un error genérico).
+    // El backend vuelve a validar esto por su cuenta (Parte 14) -- esta
+    // validación del frontend es solo para dar una respuesta inmediata
+    // sin gastar una llamada de red.
+    if (tieneVariantes) {
+      const seenKeys = new Map<string, string>();
+      for (const v of variantes) {
+        const key = getVariantKey(v.talla, v.color);
+        if (seenKeys.has(key)) {
+          const [t, c] = key.split('|');
+          showToast(
+            'Variante Duplicada',
+            `Ya existe la variante ${normalizeVariantOptionName(v.talla) || t} / ${normalizeVariantOptionName(v.color) || c}.`,
+            'error'
+          );
+          return;
+        }
+        seenKeys.set(key, v.id);
+      }
     }
 
     let numStockSimple = 0;
@@ -788,6 +1002,12 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
     onSave({
       nombre: nombre.trim(),
       codigoBarras: finalMainBarcode,
+      // FASE (corrección definitiva de variantes -- guardado individual,
+      // Parte 6/11): variantes con id real que el usuario eliminó en esta
+      // sesión -- ver handleRemoveVariant/handleClearAllVariants. Siempre
+      // se envía (incluso vacío) para que ProductsView/productsApi tengan
+      // un contrato estable.
+      deletedVariantIds,
       descripcion: descripcion.trim(),
       categoriaId: categoriaId || categories[0]?.id || '',
       marca: marca.trim() || 'ZIO',
@@ -1259,16 +1479,126 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
                   <span>{showCatalogManager ? 'Ocultar Edición' : 'Editar Catálogo'}</span>
                 </button>
 
+                {/* Parte 3/12: alta individual -- SIEMPRE visible e
+                    independiente de "Generar Combinaciones". Nunca exige
+                    seleccionar tallas/colores primero. */}
+                <button
+                  type="button"
+                  onClick={() => setIsAddingSingleVariant((prev) => !prev)}
+                  className={`px-3.5 py-1.5 rounded-xl border text-[11px] font-bold flex items-center gap-1.5 transition cursor-pointer ${
+                    isAddingSingleVariant
+                      ? 'bg-[#2F2A25] text-white border-[#2F2A25]'
+                      : 'bg-white text-[#2F2A25] border-[#E4DDD2] hover:bg-[#F0EAE1]'
+                  }`}
+                  title="Agregar una única combinación de talla y color, sin generar ninguna otra"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>+ Agregar Variante</span>
+                </button>
+
                 <button
                   type="button"
                   onClick={handleGenerateMatrix}
                   className="px-3.5 py-1.5 rounded-xl bg-[#C2410C] hover:bg-[#9A3412] text-white font-bold text-[11px] shadow-sm flex items-center gap-1.5 transition cursor-pointer"
+                  title="Herramienta opcional: genera todas las combinaciones talla × color que aún no existan"
                 >
                   <Sparkles className="w-3.5 h-3.5" />
-                  <span>+ Generar Combinaciones ({potentialCombinationsCount})</span>
+                  <span>Generar Combinaciones ({potentialCombinationsCount})</span>
                 </button>
               </div>
             </div>
+
+            {/* Parte 3/12: formulario inline de alta individual -- Talla /
+                Color / Código (opcional) / Stock inicial. No depende de
+                `selectedSizes`/`selectedColors` ni de la matriz. */}
+            {isAddingSingleVariant && (
+              <div className="p-3 bg-[#FAF8F4] rounded-xl border border-[#D5CCC0] space-y-2.5">
+                <span className="font-bold text-[11px] text-[#2F2A25] uppercase tracking-wide flex items-center gap-1.5">
+                  <Plus className="w-3.5 h-3.5 text-[#C2410C]" />
+                  Agregar Una Variante Individual
+                </span>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  <div>
+                    <label className="block text-[10px] font-bold text-[#756E65] mb-1 uppercase">Talla</label>
+                    <input
+                      type="text"
+                      list="product-form-single-variant-sizes"
+                      value={newVariantTalla}
+                      onChange={(e) => setNewVariantTalla(e.target.value)}
+                      placeholder="Ej. S, 38..."
+                      className="w-full px-2.5 py-1.5 rounded-lg border border-[#E4DDD2] bg-white text-xs font-semibold"
+                    />
+                    <datalist id="product-form-single-variant-sizes">
+                      {availableSizes.map((sz) => (
+                        <option key={sz.id} value={sz.nombre} />
+                      ))}
+                    </datalist>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-[#756E65] mb-1 uppercase">Color</label>
+                    <input
+                      type="text"
+                      list="product-form-single-variant-colors"
+                      value={newVariantColor}
+                      onChange={(e) => setNewVariantColor(e.target.value)}
+                      placeholder="Ej. Negro..."
+                      className="w-full px-2.5 py-1.5 rounded-lg border border-[#E4DDD2] bg-white text-xs font-semibold"
+                    />
+                    <datalist id="product-form-single-variant-colors">
+                      {availableColors.map((col) => (
+                        <option key={col.id} value={col.nombre} />
+                      ))}
+                    </datalist>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-[#756E65] mb-1 uppercase">Código (opcional)</label>
+                    <input
+                      type="text"
+                      value={newVariantCodigo}
+                      onChange={(e) => setNewVariantCodigo(e.target.value)}
+                      placeholder="Se genera si se deja vacío"
+                      className="w-full px-2.5 py-1.5 rounded-lg border border-[#E4DDD2] bg-white text-xs font-mono font-semibold"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-[#756E65] mb-1 uppercase">Stock Inicial</label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="1"
+                      inputMode="numeric"
+                      value={newVariantStock === '' ? '' : newVariantStock}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        if (val === '') setNewVariantStock('');
+                        else {
+                          const num = parseInt(val, 10);
+                          setNewVariantStock(isNaN(num) ? '' : val);
+                        }
+                      }}
+                      className="w-full px-2.5 py-1.5 rounded-lg border border-[#E4DDD2] bg-white text-xs font-bold text-center"
+                    />
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 justify-end">
+                  <button
+                    type="button"
+                    onClick={() => setIsAddingSingleVariant(false)}
+                    className="px-3 py-1.5 rounded-lg text-[11px] font-bold text-[#756E65] hover:text-[#2F2A25] cursor-pointer"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleAddSingleVariant}
+                    className="px-3.5 py-1.5 rounded-lg bg-[#2F2A25] text-white font-bold text-[11px] hover:bg-[#403932] transition cursor-pointer flex items-center gap-1.5"
+                  >
+                    <Check className="w-3.5 h-3.5" />
+                    <span>Agregar Esta Variante</span>
+                  </button>
+                </div>
+              </div>
+            )}
 
             {/* SELECCIÓN DE TALLAS (ESTABLE, SIN JITTER) */}
             <div className="space-y-2">
@@ -1695,15 +2025,30 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
                 <button
                   type="button"
                   onClick={() => {
+                    // FASE (corrección definitiva de variantes -- guardado
+                    // individual, Parte 10): "Generar para todas" solo debe
+                    // completar el código de las variantes que TODAVÍA no
+                    // tienen uno -- antes sobrescribía incondicionalmente
+                    // el código de TODAS las variantes, incluidas las que
+                    // ya tenían uno real guardado (destruía códigos
+                    // existentes cada vez que se pulsaba). Mismo criterio
+                    // ya usado al activar el checkbox de arriba.
+                    let filled = 0;
                     setVariantes((prev) =>
-                      prev.map((v) => ({
-                        ...v,
-                        codigoBarras: `746${Math.floor(100000000 + Math.random() * 900000000)}`,
-                      }))
+                      prev.map((v) => {
+                        if (v.codigoBarras && v.codigoBarras.trim() !== '') return v;
+                        filled++;
+                        return { ...v, codigoBarras: `746${Math.floor(100000000 + Math.random() * 900000000)}` };
+                      })
                     );
-                    showToast('Códigos Únicos Generados', 'Se asignó un código único a cada combinación.', 'exito');
+                    if (filled === 0) {
+                      showToast('Nada Que Generar', 'Todas las combinaciones ya tienen un código asignado.', 'informacion');
+                    } else {
+                      showToast('Códigos Generados', `Se asignó código a ${filled} combinación(es) que no tenían uno. Los códigos existentes no se modificaron.`, 'exito');
+                    }
                   }}
                   className="px-2.5 py-1 rounded-xl bg-white border border-[#E4DDD2] text-[10px] font-bold text-[#C2410C] hover:bg-[#F6F1E8] transition cursor-pointer flex items-center gap-1 self-start sm:self-auto shadow-2xs"
+                  title="Genera un código solo para las combinaciones que aún no tienen uno -- nunca reemplaza códigos ya existentes"
                 >
                   <Sparkles className="w-3 h-3" />
                   <span>Generar para todas</span>
@@ -1777,6 +2122,7 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
                         <th className="py-2 px-3">SKU Generado</th>
                         {enableVariantBarcodes && <th className="py-2 px-3">Código / Serial / IMEI</th>}
                         <th className="py-2 px-3 text-center">Stock Inicial</th>
+                        <th className="py-2 px-3 text-center">Estado</th>
                         <th className="py-2 px-3 text-center">Acción</th>
                       </tr>
                     </thead>
@@ -1855,9 +2201,25 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
                               />
                             </td>
                             <td className="py-2 px-3 text-center">
+                              {/* Parte 12: distingue visualmente una
+                                  variante ya guardada en Sheets de una
+                                  nueva de esta sesión -- mismo criterio
+                                  (isRealVariantId) que decide cómo se
+                                  procesa al guardar. */}
+                              {isRealVariantId(v.id) ? (
+                                <span className="inline-block px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-200">
+                                  Guardada
+                                </span>
+                              ) : (
+                                <span className="inline-block px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-50 text-amber-800 border border-amber-200">
+                                  Nueva
+                                </span>
+                              )}
+                            </td>
+                            <td className="py-2 px-3 text-center">
                               <button
                                 type="button"
-                                onClick={() => setVariantes((prev) => prev.filter((_, i) => i !== idx))}
+                                onClick={() => handleRemoveVariant(idx)}
                                 className="text-rose-600 hover:text-rose-800 font-semibold text-[11px] p-1 rounded hover:bg-rose-50 transition cursor-pointer"
                                 title="Eliminar combinación"
                               >
@@ -1877,7 +2239,7 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
                     No hay combinaciones generadas
                   </p>
                   <p className="text-[10px] max-w-sm mx-auto">
-                    Seleccione las tallas y colores arriba y pulse el botón naranja <strong>"+ Generar Combinaciones"</strong> para poblar la matriz de stock.
+                    Use <strong>"+ Agregar Variante"</strong> para dar de alta una sola combinación, o seleccione tallas y colores arriba y pulse el botón naranja <strong>"Generar Combinaciones"</strong> para crear varias a la vez.
                   </p>
                   <button
                     type="button"

@@ -18,8 +18,14 @@ export const VariantSelectorModal: React.FC<VariantSelectorModalProps> = ({
 }) => {
   if (!product) return null;
 
-  // Extract available unique colors and sizes from variants
-  const variantsList = product.variantes || [];
+  // FASE (corrección definitiva de variantes -- guardado individual,
+  // Parte 11): una variante eliminada desde ProductFormModal ahora se
+  // marca INACTIVO en el backend (soft-delete, nunca se borra físicamente
+  // -- preserva Kardex/Ventas/Devoluciones ya vinculados a ella). Sin este
+  // filtro, ese "borrado" era solo visual en el formulario de edición: la
+  // variante seguía apareciendo aquí, seleccionable y vendible en el POS,
+  // exactamente como si nunca se hubiera eliminado.
+  const variantsList = (product.variantes || []).filter((v) => v.estado === 'ACTIVO');
   const availableColors = Array.from(new Set(variantsList.map((v) => v.color)));
   const availableSizes = Array.from(new Set(variantsList.map((v) => v.talla)));
 
@@ -127,7 +133,7 @@ export const VariantSelectorModal: React.FC<VariantSelectorModalProps> = ({
               {availableSizes.map((size) => {
                 const isSelected = selectedSize === size;
                 // Check variant stock for this size and current selected color
-                const v = (product.variantes || []).find((item) => item.color === selectedColor && item.talla === size);
+                const v = variantsList.find((item) => item.color === selectedColor && item.talla === size);
                 const sCount = v ? v.stock : 0;
 
                 return (

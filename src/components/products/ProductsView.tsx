@@ -123,6 +123,7 @@ export const ProductsView: React.FC = () => {
     codigoBarras?: string;
     tieneVariantes?: boolean;
     variantes: any[];
+    deletedVariantIds?: string[];
   }) => {
     setSaving(true);
     const res = await productsApi.save({
@@ -137,6 +138,11 @@ export const ProductsView: React.FC = () => {
       imagenUrl: productData.imagenUrl,
       stockMinimo: productData.stockMinimo,
       tieneVariantes: productData.tieneVariantes,
+      // FASE (corrección definitiva de variantes -- guardado individual,
+      // Parte 6/11): ids reales de variantes eliminadas explícitamente en
+      // el formulario -- ProductsController.gs las marca INACTIVO
+      // (soft-delete, nunca borrado físico).
+      deletedVariantIds: Array.isArray(productData.deletedVariantIds) ? productData.deletedVariantIds : [],
       variantes: productData.variantes.map((v) => ({
         // Solo se envía el id si tiene el formato real emitido por el
         // backend (VAR-000001, ver Sequences.gs). Los ids temporales que
