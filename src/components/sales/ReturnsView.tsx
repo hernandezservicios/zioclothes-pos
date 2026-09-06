@@ -171,7 +171,7 @@ export const ReturnsView: React.FC = () => {
             Servicio al Cliente & Garantías
           </span>
           <h1 className="text-2xl font-serif font-bold text-[#2F2A25]">
-            Devoluciones y Cambios de Ropa
+            Devoluciones y Cambios
           </h1>
         </div>
         <button
@@ -291,7 +291,7 @@ export const ReturnsView: React.FC = () => {
               {/* Select Item */}
               <div>
                 <label className="block text-xs font-bold text-[#2F2A25] mb-1.5 uppercase">
-                  Seleccionar Prenda a Devolver:
+                  Seleccionar Producto a Devolver:
                 </label>
                 <select
                   value={selectedVariantId}
@@ -420,7 +420,7 @@ export const ReturnsView: React.FC = () => {
                 <th className="py-2.5 px-4"># Devolución</th>
                 <th className="py-2.5 px-4"># Venta</th>
                 <th className="py-2.5 px-4">Cliente</th>
-                <th className="py-2.5 px-4">Prenda Reingresada</th>
+                <th className="py-2.5 px-4">Producto Reingresado</th>
                 <th className="py-2.5 px-4">Motivo</th>
                 <th className="py-2.5 px-4 text-right">Monto</th>
                 <th className="py-2.5 px-4">Reembolso</th>

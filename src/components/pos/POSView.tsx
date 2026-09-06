@@ -246,7 +246,7 @@ export const POSView: React.FC = () => {
         const v = prodVariants[0];
         if (v.stock <= 0) {
           sounds.playError();
-          showToast('Prenda Agotada', `Sin existencias para ${singleProd.nombre}`, 'error');
+          showToast('Producto Agotado', `Sin existencias para ${singleProd.nombre}`, 'error');
         } else {
           handleAddToCart(singleProd, v, 1);
           sounds.playBeep();
@@ -548,7 +548,7 @@ export const POSView: React.FC = () => {
                 : 'bg-white text-[#2F2A25] border border-[#E4DDD2] hover:bg-[#F6F1E8]'
             }`}
           >
-            Todas las Prendas
+            Todos los Productos
           </button>
           {categories.map((cat) => (
             <button
@@ -712,7 +712,7 @@ export const POSView: React.FC = () => {
         <div className="flex-1 overflow-y-auto p-4 space-y-2.5">
           <div className="flex items-center justify-between pb-1 border-b border-[#E4DDD2]">
             <span className="text-xs font-bold text-[#2F2A25]">
-              Prendas en Orden ({(cartItems || []).reduce((acc, i) => acc + i.cantidad, 0)})
+              Productos en Orden ({(cartItems || []).reduce((acc, i) => acc + i.cantidad, 0)})
             </span>
             {(cartItems || []).length > 0 && (
               <button
@@ -762,7 +762,7 @@ export const POSView: React.FC = () => {
                 <div className="bg-white/70 p-1.5 rounded-xl border border-[#E4DDD2]/80 flex items-center justify-between gap-2 text-[10px]">
                   <span className="text-[#756E65] font-semibold flex items-center gap-1">
                     <Percent className="w-3 h-3 text-[#C2410C]" />
-                    <span>Desc. Prenda:</span>
+                    <span>Desc. Producto:</span>
                   </span>
 
                   <div className="flex items-center gap-1.5">

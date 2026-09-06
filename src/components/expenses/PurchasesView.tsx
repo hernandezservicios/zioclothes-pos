@@ -267,7 +267,7 @@ export const PurchasesView: React.FC = () => {
                 <th className="py-3 px-4"># Orden</th>
                 <th className="py-3 px-4">Fecha</th>
                 <th className="py-3 px-4">Proveedor</th>
-                <th className="py-3 px-4">Prendas Ingresadas</th>
+                <th className="py-3 px-4">Productos Ingresados</th>
                 <th className="py-3 px-4 text-center">Unidades</th>
                 <th className="py-3 px-4 text-right">Total Costo</th>
                 <th className="py-3 px-4">Forma de Pago</th>
@@ -343,7 +343,7 @@ export const PurchasesView: React.FC = () => {
               </div>
 
               <div>
-                <label className="block font-bold text-[#2F2A25] mb-1">Prenda a Ingresar:</label>
+                <label className="block font-bold text-[#2F2A25] mb-1">Producto a Ingresar:</label>
                 <select
                   value={selectedProductId}
                   onChange={(e) => {

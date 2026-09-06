@@ -197,7 +197,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
       ID_Movimiento: m.id,
       Fecha: m.fecha,
       Tipo: m.tipo,
-      Prenda: m.productoNombre,
+      Producto: m.productoNombre,
       Talla: m.talla,
       Color: m.color,
       SKU: m.sku,
@@ -367,7 +367,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
             <table className="w-full text-xs text-left">
               <thead className="bg-[#F6F1E8] text-[#2F2A25] border-b border-[#E4DDD2] uppercase text-[10px] tracking-wider font-bold">
                 <tr>
-                  <th className="py-3 px-4">Prenda</th>
+                  <th className="py-3 px-4">Producto</th>
                   <th className="py-3 px-4">SKU / Código</th>
                   <th className="py-3 px-4">Talla</th>
                   <th className="py-3 px-4">Color</th>
@@ -430,14 +430,14 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
         <div className="bg-white rounded-3xl border border-[#E4DDD2] overflow-hidden shadow-xs space-y-4 p-5">
           <div className="flex items-center gap-3 text-amber-900 font-bold text-sm">
             <AlertTriangle className="w-5 h-5 text-amber-600" />
-            <span>Prendas con Stock Crítico o Agotado</span>
+            <span>Productos con Stock Crítico o Agotado</span>
           </div>
 
           <div className="overflow-x-auto">
             <table className="w-full text-xs text-left">
               <thead className="bg-[#FAF8F4] text-[#756E65] border-b border-[#E4DDD2] uppercase text-[10px]">
                 <tr>
-                  <th className="py-2.5 px-4">Prenda</th>
+                  <th className="py-2.5 px-4">Producto</th>
                   <th className="py-2.5 px-4">Variante (Talla / Color)</th>
                   <th className="py-2.5 px-4">SKU</th>
                   <th className="py-2.5 px-4 text-center">Stock Actual</th>
@@ -531,7 +531,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                   <tr>
                     <th className="py-3 px-4">Fecha & Hora</th>
                     <th className="py-3 px-4">Tipo</th>
-                    <th className="py-3 px-4">Prenda & Variante</th>
+                    <th className="py-3 px-4">Producto & Variante</th>
                     <th className="py-3 px-4 text-center">Cantidad</th>
                     <th className="py-3 px-4 text-center">Saldo Stock</th>
                     <th className="py-3 px-4">Motivo / Detalle</th>
@@ -612,7 +612,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
 
             <form onSubmit={handleSaveAdjustment} noValidate className="space-y-3 text-xs">
               <div>
-                <label className="block font-bold text-[#2F2A25] mb-1">Prenda:</label>
+                <label className="block font-bold text-[#2F2A25] mb-1">Producto:</label>
                 <select
                   value={selectedProductId}
                   onChange={(e) => {

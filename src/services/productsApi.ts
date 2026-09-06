@@ -65,6 +65,11 @@ export function mapProduct(raw: any): Product {
     stockMinimo: Number(raw.stockMinimo) || 0,
     estado: raw.estado || 'ACTIVO',
     imagenUrl: raw.imagenUrl || undefined,
+    // FASE (normalización comercial -- variantes opcionales): pasa tal
+    // cual (incluyendo `undefined` para productos guardados antes de esta
+    // fase) -- ProductFormModal decide cómo inferir el estado del
+    // checkbox cuando no viene definido, nunca se asume aquí.
+    tieneVariantes: raw.tieneVariantes,
     variantes: Array.isArray(raw.variantes) ? raw.variantes.map(mapVariant) : [],
     fechaCreacion: raw.creadoEn || '',
   };
@@ -124,6 +129,10 @@ class ProductsApi {
     costo?: number;
     imagenUrl?: string;
     stockMinimo?: number;
+    // FASE (normalización comercial -- variantes opcionales): se envía
+    // `data` tal cual a `products.save` -- el backend ya acepta cualquier
+    // clave nueva sin romper nada (mismo mecanismo genérico de siempre).
+    tieneVariantes?: boolean;
     variantes: Array<{
       id?: string;
       sku?: string;

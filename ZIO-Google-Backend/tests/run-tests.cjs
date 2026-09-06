@@ -2871,6 +2871,222 @@ test('SETTINGS_UPDATE_ABONO_RECEIPT_TEXTS_NEVER_AFFECT_SALES_RECEIPT_TEXTS', () 
   assertEqual(read.settings.pieTecnicoAbono, 'Pie Tecnico De Abono Nuevo');
 });
 
+/* ================================================================
+   PRODUCTS -- NORMALIZACIÓN COMERCIAL: variantes opcionales por
+   producto (tiene_variantes). El backend NO cambió su forma de guardar
+   stock/variantes -- sigue siendo exclusivamente Variantes.stock, sin
+   segunda fuente de verdad. Lo único nuevo es la columna informativa
+   `tiene_variantes` en Productos y que un producto "simple" ahora se
+   guarda con exactamente 1 variante implícita (talla/color vacíos ->
+   ProductsController.gs ya los completaba con 'U'/'Único' desde antes de
+   esta fase, comportamiento reutilizado tal cual).
+   ================================================================ */
+
+test('PRODUCT_SAVE_SIMPLE_NO_VARIANTS_CREATES_SINGLE_IMPLICIT_VARIANT', () => {
+  // CASO 1 (variantes OFF, código OFF -- se autogenera).
+  const res = doPostRaw('products.save', {
+    nombre: 'Cargador USB-C 25W', categoriaId: 'CAT-T01',
+    tieneVariantes: false,
+    variantes: [{ talla: '', color: '', stock: 20, costo: 700, precio: 1200, estado: 'ACTIVO' }],
+  }, adminToken);
+  assert(res.success === true, JSON.stringify(res));
+
+  const list = doPostRaw('products.list', {}, adminToken);
+  const prod = list.products.find(p => p.id === res.productId);
+  assert(!!prod, 'el producto debe aparecer en products.list');
+  assertEqual(prod.tieneVariantes, false, 'tieneVariantes debe persistir como false');
+  assertEqual(prod.variantes.length, 1, 'un producto simple debe tener exactamente 1 variante implícita');
+  assertEqual(prod.variantes[0].talla, 'U', 'sin talla especificada, debe usar el mismo centinela ya existente');
+  assertEqual(prod.variantes[0].color, 'Único', 'sin color especificado, debe usar el mismo centinela ya existente');
+  assertEqual(prod.variantes[0].stock, 20);
+  assertEqual(prod.totalStock, 20);
+});
+
+test('PRODUCT_SAVE_SIMPLE_WITH_CODE_SHARES_CODE_WITH_PRODUCT', () => {
+  // CASO 2 (variantes OFF, código ON) -- el código del producto y el de
+  // su única variante deben coincidir, para que una búsqueda/escaneo por
+  // ese código encuentre el producto sin importar por cuál campo se busque.
+  const res = doPostRaw('products.save', {
+    nombre: 'Cargador USB-C 25W (con código)', categoriaId: 'CAT-T01',
+    codigoBarras: '746624958111',
+    tieneVariantes: false,
+    variantes: [{ talla: '', color: '', codigoBarras: '746624958111', stock: 20, costo: 700, precio: 1200, estado: 'ACTIVO' }],
+  }, adminToken);
+  assert(res.success === true, JSON.stringify(res));
+
+  const list = doPostRaw('products.list', {}, adminToken);
+  const prod = list.products.find(p => p.id === res.productId);
+  assertEqual(prod.codigoBarras, '746624958111');
+  assertEqual(prod.variantes[0].codigoBarras, '746624958111', 'el código del producto y el de su variante implícita deben coincidir');
+});
+
+test('PRODUCT_SAVE_WITH_VARIANTS_TRUE_MULTIPLE_COMBINATIONS_UNAFFECTED', () => {
+  // CASO 3 (variantes ON, códigos compartidos OFF) -- el mecanismo de
+  // combinaciones existente sigue funcionando exactamente igual.
+  const res = doPostRaw('products.save', {
+    nombre: 'Camisa Oxford', categoriaId: 'CAT-T01',
+    tieneVariantes: true,
+    variantes: [
+      { talla: 'S', color: 'Negro', stock: 5, costo: 400, precio: 900, estado: 'ACTIVO' },
+      { talla: 'M', color: 'Negro', stock: 5, costo: 400, precio: 900, estado: 'ACTIVO' },
+      { talla: 'M', color: 'Blanco', stock: 5, costo: 400, precio: 900, estado: 'ACTIVO' },
+      { talla: 'L', color: 'Azul', stock: 5, costo: 400, precio: 900, estado: 'ACTIVO' },
+    ],
+  }, adminToken);
+  assert(res.success === true, JSON.stringify(res));
+
+  const list = doPostRaw('products.list', {}, adminToken);
+  const prod = list.products.find(p => p.id === res.productId);
+  assertEqual(prod.tieneVariantes, true);
+  assertEqual(prod.variantes.length, 4, 'las 4 combinaciones deben crearse tal cual, sin fusionarse ni perderse');
+  assertEqual(prod.totalStock, 20);
+});
+
+test('PRODUCT_SAVE_WITH_VARIANTS_AND_INDIVIDUAL_CODES_PRESERVED', () => {
+  // CASO 4 (variantes ON, códigos individuales ON).
+  const res = doPostRaw('products.save', {
+    nombre: 'Camisa Oxford (códigos individuales)', categoriaId: 'CAT-T01',
+    tieneVariantes: true,
+    variantes: [
+      { talla: 'M', color: 'Negro', codigoBarras: '74672206634', stock: 3, costo: 400, precio: 900, estado: 'ACTIVO' },
+      { talla: 'M', color: 'Beige', codigoBarras: '746729384102', stock: 3, costo: 400, precio: 900, estado: 'ACTIVO' },
+    ],
+  }, adminToken);
+  assert(res.success === true, JSON.stringify(res));
+
+  const list = doPostRaw('products.list', {}, adminToken);
+  const prod = list.products.find(p => p.id === res.productId);
+  const codes = prod.variantes.map(v => v.codigoBarras).sort();
+  assert(codes.indexOf('74672206634') !== -1 && codes.indexOf('746729384102') !== -1, 'cada variante debe conservar su propio código individual: ' + JSON.stringify(codes));
+});
+
+test('PRODUCT_INDEPENDENCE_VARIANTS_OFF_DOES_NOT_FORCE_CODE_OFF', () => {
+  // PASO 11: activar/desactivar variantes nunca debe forzar el estado del
+  // código -- ya probado arriba que variantes OFF + código ON funciona
+  // (PRODUCT_SAVE_SIMPLE_WITH_CODE_SHARES_CODE_WITH_PRODUCT). Aquí se
+  // confirma el inverso: variantes OFF + SIN código explícito (backend
+  // autogenera uno) -- no revienta ni exige nada relacionado a variantes.
+  const res = doPostRaw('products.save', {
+    nombre: 'Producto Simple Sin Codigo Explicito', categoriaId: 'CAT-T01',
+    tieneVariantes: false,
+    variantes: [{ talla: '', color: '', stock: 10, costo: 100, precio: 200, estado: 'ACTIVO' }],
+  }, adminToken);
+  assert(res.success === true, JSON.stringify(res));
+  const list = doPostRaw('products.list', {}, adminToken);
+  const prod = list.products.find(p => p.id === res.productId);
+  // El código a nivel de PRODUCTO solo se guarda si se envía explícitamente
+  // (comportamiento preexistente, sin cambios) -- pero la variante implícita
+  // sí recibe un código autogenerado, igual que cualquier variante sin
+  // codigoBarras explícito desde antes de esta fase.
+  assert(!!prod.variantes[0].codigoBarras, 'la variante implícita debe tener un código (autogenerado si no se envía uno), igual que cualquier variante');
+});
+
+test('PRODUCT_INDEPENDENCE_VARIANTS_ON_DOES_NOT_REQUIRE_CODES', () => {
+  const res = doPostRaw('products.save', {
+    nombre: 'Camisa Oxford Sin Codigos Individuales', categoriaId: 'CAT-T01',
+    tieneVariantes: true,
+    variantes: [
+      { talla: 'S', color: 'Negro', stock: 5, costo: 400, precio: 900, estado: 'ACTIVO' },
+      { talla: 'M', color: 'Negro', stock: 5, costo: 400, precio: 900, estado: 'ACTIVO' },
+    ],
+  }, adminToken);
+  assert(res.success === true, 'variantes ON no debe exigir códigos individuales por variante: ' + JSON.stringify(res));
+});
+
+test('PRODUCT_EXISTING_WITHOUT_TIENE_VARIANTES_COLUMN_RETURNS_UNDEFINED_NOT_FALSE', () => {
+  // Compatibilidad (Parte 12): simula un producto guardado ANTES de esta
+  // fase -- fila insertada directamente sin pasar por products.save, sin
+  // ningún valor en tiene_variantes (columna vacía, como quedaría en una
+  // instalación real que todavía no corrió esta fase en su Sheet).
+  runInContext(`
+    DbHelper.insertRow('Productos', {
+      id: 'PRD-LEGACY-01', sku: 'SKU-LEGACY-01', codigo_barras: '', nombre: 'Producto Legacy Pre-Fase',
+      descripcion: '', categoria_id: 'CAT-T01', categoria_nombre: 'Categoria Test', marca: 'ZIO',
+      proveedor_id: '', costo: 100, precio: 200, precio_especial: '', impuesto: 18,
+      descuento_maximo: 0, stock_minimo: 2, estado: 'ACTIVO', imagen_url: '', creado_en: getNowFormatted()
+    });
+    DbHelper.insertRow('Variantes', {
+      id: 'VAR-LEGACY-01', producto_id: 'PRD-LEGACY-01', sku: 'SKU-LEGACY-01-U', codigo_barras: '7460009999999',
+      color: 'Único', talla: 'U', costo: 100, precio: 200, stock: 15, estado: 'ACTIVO'
+    });
+  `);
+
+  const list = doPostRaw('products.list', {}, adminToken);
+  const prod = list.products.find(p => p.id === 'PRD-LEGACY-01');
+  assert(!!prod, 'el producto legacy debe seguir apareciendo en el catálogo');
+  assertEqual(prod.tieneVariantes, undefined, 'sin la columna nueva, debe llegar undefined -- nunca false a ciegas');
+  assertEqual(prod.variantes.length, 1);
+  assertEqual(prod.variantes[0].stock, 15, 'el stock existente no debe alterarse');
+});
+
+test('PRODUCT_SIMPLE_SALE_DEDUCTS_STOCK_CORRECTLY', () => {
+  // PASO 13/14/16: venta de un producto simple debe descontar stock
+  // exactamente igual que cualquier venta -- misma SalesController.gs,
+  // sin ninguna rama especial para "producto simple".
+  const createRes = doPostRaw('products.save', {
+    nombre: 'Producto Simple Para Venta', categoriaId: 'CAT-T01', impuesto: 0,
+    tieneVariantes: false,
+    variantes: [{ talla: '', color: '', stock: 10, costo: 100, precio: 200, estado: 'ACTIVO' }],
+  }, adminToken);
+  assert(createRes.success === true, JSON.stringify(createRes));
+
+  const list = doPostRaw('products.list', {}, adminToken);
+  const prod = list.products.find(p => p.id === createRes.productId);
+  const varianteId = prod.variantes[0].id;
+
+  const saleRes = doPostRaw('sales.create', buildValidSaleData({
+    items: [{
+      productoId: prod.id, varianteId, nombreProducto: prod.nombre, sku: prod.variantes[0].sku,
+      talla: 'U', color: 'Único', cantidad: 2, costoUnitario: 100, precioUnitario: 200,
+      descuentoPorcentaje: 0, descuentoMonto: 0, subtotal: 400, impuestoMonto: 0, total: 400
+    }],
+    subtotal: 400, descuentoTotal: 0, impuestoTotal: 0, total: 400, costoTotal: 200,
+    pagos: [{ metodo: 'EFECTIVO', monto: 400 }],
+  }), adminToken);
+  assert(saleRes.success === true, JSON.stringify(saleRes));
+
+  const variant = runInContext(`DbHelper.findById('Variantes', '${varianteId}')`);
+  assertEqual(Number(variant.stock), 8, 'el stock de la variante implícita debe descontarse igual que cualquier venta');
+});
+
+test('PRODUCT_SIMPLE_RETURN_RESTOCKS_CORRECTLY', () => {
+  // Devolución del mismo producto simple -- debe reingresar stock por el
+  // mismo mecanismo ya existente (ReturnsController.gs), sin caso especial.
+  const createRes = doPostRaw('products.save', {
+    nombre: 'Producto Simple Para Devolucion', categoriaId: 'CAT-T01', impuesto: 0,
+    tieneVariantes: false,
+    variantes: [{ talla: '', color: '', stock: 10, costo: 100, precio: 200, estado: 'ACTIVO' }],
+  }, adminToken);
+  const list = doPostRaw('products.list', {}, adminToken);
+  const prod = list.products.find(p => p.id === createRes.productId);
+  const varianteId = prod.variantes[0].id;
+
+  const saleRes = doPostRaw('sales.create', buildValidSaleData({
+    items: [{
+      productoId: prod.id, varianteId, nombreProducto: prod.nombre, sku: prod.variantes[0].sku,
+      talla: 'U', color: 'Único', cantidad: 3, costoUnitario: 100, precioUnitario: 200,
+      descuentoPorcentaje: 0, descuentoMonto: 0, subtotal: 600, impuestoMonto: 0, total: 600
+    }],
+    subtotal: 600, descuentoTotal: 0, impuestoTotal: 0, total: 600, costoTotal: 300,
+    pagos: [{ metodo: 'EFECTIVO', monto: 600 }],
+  }), adminToken);
+  assert(saleRes.success === true, JSON.stringify(saleRes));
+
+  const afterSale = runInContext(`DbHelper.findById('Variantes', '${varianteId}')`);
+  assertEqual(Number(afterSale.stock), 7);
+
+  const returnRes = doPostRaw('returns.create', {
+    ventaId: saleRes.saleId,
+    items: [{ varianteId, cantidad: 1 }],
+    motivo: 'Prueba de devolución de producto simple',
+    tipoReembolso: 'EFECTIVO',
+  }, adminToken);
+  assert(returnRes.success === true, JSON.stringify(returnRes));
+
+  const afterReturn = runInContext(`DbHelper.findById('Variantes', '${varianteId}')`);
+  assertEqual(Number(afterReturn.stock), 8, 'la devolución debe reingresar exactamente la cantidad devuelta');
+});
+
 /* ------------------------------------------------------------
    REPORTE
    ------------------------------------------------------------ */

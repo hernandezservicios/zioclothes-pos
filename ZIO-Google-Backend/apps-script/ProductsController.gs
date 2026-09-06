@@ -71,6 +71,16 @@ const ProductsController = {
         stockMinimo: Number(p.stock_minimo) || 5,
         estado: p.estado || 'ACTIVO',
         imagenUrl: p.imagen_url || '',
+        // FASE (normalización comercial -- variantes opcionales): columna
+        // nueva en Productos, puramente informativa para decidir qué UI
+        // mostrar en el formulario -- nunca afecta stock/Kardex/Ventas,
+        // que siguen operando exclusivamente sobre Variantes/variante_id
+        // sin ningún cambio. Filas guardadas ANTES de esta fase no tienen
+        // esta columna -- p.tiene_variantes llega '' (string vacío), así
+        // que se traduce a `undefined` (no `false`) para que el frontend
+        // pueda distinguir "nunca configurado" de "configurado como
+        // simple" y aplicar su propia inferencia de compatibilidad.
+        tieneVariantes: p.tiene_variantes === 'TRUE' ? true : (p.tiene_variantes === 'FALSE' ? false : undefined),
         creadoEn: p.creado_en,
         variantes: vars,
         totalStock: totalStock
@@ -190,6 +200,12 @@ const ProductsController = {
         stock_minimo: data.stockMinimo !== undefined ? Number(data.stockMinimo) : 5,
         estado: data.estado || 'ACTIVO',
         imagen_url: data.imagenUrl || '',
+        // FASE (normalización comercial -- variantes opcionales): se
+        // guarda tal cual lo que decidió el usuario en el formulario. Si
+        // no se envía (compatibilidad con integraciones antiguas), se deja
+        // como cadena vacía en vez de asumir TRUE/FALSE -- mismo criterio
+        // de "no inventar un valor" que ya se aplica a imagen_url/etc.
+        tiene_variantes: data.tieneVariantes === true ? 'TRUE' : (data.tieneVariantes === false ? 'FALSE' : ''),
         creado_en: data.creadoEn || getNowFormatted()
       };
 

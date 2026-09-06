@@ -13,7 +13,16 @@ const SCHEMAS = {
   Tallas: ['id', 'nombre', 'orden'],
   Colores: ['id', 'nombre', 'hex'],
   Proveedores: ['id', 'nombre', 'contacto', 'telefono', 'correo', 'rnc', 'direccion', 'estado'],
-  Productos: ['id', 'sku', 'codigo_barras', 'nombre', 'descripcion', 'categoria_id', 'categoria_nombre', 'marca', 'proveedor_id', 'costo', 'precio', 'precio_especial', 'impuesto', 'descuento_maximo', 'stock_minimo', 'estado', 'imagen_url', 'creado_en'],
+  // FASE (normalización comercial -- variantes opcionales): se agregó
+  // 'tiene_variantes' al final -- solo aplica a instalaciones NUEVAS
+  // (setupDatabase crea la hoja con estos headers desde cero). Una
+  // instalación YA EXISTENTE conserva sus columnas actuales tal cual
+  // están en su Google Sheet real; DbHelper.insertRow/updateRowById
+  // mapean por nombre de columna leído del propio Sheet, así que si esa
+  // columna todavía no existe ahí, el valor se ignora sin error -- nunca
+  // rompe nada, simplemente no persiste hasta que se agregue la columna
+  // manualmente (ver reporte).
+  Productos: ['id', 'sku', 'codigo_barras', 'nombre', 'descripcion', 'categoria_id', 'categoria_nombre', 'marca', 'proveedor_id', 'costo', 'precio', 'precio_especial', 'impuesto', 'descuento_maximo', 'stock_minimo', 'estado', 'imagen_url', 'creado_en', 'tiene_variantes'],
   Variantes: ['id', 'producto_id', 'sku', 'codigo_barras', 'color', 'talla', 'costo', 'precio', 'stock', 'estado'],
   Clientes: ['id', 'nombre', 'apellido', 'documento', 'telefono', 'correo', 'direccion', 'ciudad', 'limite_credito', 'dias_credito_por_defecto', 'notas', 'estado', 'creado_en'],
   Ventas: ['id', 'numero_venta', 'cliente_id', 'cliente_nombre', 'cliente_documento', 'vendedor_id', 'vendedor_nombre', 'caja_sesion_id', 'subtotal', 'descuento_total', 'impuesto_total', 'total', 'costo_total', 'metodo_pago', 'pagos_json', 'efectivo_recibido', 'cambio_entregado', 'es_credito', 'monto_financiado', 'cuenta_cobrar_id', 'estado', 'motivo_anulacion', 'anulada_por', 'fecha_anulacion', 'fecha'],

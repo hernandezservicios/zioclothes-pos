@@ -200,7 +200,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
           if (!map[item.productoId]) {
             const p = (products || []).find((pr) => pr && pr.id === item.productoId);
             map[item.productoId] = {
-              nombre: item.nombreProducto || 'Prenda',
+              nombre: item.nombreProducto || 'Producto',
               cantidad: 0,
               total: 0,
               imagenUrl: p?.imagenUrl,
@@ -256,7 +256,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
             Panel de Control Ejecutivo
           </span>
           <h1 className="text-2xl sm:text-3xl font-serif font-bold text-[#2F2A25] tracking-tight">
-            Resumen General ZIO CLOTHES
+            Resumen General del Negocio
           </h1>
         </div>
 
@@ -482,7 +482,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
           className="cursor-pointer p-4 rounded-2xl bg-white border border-[#E4DDD2] hover:border-[#2F2A25] transition flex flex-col justify-between shadow-2xs hover:shadow-sm"
         >
           <div className="flex items-center justify-between text-[#756E65]">
-            <span className="text-[11px] font-bold uppercase tracking-wider">Prendas</span>
+            <span className="text-[11px] font-bold uppercase tracking-wider">Productos</span>
             <ShoppingBag className="w-4 h-4 text-[#756E65]" />
           </div>
           <div className="mt-3">
@@ -697,7 +697,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
           <div className="flex items-center justify-between">
             <h3 className="text-sm font-bold text-[#2F2A25] flex items-center gap-2">
               <Sparkles className="w-4 h-4 text-[#C2410C]" />
-              <span>Prendas Más Vendidas</span>
+              <span>Productos Más Vendidos</span>
             </h3>
             <button
               type="button"

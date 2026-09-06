@@ -248,7 +248,7 @@ export const SalesView: React.FC = () => {
                 <th className="py-3 px-4"># Venta</th>
                 <th className="py-3 px-4">Fecha & Hora</th>
                 <th className="py-3 px-4">Cliente</th>
-                <th className="py-3 px-4">Prendas</th>
+                <th className="py-3 px-4">Productos</th>
                 <th className="py-3 px-4">Forma de Pago</th>
                 <th className="py-3 px-4 text-right">Total</th>
                 <th className="py-3 px-4 text-center">Estado</th>
@@ -385,7 +385,7 @@ export const SalesView: React.FC = () => {
 
               {/* Items List */}
               <div className="space-y-2">
-                <span className="font-bold text-[#2F2A25] uppercase text-[10px]">Prendas Facturadas:</span>
+                <span className="font-bold text-[#2F2A25] uppercase text-[10px]">Productos Facturados:</span>
                 {(selectedSaleDetail.items || []).map((it, idx) => (
                   <div
                     key={idx}

@@ -159,6 +159,17 @@ export interface Product {
   stockMinimo: number;
   estado: 'ACTIVO' | 'INACTIVO';
   imagenUrl?: string;
+  // FASE (normalización comercial -- variantes opcionales): indica si el
+  // usuario configuró este producto como "con variantes" desde el
+  // formulario. Persistido como columna nueva en la hoja `Productos`
+  // (`tiene_variantes`) -- NO cambia dónde vive el stock real (sigue
+  // siendo exclusivamente `Variantes.stock`, sin excepción) ni crea una
+  // segunda fuente de verdad; es solo el indicador de qué UI mostrar. Para
+  // productos guardados ANTES de esta fase (columna ausente), llega
+  // `undefined` -- el frontend infiere un valor razonable a partir de la
+  // cantidad/forma de `variantes` (ver ProductFormModal.tsx), nunca se
+  // asume `false` a ciegas.
+  tieneVariantes?: boolean;
   variantes: ProductVariant[];
   fechaCreacion: string;
   fechaModificacion?: string;

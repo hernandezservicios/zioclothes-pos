@@ -55,15 +55,22 @@ export const Sidebar: React.FC<SidebarProps> = ({
       title: 'Ventas & Clientes',
       items: [
         { id: 'sales', label: 'Historial de Ventas', icon: Receipt, permission: 'ventas.ver' },
-        { id: 'returns', label: 'Devoluciones de Prendas', icon: RotateCcw, permission: 'devoluciones.ver' },
-        { id: 'customers', label: 'Directorio de Clientes', icon: Users, permission: 'clientes.ver' },
+        // FASE (normalización comercial): "Devoluciones de Prendas" ->
+        // "Devoluciones" -- se conserva el `id` interno ('returns') para
+        // no romper la navegación/permisos, solo cambia la etiqueta visible.
+        { id: 'returns', label: 'Devoluciones', icon: RotateCcw, permission: 'devoluciones.ver' },
+        // "Notas de Crédito" NO se agrega aquí todavía -- esa pantalla no
+        // existe (ver auditoría en el reporte de esta fase). Agregarla
+        // ahora sería un botón sin funcionalidad real, explícitamente
+        // prohibido por esta misma fase.
+        { id: 'customers', label: 'Clientes', icon: Users, permission: 'clientes.ver' },
       ],
     },
     {
       title: 'Catálogo & Inventario',
       items: [
-        { id: 'products', label: 'Prendas, Tallas & Colores', icon: Shirt, permission: 'productos.ver' },
-        { id: 'inventory', label: 'Kardex & Ajuste Stock', icon: Boxes, permission: 'inventario.ver' },
+        { id: 'products', label: 'Productos', icon: Shirt, permission: 'productos.ver' },
+        { id: 'inventory', label: 'Inventario / Kardex', icon: Boxes, permission: 'inventario.ver' },
         // FASE 3.7D-FIX: compras.ver es el permiso real y propio de este
         // módulo (SeedSetup.gs), separado de inventario.ver.
         { id: 'purchases', label: 'Órdenes de Compra', icon: Truck, permission: 'compras.ver' },
@@ -74,6 +81,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
       items: [
         { id: 'credits', label: 'Cuentas por Cobrar', icon: CreditCard, permission: 'creditos.ver' },
         { id: 'installments', label: 'Abonos Recibidos', icon: Coins, permission: 'abonos.ver' },
+        // "Créditos a Favor / Vales" NO se agrega aquí todavía -- misma
+        // razón que "Notas de Crédito" arriba: no existe una pantalla real
+        // detrás de esa etiqueta hoy (ver auditoría en el reporte).
         { id: 'cash', label: 'Caja & Cuadres de Turno', icon: Wallet, permission: 'caja.ver' },
       ],
     },
@@ -85,7 +95,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
         // FASE 3.7G-FIX: admin.configuracion es el permiso real
         // (SeedSetup.gs/SettingsController.gs); configuracion.ver nunca
         // existió en el backend.
-        { id: 'settings', label: 'Configuración & Sheets', icon: Settings, permission: 'admin.configuracion' },
+        // FASE (normalización comercial): "Configuración & Sheets" ->
+        // "Configuración" -- la integración técnica con Google Sheets
+        // sigue existiendo DENTRO de la pantalla de Configuración (pestaña
+        // "Google Sheets Sync", uso administrativo explícito), solo deja
+        // de aparecer en la navegación principal.
+        { id: 'settings', label: 'Configuración', icon: Settings, permission: 'admin.configuracion' },
       ],
     },
   ];

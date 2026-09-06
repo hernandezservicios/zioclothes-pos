@@ -48,6 +48,7 @@ interface ProductFormModalProps {
     imagenUrl: string;
     stockMinimo: number;
     codigoBarras?: string;
+    tieneVariantes?: boolean;
     variantes: ProductVariant[];
   }) => void;
 }
@@ -76,6 +77,15 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
   const [stockMinimo, setStockMinimo] = useState<number | string>(5);
   const [imagenUrl, setImagenUrl] = useState('');
   const [variantes, setVariantes] = useState<ProductVariant[]>([]);
+
+  // FASE (normalización comercial -- variantes opcionales): por defecto
+  // OFF para productos nuevos (Parte 6 de la fase). `stockSimple` solo
+  // aplica cuando `tieneVariantes` es false -- es el stock del producto
+  // simple, enviado como la única variante implícita al guardar (ver
+  // handleSubmit). Arranca vacío (no en 0), siguiendo el mismo patrón ya
+  // establecido para los demás campos numéricos de este formulario.
+  const [tieneVariantes, setTieneVariantes] = useState(false);
+  const [stockSimple, setStockSimple] = useState<number | string>('');
 
   // Variant Individual Barcodes Checkbox State
   const [enableVariantBarcodes, setEnableVariantBarcodes] = useState(false);
@@ -162,9 +172,27 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
       setPrecio(editingProduct.precio || 0);
       setStockMinimo(editingProduct.stockMinimo || 5);
       setImagenUrl(editingProduct.imagenUrl || '');
-      
+
       const prodVariants = editingProduct.variantes || [];
       setVariantes([...prodVariants]);
+
+      // FASE (normalización comercial -- compatibilidad con productos
+      // existentes, Parte 12): si el producto ya trae `tieneVariantes`
+      // explícito (columna nueva, guardado por esta misma fase), se usa
+      // tal cual. Si NO (producto guardado antes de esta fase, columna
+      // ausente/backend antiguo), se infiere: un producto se considera
+      // "simple" si tiene como máximo 1 variante Y esa variante usa
+      // exactamente los valores centinela que ProductsController.gs ya
+      // asignaba por defecto cuando no se especificaba talla/color
+      // (color || 'Único', talla || 'U') -- nunca se sobreescribe el dato
+      // real, es solo la inferencia del estado inicial del checkbox.
+      const looksLikeSimpleProduct =
+        prodVariants.length === 0 ||
+        (prodVariants.length === 1 && prodVariants[0].talla === 'U' && prodVariants[0].color === 'Único');
+      const inferredTieneVariantes =
+        editingProduct.tieneVariantes !== undefined ? editingProduct.tieneVariantes : !looksLikeSimpleProduct;
+      setTieneVariantes(inferredTieneVariantes);
+      setStockSimple(prodVariants.length === 1 ? prodVariants[0].stock : '');
 
       // Check if any variant has a distinctive barcode set
       const hasDistinctVariantCodes = prodVariants.some(
@@ -190,33 +218,16 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
       setStockMinimo(5);
       setImagenUrl('');
 
-      // Pre-select popular starting tags but do not force unwanted combinations
-      const initialSizes = ['S', 'M', 'L'];
-      const initialColors = ['Negro', 'Beige'];
-      setSelectedSizes(initialSizes);
-      setSelectedColors(initialColors);
-
-      // Generate initial variants corresponding to initial selection
-      const initialVars: ProductVariant[] = [];
-      initialSizes.forEach((s) => {
-        initialColors.forEach((c) => {
-          const sCode = s.replace(/[^a-zA-Z0-9]/g, '').toUpperCase() || 'SZ';
-          const cCode = c.replace(/[^a-zA-Z0-9]/g, '').substring(0, 3).toUpperCase() || 'COL';
-          initialVars.push({
-            id: `VAR-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-            productoId: '',
-            talla: s,
-            color: c,
-            sku: `ZIO-${sCode}-${cCode}`,
-            codigoBarras: `746${Math.floor(100000000 + Math.random() * 900000000)}`,
-            stock: 6,
-            precio: 2500,
-            costo: 1200,
-            estado: 'ACTIVO',
-          });
-        });
-      });
-      setVariantes(initialVars);
+      // FASE (normalización comercial -- Parte 6): por defecto,
+      // "Este producto tiene variantes" queda DESACTIVADO para un
+      // producto nuevo -- ya no se pre-generan combinaciones S/M/L ×
+      // Negro/Beige automáticamente (eso era exclusivamente de ropa). El
+      // usuario activa el checkbox solo si de verdad necesita variantes.
+      setTieneVariantes(false);
+      setStockSimple('');
+      setSelectedSizes([]);
+      setSelectedColors([]);
+      setVariantes([]);
     }
   }, [isOpen, editingProduct?.id]);
 
@@ -630,7 +641,7 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
     setVariantes([]);
     setSelectedSizes([]);
     setSelectedColors([]);
-    showToast('Variantes Vaciadas', 'Se eliminaron todas las combinaciones generadas de esta prenda.', 'informacion');
+    showToast('Variantes Vaciadas', 'Se eliminaron todas las combinaciones generadas de este producto.', 'informacion');
   };
 
   // ==========================================
@@ -640,7 +651,7 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
     e.preventDefault();
 
     if (!nombre.trim()) {
-      showToast('Nombre Requerido', 'Ingrese el nombre de la prenda.', 'error');
+      showToast('Nombre Requerido', 'Ingrese el nombre del producto.', 'error');
       return;
     }
 
@@ -658,9 +669,23 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
       return;
     }
 
-    if ((variantes || []).length === 0) {
+    // FASE (normalización comercial -- variantes opcionales): la
+    // exigencia de "al menos 1 combinación" solo aplica cuando el usuario
+    // activó "Este producto tiene variantes". Un producto simple valida
+    // en cambio su propio campo de stock (más abajo, junto con la
+    // construcción de la variante implícita).
+    if (tieneVariantes && (variantes || []).length === 0) {
       showToast('Variantes Requeridas', 'Debe generar al menos 1 combinación de talla y color pulsando "+ Generar Combinaciones".', 'error');
       return;
+    }
+
+    let numStockSimple = 0;
+    if (!tieneVariantes) {
+      numStockSimple = typeof stockSimple === 'number' ? stockSimple : parseInt(String(stockSimple), 10);
+      if (!Number.isFinite(numStockSimple) || numStockSimple < 0) {
+        showToast('Stock Inválido', 'Ingrese una cantidad de stock válida mayor o igual a 0.', 'error');
+        return;
+      }
     }
 
     // FIX (fotos de productos -- auditoría aprobada): si el usuario NO
@@ -692,6 +717,45 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
 
     const finalMainBarcode = codigoBarras.trim() || `746${Math.floor(100000000 + Math.random() * 900000000)}`;
 
+    // FASE (normalización comercial -- variantes opcionales, Parte 6/7):
+    // un producto SIMPLE (tieneVariantes=false) se sigue guardando con el
+    // mismo mecanismo de siempre (`products.save` recibe un arreglo
+    // `variantes`) -- se envía una única variante implícita que reutiliza
+    // el código de barras principal del producto y el stock capturado
+    // arriba. No se envía talla/color: ProductsController.gs ya asigna
+    // sus propios valores centinela ('U'/'Único') cuando llegan vacíos,
+    // exactamente el mismo comportamiento que ya existía para cualquier
+    // variante sin talla/color explícitos -- no se inventa nada nuevo en
+    // el backend. Se preserva el `id` de la variante existente si el
+    // producto YA tenía una (edición de un producto simple), para no
+    // romper el historial de Kardex/Ventas ya vinculado a esa fila.
+    const existingSimpleVariantId =
+      editingProduct && editingProduct.variantes && editingProduct.variantes.length === 1
+        ? editingProduct.variantes[0].id
+        : undefined;
+
+    const finalVariantes: ProductVariant[] = tieneVariantes
+      ? variantes.map((v) => ({
+          ...v,
+          codigoBarras: v.codigoBarras?.trim() || finalMainBarcode,
+          costo: numCosto,
+          precio: numPrecio,
+        }))
+      : [
+          {
+            id: existingSimpleVariantId as string,
+            productoId: editingProduct?.id || '',
+            talla: '',
+            color: '',
+            sku: '',
+            codigoBarras: finalMainBarcode,
+            costo: numCosto,
+            precio: numPrecio,
+            stock: numStockSimple,
+            estado: 'ACTIVO',
+          },
+        ];
+
     onSave({
       nombre: nombre.trim(),
       codigoBarras: finalMainBarcode,
@@ -702,12 +766,8 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
       precio: numPrecio,
       imagenUrl: finalImagenUrl,
       stockMinimo: Number.isFinite(numStockMin) && numStockMin >= 0 ? numStockMin : 5,
-      variantes: variantes.map((v) => ({
-        ...v,
-        codigoBarras: v.codigoBarras?.trim() || finalMainBarcode,
-        costo: numCosto,
-        precio: numPrecio,
-      })),
+      tieneVariantes,
+      variantes: finalVariantes,
     });
   };
 
@@ -751,10 +811,10 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
         <div className="flex justify-between items-center px-5 py-4 border-b border-[#E4DDD2] bg-[#FAF8F4] shrink-0">
           <div>
             <span className="text-[10px] uppercase tracking-widest text-[#756E65] font-bold">
-              Catálogo ZIO Clothes
+              Catálogo de Productos
             </span>
             <h3 className="text-base sm:text-lg font-serif font-bold text-[#2F2A25]">
-              {editingProduct ? 'Editar Prenda de Vestir' : 'Registrar Nueva Prenda'}
+              {editingProduct ? 'Editar Producto' : 'Registrar Nuevo Producto'}
             </h3>
           </div>
           <button
@@ -769,24 +829,24 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
 
         {/* Scrollable Form Body */}
         <form onSubmit={handleSubmit} noValidate className="overflow-y-auto p-4 sm:p-6 space-y-5 text-xs">
-          {/* SECTION 1: DATOS PRINCIPALES DE LA PRENDA */}
+          {/* SECTION 1: DATOS PRINCIPALES DEL PRODUCTO */}
           <div className="space-y-3">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
-              {/* Nombre de la Prenda (Full width) */}
+              {/* Nombre del Producto (Full width) */}
               <div className="sm:col-span-2">
                 <label className="block font-bold text-[#2F2A25] mb-1 text-xs">
-                  Nombre de la Prenda <span className="text-rose-600">*</span>
+                  Nombre del Producto <span className="text-rose-600">*</span>
                 </label>
                 <input
                   type="text"
                   value={nombre}
                   onChange={(e) => setNombre(e.target.value)}
-                  placeholder="Ej. Vestido Midi Plisado en Lino, Camisa Guayabera Lino..."
+                  placeholder="Ej. Camisa Oxford, Laptop Dell Inspiron, Smart TV 55..."
                   className="w-full px-3.5 py-2.5 rounded-xl border border-[#E4DDD2] bg-white font-medium text-[#2F2A25] focus:border-[#2F2A25] focus:outline-none shadow-2xs text-xs"
                 />
               </div>
 
-              {/* Código de Barras / Serial / IMEI Principal (JUSTO DESPUÉS DE NOMBRE DE LA PRENDA) */}
+              {/* Código de Barras / Serial / IMEI Principal (JUSTO DESPUÉS DE NOMBRE DEL PRODUCTO) */}
               <div className="sm:col-span-2">
                 <div className="flex justify-between items-center mb-1">
                   <label className="font-bold text-[#2F2A25] text-xs flex items-center gap-1.5">
@@ -834,14 +894,14 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
                 </select>
               </div>
 
-              {/* Marca / Colección */}
+              {/* Marca / Línea */}
               <div>
-                <label className="block font-bold text-[#2F2A25] mb-1 text-xs">Marca / Colección:</label>
+                <label className="block font-bold text-[#2F2A25] mb-1 text-xs">Marca / Línea:</label>
                 <input
                   type="text"
                   value={marca}
                   onChange={(e) => setMarca(e.target.value)}
-                  placeholder="Ej. ZIO Atelier, Colección Verano..."
+                  placeholder="Ej. Genérica, Samsung, Línea Premium..."
                   className="w-full px-3.5 py-2.5 rounded-xl border border-[#E4DDD2] bg-white font-medium text-[#2F2A25] focus:border-[#2F2A25] focus:outline-none shadow-2xs text-xs"
                 />
               </div>
@@ -952,12 +1012,12 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
             </div>
           </div>
 
-          {/* SECTION 2: FOTOGRAFÍA / IMAGEN DE LA PRENDA */}
+          {/* SECTION 2: IMAGEN DEL PRODUCTO */}
           <div className="p-4 bg-white rounded-2xl border border-[#E4DDD2] space-y-3 shadow-2xs">
             <div className="flex items-center justify-between border-b border-[#E4DDD2] pb-2">
               <span className="font-bold text-[#2F2A25] uppercase text-[11px] tracking-wider flex items-center gap-1.5">
                 <ImageIcon className="w-4 h-4 text-[#756E65]" />
-                Fotografía de la Prenda
+                Imagen del Producto
               </span>
               <span className="text-[10px] text-[#756E65]">
                 Captura desde cámara o fototeca
@@ -976,7 +1036,7 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
                 <div className="relative w-full h-44 sm:h-52 rounded-2xl overflow-hidden border border-[#E4DDD2] bg-[#FAF8F4] group flex items-center justify-center">
                   <img
                     src={toDisplayableImageUrl(imagenUrl)}
-                    alt="Previsualización de Prenda"
+                    alt="Previsualización del Producto"
                     className="w-full h-full object-contain"
                   />
                   <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-2 p-4">
@@ -1052,7 +1112,7 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
 
                 <div className="space-y-0.5">
                   <p className="font-bold text-xs text-[#2F2A25]">
-                    Cargar foto de la prenda
+                    Cargar imagen del producto
                   </p>
                   <p className="text-[11px] text-[#756E65]">
                     Tome una foto en directo o elija una desde su galería / archivos
@@ -1088,16 +1148,70 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
             )}
           </div>
 
-          {/* SECTION 3: CONFIGURACIÓN DE VARIANTES (TALLAS & COLORES) */}
+          {/* FASE (normalización comercial -- variantes opcionales): control
+              que decide si se muestra la sección de variantes existente.
+              Por defecto OFF para productos nuevos (ver useEffect de
+              apertura) -- el producto se registra como producto simple
+              (una única variante implícita creada al guardar, ver
+              handleSubmit) salvo que el usuario active esta opción. */}
+          <div className="p-4 bg-white rounded-2xl border border-[#E4DDD2] shadow-2xs">
+            <label className="flex items-start gap-3 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={tieneVariantes}
+                onChange={(e) => setTieneVariantes(e.target.checked)}
+                className="mt-0.5 w-4 h-4 rounded border-[#E4DDD2] text-[#2F2A25] focus:ring-[#2F2A25] cursor-pointer"
+              />
+              <span>
+                <span className="block font-bold text-[#2F2A25] text-xs">Este producto tiene variantes</span>
+                <span className="block text-[10px] text-[#756E65] mt-0.5">
+                  Activa esta opción cuando el producto tenga diferentes opciones, presentaciones, modelos, tallas, colores u otros atributos.
+                </span>
+              </span>
+            </label>
+
+            {!tieneVariantes && (
+              <div className="mt-3 pt-3 border-t border-[#E4DDD2]">
+                <label className="block font-bold text-[#2F2A25] mb-1 text-xs">
+                  Stock Disponible <span className="text-rose-600">*</span>
+                </label>
+                <input
+                  type="number"
+                  min="0"
+                  step="1"
+                  inputMode="numeric"
+                  placeholder="0"
+                  value={stockSimple === '' ? '' : stockSimple}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    if (val === '') setStockSimple('');
+                    else {
+                      const num = parseInt(val, 10);
+                      setStockSimple(isNaN(num) ? '' : val);
+                    }
+                  }}
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-[#E4DDD2] bg-white font-semibold text-[#2F2A25] focus:border-[#2F2A25] focus:outline-none shadow-2xs text-xs"
+                />
+                <span className="text-[10px] text-[#756E65]">Cantidad de unidades disponibles de este producto (sin variantes).</span>
+              </div>
+            )}
+          </div>
+
+          {/* SECTION 3: CONFIGURACIÓN DE VARIANTES -- visible únicamente
+              cuando "Este producto tiene variantes" está activado. La
+              sección en sí (matriz de tallas/colores, generación de
+              combinaciones, códigos por variante, etc.) NO se modificó --
+              solo se le agregó esta condición de visibilidad. */}
+          {tieneVariantes && (
           <div className="p-4 bg-white rounded-2xl border border-[#E4DDD2] space-y-4 shadow-2xs">
             {/* Section Header & Main Action */}
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[#E4DDD2] pb-3">
               <div>
                 <span className="font-bold text-[#2F2A25] uppercase text-[11px] tracking-wider block">
-                  Configuración de Variantes (Tallas & Colores)
+                  Configuración de Variantes
                 </span>
                 <span className="text-[10px] text-[#756E65]">
-                  Haga clic en las tallas y colores que aplican a esta prenda para activarlos
+                  Haga clic en las tallas y colores que aplican a este producto para activarlos
                 </span>
               </div>
 
@@ -1748,6 +1862,7 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
               )}
             </div>
           </div>
+          )}
 
           {/* Sticky Bottom Action Buttons */}
           <div className="flex flex-col sm:flex-row gap-2.5 pt-3 border-t border-[#E4DDD2]">
@@ -1767,12 +1882,12 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
               <Check className="w-4 h-4 text-[#E8DCC8]" />
               <span>
                 {uploadingImage
-                  ? 'Subiendo imagen a Google Drive...'
+                  ? 'Subiendo imagen...'
                   : saving
-                  ? 'Guardando en Google Sheets...'
+                  ? 'Guardando producto...'
                   : editingProduct
-                  ? 'Guardar Cambios de la Prenda'
-                  : 'Guardar Prenda en Catálogo'}
+                  ? 'Guardar Cambios del Producto'
+                  : 'Guardar Producto en Catálogo'}
               </span>
             </button>
           </div>

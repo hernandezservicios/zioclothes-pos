@@ -121,6 +121,7 @@ export const ProductsView: React.FC = () => {
     imagenUrl: string;
     stockMinimo: number;
     codigoBarras?: string;
+    tieneVariantes?: boolean;
     variantes: any[];
   }) => {
     setSaving(true);
@@ -135,6 +136,7 @@ export const ProductsView: React.FC = () => {
       costo: productData.costo,
       imagenUrl: productData.imagenUrl,
       stockMinimo: productData.stockMinimo,
+      tieneVariantes: productData.tieneVariantes,
       variantes: productData.variantes.map((v) => ({
         // Solo se envía el id si tiene el formato real emitido por el
         // backend (VAR-000001, ver Sequences.gs). Los ids temporales que
@@ -157,18 +159,18 @@ export const ProductsView: React.FC = () => {
     setSaving(false);
 
     if (!res.success) {
-      showToast('Error al Guardar', res.message || 'No se pudo guardar la prenda en el backend.', 'error');
+      showToast('Error al Guardar', res.message || 'No se pudo guardar el producto.', 'error');
       return; // El modal permanece abierto para reintentar.
     }
 
     showToast(
-      editingProduct ? 'Prenda Actualizada' : 'Prenda Registrada',
-      res.message || `${productData.nombre} guardada exitosamente en Google Sheets.`,
+      editingProduct ? 'Producto Actualizado' : 'Producto Registrado',
+      res.message || `${productData.nombre} guardado exitosamente.`,
       'exito'
     );
     setModalOpen(false);
     // CORREGIR AUDITORÍA: invalida el DataStore central -- POS, Inventario
-    // y Compras ven la prenda nueva/editada sin recargar sesión ni F5.
+    // y Compras ven el producto nuevo/editado sin recargar sesión ni F5.
     await refreshProducts({ force: true });
   };
 
@@ -180,13 +182,13 @@ export const ProductsView: React.FC = () => {
 
     const res = await productsApi.remove(prod.id);
     if (!res.success) {
-      showToast('Error al Desactivar', res.message || 'No se pudo desactivar la prenda en el backend.', 'error');
+      showToast('Error al Desactivar', res.message || 'No se pudo desactivar el producto.', 'error');
       return;
     }
 
-    showToast('Prenda Desactivada', res.message || `${prod.nombre} ha sido retirada del catálogo activo`, 'informacion');
-    // CORREGIR AUDITORÍA: idem -- el resto de vistas deja de ver la prenda
-    // desactivada de inmediato, sin logout/login ni F5.
+    showToast('Producto Desactivado', res.message || `${prod.nombre} ha sido retirado del catálogo activo`, 'informacion');
+    // CORREGIR AUDITORÍA: idem -- el resto de vistas deja de ver el producto
+    // desactivado de inmediato, sin logout/login ni F5.
     await refreshProducts({ force: true });
   };
 
@@ -210,7 +212,7 @@ export const ProductsView: React.FC = () => {
         });
       });
     });
-    exportToCSV('Catalogo_Prendas_ZIO', rows);
+    exportToCSV('Catalogo_Productos', rows);
     showToast('Exportación Exitosa', 'Archivo CSV de inventario generado.', 'exito');
   };
 
@@ -220,10 +222,10 @@ export const ProductsView: React.FC = () => {
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-[#E4DDD2]">
         <div>
           <span className="text-xs uppercase tracking-widest text-[#756E65] font-semibold">
-            Catálogo & Matriz de Tallas/Colores
+            Catálogo de Productos
           </span>
           <h1 className="text-2xl font-serif font-bold text-[#2F2A25]">
-            Prendas de Vestir
+            Productos
           </h1>
         </div>
 
@@ -254,7 +256,7 @@ export const ProductsView: React.FC = () => {
               className="flex items-center gap-2 px-4 py-2 rounded-xl bg-[#2F2A25] text-white text-xs font-bold hover:bg-[#403932] transition shadow-xs"
             >
               <Plus className="w-4 h-4 text-[#E8DCC8]" />
-              <span>Nueva Prenda</span>
+              <span>Nuevo Producto</span>
             </button>
           )}
         </div>
@@ -336,7 +338,7 @@ export const ProductsView: React.FC = () => {
           <table className="w-full text-xs text-left">
             <thead className="bg-[#F6F1E8] text-[#2F2A25] border-b border-[#E4DDD2] uppercase text-[10px] tracking-wider font-bold">
               <tr>
-                <th className="py-3 px-4">Prenda</th>
+                <th className="py-3 px-4">Producto</th>
                 <th className="py-3 px-4">Categoría</th>
                 <th className="py-3 px-4">Matriz Talla / Color</th>
                 <th className="py-3 px-4 text-right">Precio Venta</th>
