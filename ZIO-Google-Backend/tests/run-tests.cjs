@@ -5906,6 +5906,9 @@ test('VARIANT_EDITING_PRODUCT_METADATA_DOES_NOT_DISTURB_UNRELATED_EXISTING_VARIA
     const orig = before.variantes.find(bv => bv.id === v.id);
     assert(!!orig, `la variante ${v.id} debe conservar su identidad original`);
     assertEqual(v.stock, orig.stock, 'el stock no debe alterarse al editar solo metadatos del producto');
+    assertEqual(v.codigoBarras, orig.codigoBarras, 'el código no debe alterarse al editar solo metadatos del producto');
+    assertEqual(v.talla, orig.talla, 'la talla no debe alterarse al editar solo metadatos del producto');
+    assertEqual(v.color, orig.color, 'el color no debe alterarse al editar solo metadatos del producto');
   });
 });
 
@@ -6095,6 +6098,131 @@ test('VARIANT_THIRTY_VARIANT_BATCH_KEEPS_INDEPENDENT_STOCK_AND_CODES_PER_ROW', (
   assertEqual(uniqueCodes.size, 30, 'cada variante debe recibir su propio código autogenerado, sin colisiones entre filas del mismo lote');
   const uniqueSkus = new Set(prod.variantes.map(v => v.sku));
   assertEqual(uniqueSkus.size, 30, 'cada variante debe recibir su propio SKU, sin colisiones entre filas del mismo lote');
+});
+
+/* ================================================================
+   FASE -- REVISIÓN FINAL + E2E REAL DE VARIANTES.
+   Pruebas adicionales pedidas explícitamente en esta fase de revisión
+   (Partes 3, 17 y 18) que no tenían un escenario dedicado todavía.
+   ================================================================ */
+
+test('VARIANT_PROGRESSIVE_BUILD_5_THEN_5_THEN_10_THEN_10_REACHES_EXACTLY_30', () => {
+  // Parte 17: construcción progresiva en 4 operaciones (5+5+10+10=30) --
+  // en cada paso se reenvían TODAS las existentes tal cual (id real,
+  // mismos valores) y se agregan solo las nuevas de ese lote.
+  const colorPool = ['Negro', 'Blanco', 'Azul', 'Rojo', 'Verde', 'Gris', 'Beige', 'Vino', 'Café', 'Celeste',
+    'Coral', 'Dorado', 'Fucsia', 'Gris Claro', 'Índigo', 'Lavanda', 'Lima', 'Magenta', 'Marfil', 'Menta',
+    'Morado', 'Mostaza', 'Naranja', 'Oliva', 'Perla', 'Plata', 'Rosa', 'Salmón', 'Turquesa', 'Violeta'];
+  assertEqual(colorPool.length, 30, 'sanity: se necesitan 30 colores únicos para 30 combinaciones sin repetir');
+
+  const asPayload = (v) => ({ id: v.id, talla: v.talla, color: v.color, sku: v.sku, codigoBarras: v.codigoBarras, stock: v.stock, costo: v.costo, precio: v.precio, estado: v.estado });
+  const newBatch = (colors, stockBase) => colors.map((c, i) => ({ talla: 'U', color: c, stock: stockBase + i, costo: 200, precio: 500, estado: 'ACTIVO' }));
+
+  // Operación 1: 5 variantes (producto nuevo).
+  const batch1 = newBatch(colorPool.slice(0, 5), 1);
+  const op1 = doPostRaw('products.save', { nombre: 'Producto Progresivo 30', categoriaId: 'CAT-T01', tieneVariantes: true, variantes: batch1 }, adminToken);
+  assert(op1.success === true, JSON.stringify(op1));
+  const productId = op1.productId;
+  let prod = getProductFull_(productId);
+  assertEqual(prod.variantes.length, 5);
+  const originalById = {};
+  prod.variantes.forEach(v => { originalById[v.id] = { stock: v.stock, codigoBarras: v.codigoBarras, sku: v.sku }; });
+
+  // Operación 2: +5 nuevas (10 total).
+  let op2 = doPostRaw('products.save', {
+    id: productId, nombre: 'Producto Progresivo 30', categoriaId: 'CAT-T01', tieneVariantes: true,
+    variantes: [...prod.variantes.map(asPayload), ...newBatch(colorPool.slice(5, 10), 100)],
+  }, adminToken);
+  assert(op2.success === true, JSON.stringify(op2));
+  prod = getProductFull_(productId);
+  assertEqual(prod.variantes.length, 10, 'tras la 2da operación deben existir 10 (5+5)');
+
+  // Operación 3: +10 nuevas (20 total).
+  let op3 = doPostRaw('products.save', {
+    id: productId, nombre: 'Producto Progresivo 30', categoriaId: 'CAT-T01', tieneVariantes: true,
+    variantes: [...prod.variantes.map(asPayload), ...newBatch(colorPool.slice(10, 20), 200)],
+  }, adminToken);
+  assert(op3.success === true, JSON.stringify(op3));
+  prod = getProductFull_(productId);
+  assertEqual(prod.variantes.length, 20, 'tras la 3ra operación deben existir 20 (5+5+10)');
+
+  // Operación 4: +10 nuevas (30 total).
+  let op4 = doPostRaw('products.save', {
+    id: productId, nombre: 'Producto Progresivo 30', categoriaId: 'CAT-T01', tieneVariantes: true,
+    variantes: [...prod.variantes.map(asPayload), ...newBatch(colorPool.slice(20, 30), 300)],
+  }, adminToken);
+  assert(op4.success === true, JSON.stringify(op4));
+  prod = getProductFull_(productId);
+  assertEqual(prod.variantes.length, 30, 'tras la 4ta operación deben existir exactamente 30, nunca más');
+
+  const uniqueColors = new Set(prod.variantes.map(v => v.color));
+  assertEqual(uniqueColors.size, 30, 'las 30 combinaciones deben ser únicas -- ninguna se duplicó a lo largo de las 4 operaciones');
+
+  // Las 5 originales de la Operación 1 deben conservar id/stock/código
+  // intactos después de 3 operaciones posteriores.
+  Object.keys(originalById).forEach(id => {
+    const current = prod.variantes.find(v => v.id === id);
+    assert(!!current, `la variante original ${id} debe seguir existiendo`);
+    assertEqual(current.stock, originalById[id].stock, `el stock original de ${id} no debe alterarse por operaciones posteriores`);
+    assertEqual(current.codigoBarras, originalById[id].codigoBarras, `el código original de ${id} no debe alterarse por operaciones posteriores`);
+  });
+});
+
+test('VARIANT_RETRY_AFTER_CLIENT_TIMEOUT_NEVER_DUPLICATES_STOCK_OR_CODES', () => {
+  // Parte 18: reproduce el escenario real del bug -- el cliente aborta la
+  // conexión a los 20s (REQUEST_TIMEOUT_MS) y muestra "El servidor tardó
+  // demasiado en responder", pero Apps Script YA HABÍA completado la
+  // escritura del lado del servidor (aborter un fetch nunca cancela la
+  // ejecución de Apps Script en curso). El usuario, viendo el error,
+  // reintenta manualmente enviando el MISMO payload (mismo id temporal,
+  // sin id real todavía, porque nunca recibió la respuesta del primer
+  // intento). Se verifica que el reintento NUNCA duplica la variante, el
+  // stock ni el código -- el backend lo detecta como
+  // VARIANTE_DUPLICADA y rechaza la operación completa.
+  const attempt1 = doPostRaw('products.save', {
+    nombre: 'Producto Timeout Retry', categoriaId: 'CAT-T01', tieneVariantes: true,
+    variantes: [{ talla: 'S', color: 'Negro', codigoBarras: 'RETRY-CODE-001', stock: 12, costo: 300, precio: 700, estado: 'ACTIVO' }],
+  }, adminToken);
+  assert(attempt1.success === true, 'la 1ra "solicitud" (la que el cliente cree que expiró) en realidad sí se completó en el servidor');
+  const productId = attempt1.productId;
+
+  // "Reintento": mismo producto, mismo payload de variante SIN id (tal
+  // como lo tendría el formulario, que nunca llegó a recibir el id real
+  // de la 1ra respuesta porque el cliente ya había abortado esa conexión).
+  const retry = doPostRaw('products.save', {
+    id: productId, nombre: 'Producto Timeout Retry', categoriaId: 'CAT-T01', tieneVariantes: true,
+    variantes: [{ talla: 'S', color: 'Negro', codigoBarras: 'RETRY-CODE-001', stock: 12, costo: 300, precio: 700, estado: 'ACTIVO' }],
+  }, adminToken);
+  assert(retry.success === false, 'el reintento debe ser rechazado -- la combinación ya fue creada por el intento anterior');
+  assertEqual(retry.error.indexOf('VARIANTE_DUPLICADA'), 0, retry.error);
+
+  const prod = getProductFull_(productId);
+  const activeVariants = prod.variantes.filter(v => v.estado === 'ACTIVO');
+  assertEqual(activeVariants.length, 1, 'el reintento nunca debe resultar en una segunda fila para la misma combinación');
+  assertEqual(activeVariants[0].stock, 12, 'el reintento rechazado nunca debe duplicar/incrementar el stock');
+  const allCodes = prod.variantes.map(v => v.codigoBarras);
+  assertEqual(new Set(allCodes).size, allCodes.length, 'el reintento rechazado nunca debe generar un código duplicado');
+});
+
+test('VARIANT_NULL_AND_UNDEFINED_TALLA_COLOR_NEVER_LEAK_OBJECT_OBJECT_OR_CRASH', () => {
+  // Parte 3/12: null/undefined explícitos (no solo objetos/arreglos) en
+  // los campos de variante nunca deben producir "[object Object]" ni
+  // tirar una excepción no controlada -- deben caer en los centinelas
+  // ya establecidos ('U'/'Único'), igual que cuando el campo llega vacío.
+  const res = doPostRaw('products.save', {
+    nombre: 'Producto Talla Color Null Undefined', categoriaId: 'CAT-T01', tieneVariantes: true,
+    variantes: [
+      { talla: null, color: undefined, stock: 1, costo: 100, precio: 200, estado: 'ACTIVO' },
+    ],
+  }, adminToken);
+  assert(res.success === true, `null/undefined en talla/color no deben romper el guardado: ${JSON.stringify(res)}`);
+  const prod = getProductFull_(res.productId);
+  const talla = String(prod.variantes[0].talla);
+  const color = String(prod.variantes[0].color);
+  assert(talla.indexOf('[object') === -1 && talla !== 'null' && talla !== 'undefined', `talla nula/indefinida debe caer en el centinela, nunca en texto crudo: "${talla}"`);
+  assert(color.indexOf('[object') === -1 && color !== 'null' && color !== 'undefined', `color nulo/indefinido debe caer en el centinela, nunca en texto crudo: "${color}"`);
+  assertEqual(talla, 'U');
+  assertEqual(color, 'Único');
 });
 
 /* ------------------------------------------------------------
