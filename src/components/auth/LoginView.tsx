@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { sounds } from '../../utils/soundEffects';
 import { toDisplayableImageUrl } from '../../utils/imageUrl';
-import { Lock, User as UserIcon, Sparkles, ShieldCheck, ArrowRight } from 'lucide-react';
+import { Lock, User as UserIcon, ArrowRight } from 'lucide-react';
 
 export const LoginView: React.FC = () => {
   const { login, settings } = useAuth();
@@ -10,10 +10,7 @@ export const LoginView: React.FC = () => {
   const [username, setUsername] = useState('admin');
   // FASE 3.7G-FIX: el campo de contraseña ya no precarga la contraseña
   // real del admin sembrado -- el usuario debe escribirla manualmente.
-  // No se tocó `username` (no es una credencial secreta) ni los botones
-  // de "Acceso Rápido para Demostración" (acción explícita y visible del
-  // usuario, no un valor precargado en silencio) -- ver reporte de esta
-  // fase, quedan documentados pero fuera del alcance pedido.
+  // No se tocó `username` (no es una credencial secreta).
   const [password, setPassword] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
   const [loading, setLoading] = useState(false);
@@ -36,20 +33,6 @@ export const LoginView: React.FC = () => {
     }
     // El toast de éxito/error ya lo muestra AuthContext.login con el
     // mensaje real del backend -- no se duplica aquí.
-  };
-
-  const handleQuickLogin = async (u: string, p: string) => {
-    setUsername(u);
-    setPassword(p);
-    setLoading(true);
-    const success = await login(u, p);
-    setLoading(false);
-    if (success) {
-      sounds.playSuccess();
-    } else {
-      sounds.playError();
-      setErrorMsg('Usuario o contraseña incorrectos');
-    }
   };
 
   return (
@@ -135,41 +118,6 @@ export const LoginView: React.FC = () => {
               <ArrowRight className="w-4 h-4 text-[#E8DCC8]" />
             </button>
           </form>
-
-          {/* Quick Demo Access Badges */}
-          <div className="pt-3 border-t border-[#E4DDD2] space-y-2">
-            <span className="text-[10px] uppercase font-bold text-[#756E65] tracking-wider block text-center">
-              Acceso Rápido para Demostración:
-            </span>
-            <div className="grid grid-cols-3 gap-2">
-              <button
-                type="button"
-                onClick={() => handleQuickLogin('admin', 'admin123')}
-                className="p-2 rounded-xl bg-[#FAF8F4] border border-[#E4DDD2] text-center hover:bg-[#F6F1E8] transition"
-              >
-                <p className="font-bold text-[11px] text-[#2F2A25]">Admin</p>
-                <span className="text-[9px] text-[#756E65]">Acceso Total</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => handleQuickLogin('gerente', 'gerente123')}
-                className="p-2 rounded-xl bg-[#FAF8F4] border border-[#E4DDD2] text-center hover:bg-[#F6F1E8] transition"
-              >
-                <p className="font-bold text-[11px] text-[#2F2A25]">Gerente</p>
-                <span className="text-[9px] text-[#756E65]">Tienda & Caja</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => handleQuickLogin('cajero', 'cajero123')}
-                className="p-2 rounded-xl bg-[#FAF8F4] border border-[#E4DDD2] text-center hover:bg-[#F6F1E8] transition"
-              >
-                <p className="font-bold text-[11px] text-[#2F2A25]">Cajero</p>
-                <span className="text-[9px] text-[#756E65]">POS & Ventas</span>
-              </button>
-            </div>
-          </div>
         </div>
 
         {/* Footer info */}

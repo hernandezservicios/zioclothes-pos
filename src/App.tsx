@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { DataStoreProvider } from './context/DataStoreContext';
 import { ToastProvider } from './context/ToastContext';
@@ -132,6 +132,37 @@ const MainAppContent: React.FC = () => {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAuthenticated, currentUser?.id]);
+
+  // FASE -- CORREGIR REDIRECCIÓN POST-LOGIN AL DASHBOARD:
+  // `MainAppContent` NUNCA se desmonta entre un logout y el siguiente
+  // login (login/logout son solo transiciones de `isAuthenticated` en
+  // contexto, no hay recarga de página) -- por eso `currentView` (arriba)
+  // conservaba en memoria la última vista (ej. "products") de la sesión
+  // anterior, y un login exitoso simplemente volvía a mostrarla en vez
+  // de llevar al Dashboard. La hidratación desde `storageService.
+  // getCurrentView()` de la línea de arriba SIGUE siendo necesaria y
+  // correcta para su propio propósito (F5 con una sesión YA válida debe
+  // restaurar la última vista, FASE 3.6E) -- lo único que faltaba era
+  // distinguir ESE caso de un login recién ocurrido.
+  //
+  // `wasAuthenticatedRef` guarda el valor de `isAuthenticated` del
+  // render anterior. Si en el primer render ya llegamos autenticados
+  // (sesión restaurada por F5), el ref nace en `true` y este efecto
+  // nunca detecta una transición -- se respeta la vista hidratada. Si en
+  // cambio detectamos una transición real de `false -> true` (el usuario
+  // acaba de escribir sus credenciales y autenticarse, sin importar
+  // cuántas veces se repita el ciclo logout/login dentro de la misma
+  // pestaña), se fuerza el Dashboard como destino -- la última vista
+  // jamás tiene prioridad sobre un login exitoso.
+  const wasAuthenticatedRef = useRef(isAuthenticated);
+  useEffect(() => {
+    const wasAuthenticated = wasAuthenticatedRef.current;
+    wasAuthenticatedRef.current = isAuthenticated;
+    if (!wasAuthenticated && isAuthenticated) {
+      setCurrentView('dashboard');
+      setNavigationFilter(undefined);
+    }
+  }, [isAuthenticated]);
 
   // Persiste la vista activa en cada cambio, para que un F5 posterior la
   // recupere. Es solo conveniencia de navegación -- nunca decide permisos.
