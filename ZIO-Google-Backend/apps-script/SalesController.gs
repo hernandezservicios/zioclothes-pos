@@ -275,6 +275,37 @@ const SalesController = {
           }
         }
 
+        // FASE 7 (Parte 3/17 -- hallazgo de auditoría, "nunca confiar en lo
+        // que declara el frontend"): un pago con metodo 'CREDITO_FAVOR'
+        // dentro de data.pagos es SOLO una etiqueta declarativa para que
+        // sumaPagos cuadre con el total -- lo que REALMENTE descuenta el
+        // saldo del crédito es data.creditoFavorAplicado.monto (ver Step
+        // "creditoFavorAplicado" más abajo). Si ambos números no
+        // coincidieran, un cliente malicioso podría declarar que pagó con
+        // crédito para cuadrar sumaPagos, sin que el backend en realidad
+        // descontara ningún saldo (fuga de mercancía), o declarar un pago
+        // en efectivo que oculta una aplicación de crédito adicional no
+        // reflejada en el total. Se exige que ambos existan y coincidan
+        // exactamente (tolerancia RD$1 por redondeo).
+        const pagosCreditoFavor = Array.isArray(data.pagos)
+          ? roundMoney(data.pagos.filter(p => p.metodo === 'CREDITO_FAVOR').reduce((sum, p) => sum + (Number(p.monto) || 0), 0))
+          : 0;
+        const creditoFavorMontoSolicitado = (data.creditoFavorAplicado && data.creditoFavorAplicado.id)
+          ? roundMoney(Number(data.creditoFavorAplicado.monto) || 0)
+          : 0;
+        if (pagosCreditoFavor > 0 || creditoFavorMontoSolicitado > 0) {
+          if (!data.creditoFavorAplicado || !data.creditoFavorAplicado.id || creditoFavorMontoSolicitado <= 0) {
+            throw new Error(
+              'VALIDATION_ERROR: Se declaró un pago con método CREDITO_FAVOR sin especificar un creditoFavorAplicado.id/monto válido.'
+            );
+          }
+          if (Math.abs(pagosCreditoFavor - creditoFavorMontoSolicitado) > 1) {
+            throw new Error(
+              `PRICE_MISMATCH: El monto declarado en pagos con método CREDITO_FAVOR (RD$${pagosCreditoFavor.toLocaleString()}) no coincide con el monto de creditoFavorAplicado (RD$${creditoFavorMontoSolicitado.toLocaleString()}).`
+            );
+          }
+        }
+
         // Step 3: Validate customer credit limit if applicable
         const esCredito = data.esCredito === true || data.metodoPago === 'CREDITO';
         let customer = null;
@@ -308,6 +339,25 @@ const SalesController = {
             throw new Error(
               `LIMITE_CREDITO_EXCEDIDO: Crédito disponible insuficiente para ${customer.nombre}. Disponible: RD$${disp.toLocaleString()}, Intentado: RD$${nuevoMontoFinanciado.toLocaleString()}.`
             );
+          }
+        } else if (creditoFavorMontoSolicitado > 0) {
+          // FASE 7 (Parte 31 -- nunca confiar en cliente_id enviado por el
+          // frontend): si la venta no es a cuenta por cobrar pero SÍ
+          // consume un Crédito a Favor/Nota de Crédito, igual se relee y
+          // valida el cliente real (existente y activo) -- antes solo se
+          // hacía esta verificación cuando esCredito era true, dejando sin
+          // validar la existencia real del cliente en el resto de los
+          // casos (la pertenencia del crédito ya se valida aparte dentro
+          // de applyToSaleWithinTx_, pero esto cierra el hueco de un
+          // clienteId que coincida por casualidad sin ser un cliente real).
+          if (!data.clienteId) {
+            throw new Error(
+              'CLIENTE_REQUERIDO: Para aplicar un Crédito a Favor/Nota de Crédito la venta debe tener un cliente registrado.'
+            );
+          }
+          customer = DbHelper.findById('Clientes', data.clienteId);
+          if (!customer || customer.estado !== 'ACTIVO') {
+            throw new Error('CREDIT_ERROR: El cliente no existe o se encuentra inactivo.');
           }
         }
 
@@ -457,6 +507,39 @@ const SalesController = {
           DbHelper.updateRowById('Ventas', saleId, { cuenta_cobrar_id: creditId });
         }
 
+        // FASE 6/7 (créditos a favor / notas de crédito -- integración
+        // operativa en POS): si la venta incluye data.creditoFavorAplicado
+        // ({ id, monto }), se aplica DENTRO de esta misma transacción --
+        // comparte exactamente CreditNotesController.applyToSaleWithinTx_
+        // (la misma función que usa la acción independiente
+        // creditNotes.apply), sin duplicar la validación/lock. Se le pasa
+        // data.clienteId para que valide que el crédito pertenece
+        // realmente al cliente de ESTA venta (FASE 7: antes no se
+        // verificaba, hallazgo de auditoría corregido). Si el crédito no
+        // existe, ya está anulado, no pertenece a este cliente, o el monto
+        // excede su saldo disponible, esto lanza un error que aborta TODA
+        // la venta (stock, items, todo se revierte) -- igual que cualquier
+        // otra validación de esta función. No se genera ningún movimiento
+        // de caja para este monto (Parte 24: "no debe inventar dinero
+        // físico en caja") -- el filtro de `cashAmount` de abajo ya solo
+        // suma pagos con metodo 'EFECTIVO', así que un pago con metodo
+        // 'CREDITO_FAVOR' queda automáticamente excluido sin necesidad de
+        // ningún cambio adicional aquí. La validación de arriba
+        // (pagosCreditoFavor vs creditoFavorMontoSolicitado) ya garantizó
+        // que este monto es consistente con lo declarado en data.pagos.
+        let creditoFavorAplicado = null;
+        if (data.creditoFavorAplicado && data.creditoFavorAplicado.id) {
+          creditoFavorAplicado = CreditNotesController.applyToSaleWithinTx_(
+            tx,
+            data.creditoFavorAplicado.id,
+            saleId,
+            numeroVenta,
+            data.creditoFavorAplicado.monto,
+            data.clienteId,
+            user
+          );
+        }
+
         // Step 7: Update Cash Session if cash payment
         const cashAmount = Array.isArray(data.pagos)
           ? data.pagos.filter(p => p.metodo === 'EFECTIVO').reduce((sum, p) => sum + (Number(p.monto) || 0), 0)
@@ -505,7 +588,8 @@ const SalesController = {
           message: `Venta ${numeroVenta} procesada exitosamente.`,
           saleId: saleId,
           numeroVenta: numeroVenta,
-          cuentaCobrarId: creditId || undefined
+          cuentaCobrarId: creditId || undefined,
+          creditoFavorAplicado: creditoFavorAplicado || undefined
         };
 
       } catch (err) {

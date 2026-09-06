@@ -65,6 +65,7 @@ export const POSView: React.FC = () => {
     refreshCustomers,
     refreshSales,
     refreshCredits,
+    refreshCreditNotes,
     getCustomers,
   } = useDataStore();
 
@@ -1075,6 +1076,14 @@ export const POSView: React.FC = () => {
               // correcta sin logout/login ni F5.
               refreshCredits({ force: true });
               refreshCustomers({ force: true });
+            }
+            // FASE 7: si la venta consumió un Crédito a Favor/Nota de
+            // Crédito real, su saldo disponible ya cambió en el backend --
+            // se invalida el dominio creditNotes del DataStore para que
+            // CreditNotesView y una próxima venta al mismo cliente vean el
+            // saldo restante correcto de inmediato.
+            if (sale.creditoFavorAplicado) {
+              refreshCreditNotes({ force: true });
             }
           }}
         />

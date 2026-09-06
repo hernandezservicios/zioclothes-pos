@@ -15,6 +15,7 @@ import { InventoryView } from './components/inventory/InventoryView';
 import { PurchasesView } from './components/expenses/PurchasesView';
 import { CreditsView } from './components/credits/CreditsView';
 import { InstallmentsView } from './components/credits/InstallmentsView';
+import { CreditNotesView } from './components/credits/CreditNotesView';
 import { CashView } from './components/cash/CashView';
 import { CustomersView } from './components/customers/CustomersView';
 import { ExpensesView } from './components/expenses/ExpensesView';
@@ -31,6 +32,14 @@ export type AppView =
   | 'purchases'
   | 'credits'
   | 'installments'
+  // FASE 6: 'creditNotes' y 'storeCredits' apuntan a la MISMA pantalla
+  // (CreditNotesView) -- son la misma entidad de backend (Creditos_Favor)
+  // distinguida por `tipo`, pero cada una es una entrada de Sidebar
+  // separada (Notas de Crédito bajo Ventas & Clientes, Créditos a Favor /
+  // Vales bajo Créditos & Caja) porque representan conceptos de negocio
+  // distintos para quien navega el menú.
+  | 'creditNotes'
+  | 'storeCredits'
   | 'cash'
   | 'customers'
   | 'expenses'
@@ -57,6 +66,10 @@ const VIEW_PERMISSIONS: Partial<Record<AppView, string>> = {
   purchases: 'compras.ver',
   credits: 'creditos.ver',
   installments: 'abonos.ver',
+  // FASE 6: mismo permiso real para ambas entradas -- ver `creditNotes`/
+  // `storeCredits` en el tipo AppView de arriba.
+  creditNotes: 'creditos_favor.ver',
+  storeCredits: 'creditos_favor.ver',
   cash: 'caja.ver',
   expenses: 'gastos.ver',
   reports: 'reportes.ver',
@@ -79,6 +92,8 @@ const VALID_VIEWS: AppView[] = [
   'purchases',
   'credits',
   'installments',
+  'creditNotes',
+  'storeCredits',
   'cash',
   'customers',
   'expenses',
@@ -142,6 +157,10 @@ const MainAppContent: React.FC = () => {
       creditos: 'credits',
       installments: 'installments',
       abonos: 'installments',
+      creditNotes: 'creditNotes',
+      notascredito: 'creditNotes',
+      storeCredits: 'storeCredits',
+      valestienda: 'storeCredits',
       cash: 'cash',
       caja: 'cash',
       customers: 'customers',
@@ -217,6 +236,10 @@ const MainAppContent: React.FC = () => {
         );
       case 'installments':
         return <InstallmentsView />;
+      case 'creditNotes':
+        return <CreditNotesView tipo="NOTA_CREDITO" />;
+      case 'storeCredits':
+        return <CreditNotesView tipo="VALE_TIENDA" />;
       case 'cash':
         return <CashView />;
       case 'customers':

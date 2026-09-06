@@ -63,6 +63,13 @@ export type PermissionCode =
   | 'creditos.modificar'
   | 'creditos.ver_deudas'
   | 'creditos.ver_vencidas'
+  // Créditos a Favor / Vales & Notas de Crédito (FASE 6) -- pasivo de
+  // naturaleza opuesta a "Créditos & Abonos" de arriba (aquí el negocio le
+  // debe al cliente, no al revés). Ver CreditNotesController.gs.
+  | 'creditos_favor.ver'
+  | 'creditos_favor.crear'
+  | 'creditos_favor.aplicar'
+  | 'creditos_favor.anular'
   // Caja
   | 'caja.abrir'
   | 'caja.cerrar'
@@ -202,7 +209,15 @@ export interface Customer {
   creditoDisponible?: number;
 }
 
-export type PaymentMethodType = 'EFECTIVO' | 'TARJETA' | 'TRANSFERENCIA' | 'CREDITO' | 'PAGO_MOVIL' | 'MIXTO';
+// FASE 7 (integración operativa de Créditos a Favor / Notas de Crédito en
+// el POS): 'CREDITO_FAVOR' identifica la porción de una venta cubierta con
+// un saldo a favor reutilizable del cliente (Creditos_Favor) -- es
+// DISTINTO de 'CREDITO' (venta a cuenta por cobrar: el cliente le debe al
+// negocio). Nunca aparece solo como `metodoPago` salvo que el crédito a
+// favor cubra el total completo de la venta; en pagos combinados,
+// `metodoPago` pasa a 'MIXTO' como ya ocurre con cualquier otra
+// combinación de métodos.
+export type PaymentMethodType = 'EFECTIVO' | 'TARJETA' | 'TRANSFERENCIA' | 'CREDITO' | 'CREDITO_FAVOR' | 'PAGO_MOVIL' | 'MIXTO';
 
 export interface SalePaymentSplit {
   metodo: PaymentMethodType;
@@ -258,6 +273,21 @@ export interface Sale {
   anuladaPor?: string;
   fechaAnulacion?: string;
   fecha: string;
+  // FASE 7: presente solo si esta venta consumió un Crédito a Favor/Nota
+  // de Crédito real (ver CreditNotesController.applyToSaleWithinTx_,
+  // invocado desde SalesController.handleCreateSale). No es una columna
+  // persistida en `Ventas` -- es el resultado transitorio que devuelve
+  // sales.create para que el POS pueda confirmar/mostrar el saldo
+  // restante inmediatamente después del cobro; la fuente de verdad
+  // duradera es la propia fila de Creditos_Favor y su historial de
+  // aplicaciones (Creditos_Favor_Aplicaciones).
+  creditoFavorAplicado?: {
+    creditoFavorId: string;
+    numero: string;
+    montoAplicado: number;
+    saldoRestante: number;
+    estado: 'EMITIDA' | 'PARCIALMENTE_APLICADA' | 'APLICADA' | 'ANULADA';
+  };
 }
 
 export type CreditAccountStatus = 'PENDIENTE' | 'PARCIAL' | 'PAGADA' | 'VENCIDA' | 'ANULADA';
@@ -474,11 +504,64 @@ export interface ReturnRecord {
   clienteNombre: string;
   items: ReturnItem[];
   montoDevuelto: number;
-  tipoReembolso: 'EFECTIVO' | 'CREDITO_CUENTA' | 'VALE_TIENDA';
+  // FASE 6 (devoluciones/notas de crédito/créditos a favor): 'NOTA_CREDITO'
+  // es el valor nuevo hacia adelante para "Nota de Crédito" -- 'CREDITO_CUENTA'
+  // se conserva en el tipo únicamente por compatibilidad con devoluciones
+  // históricas ya guardadas antes de esta fase (el backend trata ambos
+  // como equivalentes al procesar una devolución nueva, ver
+  // ReturnsController.gs). Nunca se migra automáticamente un registro
+  // histórico de uno a otro.
+  tipoReembolso: 'EFECTIVO' | 'VALE_TIENDA' | 'NOTA_CREDITO' | 'CREDITO_CUENTA';
   motivo: string;
   usuarioId: string;
   usuarioNombre: string;
   fecha: string;
+  // Presente solo si esta devolución emitió un Crédito a Favor/Nota de
+  // Crédito real (ver CreditNotesController.gs) -- ausente para
+  // reembolsos en EFECTIVO o devoluciones históricas anteriores a esta fase.
+  creditoFavorEmitido?: { id: string; numero: string; tipo: 'VALE_TIENDA' | 'NOTA_CREDITO'; montoOriginal: number };
+}
+
+/**
+ * FASE 6 (créditos a favor / notas de crédito): representa el MISMO
+ * pasivo comercial ("el negocio le debe un valor al cliente") en sus dos
+ * presentaciones documentales -- distinguidas por `tipo`. Nunca se debe
+ * confundir con `AccountReceivable`/`Credito` (cuenta por cobrar: el
+ * cliente le debe al negocio) -- son saldos de naturaleza opuesta y viven
+ * en hojas/entidades completamente separadas en el backend
+ * (Creditos_Favor vs Creditos).
+ */
+export interface CreditNoteApplication {
+  id: string;
+  creditoFavorId: string;
+  ventaId: string;
+  numeroVenta: string;
+  monto: number;
+  fecha: string;
+  usuarioId: string;
+  usuarioNombre: string;
+}
+
+export interface CreditNote {
+  id: string;
+  numero: string;
+  tipo: 'VALE_TIENDA' | 'NOTA_CREDITO';
+  clienteId: string;
+  clienteNombre: string;
+  devolucionId?: string;
+  ventaOrigenId?: string;
+  montoOriginal: number;
+  montoAplicado: number;
+  saldoDisponible: number;
+  estado: 'EMITIDA' | 'PARCIALMENTE_APLICADA' | 'APLICADA' | 'ANULADA';
+  motivoAnulacion?: string;
+  anuladoPor?: string;
+  fechaAnulacion?: string;
+  usuarioId: string;
+  usuarioNombre: string;
+  fechaCreacion: string;
+  actualizadoEn: string;
+  aplicaciones: CreditNoteApplication[];
 }
 
 export interface Expense {

@@ -1,10 +1,11 @@
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
-import { Product, Category, Size, Color, Supplier, Sale, AccountReceivable, Expense } from '../types';
+import { Product, Category, Size, Color, Supplier, Sale, AccountReceivable, Expense, CreditNote } from '../types';
 import { storageService } from '../services/storageService';
 import { productsApi, mapProduct } from '../services/productsApi';
 import { customersApi, CustomerWithCredit, mapCustomer } from '../services/customersApi';
 import { salesApi } from '../services/salesApi';
 import { creditsApi } from '../services/creditsApi';
+import { creditNotesApi } from '../services/creditNotesApi';
 import { expensesApi } from '../services/expensesApi';
 
 /**
@@ -49,6 +50,7 @@ const PRODUCTS_TTL_MS = 45_000;
 const CUSTOMERS_TTL_MS = 60_000;
 const SALES_TTL_MS = 20_000;
 const CREDITS_TTL_MS = 20_000;
+const CREDIT_NOTES_TTL_MS = 20_000;
 const EXPENSES_TTL_MS = 30_000;
 
 export interface BootstrapBundle {
@@ -91,6 +93,12 @@ interface DataStoreContextType {
   creditsError: string | null;
   creditsStale: boolean;
 
+  /** FASE 6 -- Créditos a Favor / Vales y Notas de Crédito (Creditos_Favor real, distinguidos por `tipo`). */
+  creditNotes: CreditNote[];
+  creditNotesLoading: boolean;
+  creditNotesError: string | null;
+  creditNotesStale: boolean;
+
   expenses: Expense[];
   expensesLoading: boolean;
   expensesError: string | null;
@@ -100,6 +108,7 @@ interface DataStoreContextType {
   refreshCustomers: (opts?: RefreshOptions) => Promise<boolean>;
   refreshSales: (opts?: RefreshOptions) => Promise<boolean>;
   refreshCredits: (opts?: RefreshOptions) => Promise<boolean>;
+  refreshCreditNotes: (opts?: RefreshOptions) => Promise<boolean>;
   refreshExpenses: (opts?: RefreshOptions) => Promise<boolean>;
 
   /**
@@ -156,6 +165,13 @@ export const DataStoreProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const [creditsStale, setCreditsStale] = useState(false);
   const creditsLastFetch = useRef(0);
   const creditsGen = useRef(0);
+
+  const [creditNotes, setCreditNotes] = useState<CreditNote[]>([]);
+  const [creditNotesLoading, setCreditNotesLoading] = useState(false);
+  const [creditNotesError, setCreditNotesError] = useState<string | null>(null);
+  const [creditNotesStale, setCreditNotesStale] = useState(false);
+  const creditNotesLastFetch = useRef(0);
+  const creditNotesGen = useRef(0);
 
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [expensesLoading, setExpensesLoading] = useState(false);
@@ -294,6 +310,31 @@ export const DataStoreProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const refreshCreditNotes = useCallback(async (opts?: RefreshOptions): Promise<boolean> => {
+    const now = Date.now();
+    if (!opts?.force && now - creditNotesLastFetch.current < CREDIT_NOTES_TTL_MS) return true;
+    const myGen = ++creditNotesGen.current;
+    setCreditNotesLoading(true);
+
+    const res = await creditNotesApi.list();
+    if (myGen !== creditNotesGen.current) return false;
+
+    if (!res.success) {
+      setCreditNotesError(res.message || 'No se pudo obtener los créditos a favor / notas de crédito desde el backend.');
+      setCreditNotesStale((creditNotes || []).length > 0);
+      setCreditNotesLoading(false);
+      return false;
+    }
+
+    setCreditNotes(res.data || []);
+    setCreditNotesError(null);
+    setCreditNotesStale(false);
+    creditNotesLastFetch.current = now;
+    setCreditNotesLoading(false);
+    return true;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const refreshExpenses = useCallback(async (opts?: RefreshOptions): Promise<boolean> => {
     const now = Date.now();
     if (!opts?.force && now - expensesLastFetch.current < EXPENSES_TTL_MS) return true;
@@ -380,6 +421,11 @@ export const DataStoreProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     setCreditsStale(false);
     creditsLastFetch.current = 0;
 
+    setCreditNotes([]);
+    setCreditNotesError(null);
+    setCreditNotesStale(false);
+    creditNotesLastFetch.current = 0;
+
     setExpenses([]);
     setExpensesError(null);
     setExpensesStale(false);
@@ -409,6 +455,10 @@ export const DataStoreProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         creditsLoading,
         creditsError,
         creditsStale,
+        creditNotes,
+        creditNotesLoading,
+        creditNotesError,
+        creditNotesStale,
         expenses,
         expensesLoading,
         expensesError,
@@ -417,6 +467,7 @@ export const DataStoreProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         refreshCustomers,
         refreshSales,
         refreshCredits,
+        refreshCreditNotes,
         refreshExpenses,
         hydrateFromBootstrap,
         clear,

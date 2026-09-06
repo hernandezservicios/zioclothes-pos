@@ -338,6 +338,12 @@ const loadOrder = [
   'AuditController.gs', 'AuthController.gs', 'ProductsController.gs', 'CustomersController.gs',
   'SalesController.gs', 'InventoryController.gs', 'CreditsController.gs', 'CashController.gs',
   'ExpensesController.gs', 'PurchasesController.gs', 'ReturnsController.gs', 'SettingsController.gs',
+  // FASE 6: CreditNotesController.gs se referencia desde ReturnsController.gs
+  // (issueFromReturnWithinTx_) y SalesController.gs (applyToSaleWithinTx_) --
+  // debe cargarse antes de que corran esas dos referencias en runtime, lo
+  // cual ya se cumple con cualquier posición (todos los .gs comparten un
+  // único scope global concatenado); se coloca aquí por cercanía temática.
+  'CreditNotesController.gs',
   'SeedSetup.gs', 'Main.gs'
 ];
 
@@ -3085,6 +3091,1067 @@ test('PRODUCT_SIMPLE_RETURN_RESTOCKS_CORRECTLY', () => {
 
   const afterReturn = runInContext(`DbHelper.findById('Variantes', '${varianteId}')`);
   assertEqual(Number(afterReturn.stock), 8, 'la devolución debe reingresar exactamente la cantidad devuelta');
+});
+
+/* ================================================================
+   CREDIT NOTES -- FASE 6: Créditos a Favor / Vales y Notas de Crédito
+   reales (emisión desde una devolución, aplicación en una venta con
+   historial, anulación con bloqueo si ya se aplicó). Devolución parcial/
+   doble devolución/bloqueo de exceso (Parte 27, ítems 1-3) YA estaban
+   cubiertos por RETURN_EXCEEDING_SOLD_QUANTITY_REJECTED y
+   RETURN_CANNOT_DOUBLE_RETURN_BEYOND_AVAILABLE (sin cambios de esta
+   fase) -- no se duplican aquí. Producto simple/variante en devolución
+   (ítems 4-5) ya cubiertos por PRODUCT_SIMPLE_RETURN_RESTOCKS_CORRECTLY
+   y RETURN_VALID_UPDATES_INVENTORY_CASH_AND_AUDIT respectivamente.
+   ================================================================ */
+
+test('RETURN_WITH_VALE_TIENDA_ISSUES_REAL_CREDIT_NOTE', () => {
+  resetVarT01Stock(5);
+  const saleRes = doPostRaw('sales.create', buildValidSaleData({ clienteId: 'CLI-T01', clienteNombre: 'Cliente Test' }), adminToken);
+  assert(saleRes.success === true, JSON.stringify(saleRes));
+
+  const returnRes = doPostRaw('returns.create', {
+    ventaId: saleRes.saleId,
+    motivo: 'Prueba emisión de vale',
+    tipoReembolso: 'VALE_TIENDA',
+    items: [{ varianteId: 'VAR-T01', cantidad: 1 }]
+  }, adminToken);
+  assert(returnRes.success === true, JSON.stringify(returnRes));
+  assert(!!returnRes.creditoFavorEmitido, 'debe devolver el crédito recién emitido');
+  assertEqual(returnRes.creditoFavorEmitido.tipo, 'VALE_TIENDA');
+
+  const credito = runInContext(`DbHelper.findById('Creditos_Favor', '${returnRes.creditoFavorEmitido.id}')`);
+  assert(!!credito, 'debe existir una fila real en Creditos_Favor');
+  assertEqual(credito.tipo, 'VALE_TIENDA');
+  assertEqual(credito.cliente_id, 'CLI-T01');
+  assertEqual(Number(credito.monto_original), 1180);
+  assertEqual(Number(credito.saldo_disponible), 1180);
+  assertEqual(credito.estado, 'EMITIDA');
+  assertEqual(credito.devolucion_id, returnRes.devolucionId);
+});
+
+test('RETURN_WITH_NOTA_CREDITO_ISSUES_REAL_CREDIT_NOTE', () => {
+  resetVarT01Stock(5);
+  const saleRes = doPostRaw('sales.create', buildValidSaleData({ clienteId: 'CLI-T01', clienteNombre: 'Cliente Test' }), adminToken);
+  const returnRes = doPostRaw('returns.create', {
+    ventaId: saleRes.saleId, motivo: 'Prueba emisión de nota', tipoReembolso: 'NOTA_CREDITO',
+    items: [{ varianteId: 'VAR-T01', cantidad: 1 }]
+  }, adminToken);
+  assert(returnRes.success === true, JSON.stringify(returnRes));
+  assertEqual(returnRes.creditoFavorEmitido.tipo, 'NOTA_CREDITO');
+  assert(returnRes.creditoFavorEmitido.id.indexOf('NC-') === 0, 'el id de una Nota de Crédito debe usar el prefijo NC: ' + returnRes.creditoFavorEmitido.id);
+});
+
+test('RETURN_WITH_LEGACY_CREDITO_CUENTA_VALUE_STILL_ISSUES_NOTA_CREDITO', () => {
+  // Compatibilidad (Parte 17): el valor histórico CREDITO_CUENTA sigue
+  // funcionando -- se trata como Nota de Crédito, sin exigir que el
+  // frontend ya haya migrado al nuevo valor NOTA_CREDITO.
+  resetVarT01Stock(5);
+  const saleRes = doPostRaw('sales.create', buildValidSaleData({ clienteId: 'CLI-T01', clienteNombre: 'Cliente Test' }), adminToken);
+  const returnRes = doPostRaw('returns.create', {
+    ventaId: saleRes.saleId, motivo: 'Prueba valor histórico', tipoReembolso: 'CREDITO_CUENTA',
+    items: [{ varianteId: 'VAR-T01', cantidad: 1 }]
+  }, adminToken);
+  assert(returnRes.success === true, JSON.stringify(returnRes));
+  assertEqual(returnRes.creditoFavorEmitido.tipo, 'NOTA_CREDITO', 'CREDITO_CUENTA (histórico) debe tratarse como NOTA_CREDITO');
+});
+
+test('RETURN_WITH_EFECTIVO_NEVER_ISSUES_CREDIT_NOTE', () => {
+  resetVarT01Stock(5);
+  const saleRes = doPostRaw('sales.create', buildValidSaleData({ clienteId: 'CLI-T01', clienteNombre: 'Cliente Test' }), adminToken);
+  const before = runInContext("DbHelper.getAllRows('Creditos_Favor').length");
+  const returnRes = doPostRaw('returns.create', {
+    ventaId: saleRes.saleId, motivo: 'Reembolso efectivo normal', tipoReembolso: 'EFECTIVO',
+    items: [{ varianteId: 'VAR-T01', cantidad: 1 }]
+  }, adminToken);
+  assert(returnRes.success === true, JSON.stringify(returnRes));
+  assertEqual(returnRes.creditoFavorEmitido, undefined, 'un reembolso en efectivo nunca debe emitir un crédito a favor/nota');
+  const after = runInContext("DbHelper.getAllRows('Creditos_Favor').length");
+  assertEqual(after, before, 'no debe crearse ninguna fila nueva en Creditos_Favor');
+});
+
+test('RETURN_VALE_TIENDA_WITHOUT_REAL_CLIENT_REJECTED_AND_FULLY_ROLLED_BACK', () => {
+  // Parte 12: "Consumidor Final" no puede recibir un crédito reutilizable
+  // -- se rechaza, y (Parte 11 del reporte de compatibilidad con el motor
+  // transaccional ya existente) NADA debe quedar escrito: ni la
+  // devolución, ni el reingreso de stock, ni el crédito.
+  resetVarT01Stock(5);
+  const saleRes = doPostRaw('sales.create', buildValidSaleData(), adminToken); // sin clienteId -> Consumidor Final
+  const stockTrasVenta = Number(runInContext("DbHelper.findById('Variantes', 'VAR-T01')").stock);
+
+  const returnRes = doPostRaw('returns.create', {
+    ventaId: saleRes.saleId, motivo: 'Intento de vale sin cliente', tipoReembolso: 'VALE_TIENDA',
+    items: [{ varianteId: 'VAR-T01', cantidad: 1 }]
+  }, adminToken);
+
+  assert(returnRes.success === false, 'debe rechazarse sin cliente real');
+  assert(String(returnRes.error || '').indexOf('CLIENTE_REQUERIDO') === 0, returnRes.error);
+
+  const stockTrasRechazo = Number(runInContext("DbHelper.findById('Variantes', 'VAR-T01')").stock);
+  assertEqual(stockTrasRechazo, stockTrasVenta, 'el stock NO debe reingresarse -- toda la operación debe revertirse (rollback completo)');
+
+  const devoluciones = runInContext(`DbHelper.findRows('Devoluciones', r => r.venta_id === '${saleRes.saleId}')`);
+  assertEqual(devoluciones.length, 0, 'no debe quedar ninguna fila de Devoluciones');
+});
+
+function issueCreditNoteForTest(monto, tipo) {
+  resetVarT01Stock(5);
+  const saleRes = doPostRaw('sales.create', buildValidSaleData({ clienteId: 'CLI-T01', clienteNombre: 'Cliente Test' }), adminToken);
+  const returnRes = doPostRaw('returns.create', {
+    ventaId: saleRes.saleId, motivo: 'Fixture de crédito para test', tipoReembolso: tipo || 'VALE_TIENDA',
+    items: [{ varianteId: 'VAR-T01', cantidad: 1 }]
+  }, adminToken);
+  return returnRes.creditoFavorEmitido; // { id, numero, tipo, montoOriginal } -- montoOriginal = 1180
+}
+
+test('CREDIT_NOTE_LIST_RETURNS_ISSUED_CREDIT_WITH_EMPTY_APPLICATIONS', () => {
+  const emitido = issueCreditNoteForTest();
+  const list = doPostRaw('creditNotes.list', {}, adminToken);
+  assert(list.success === true, JSON.stringify(list));
+  const found = list.creditNotes.find(c => c.id === emitido.id);
+  assert(!!found, 'el crédito recién emitido debe aparecer en creditNotes.list');
+  assertEqual(found.saldoDisponible, 1180);
+  assertEqual(found.aplicaciones.length, 0);
+});
+
+test('CREDIT_NOTE_APPLY_PARTIAL_UPDATES_BALANCE_AND_STATE', () => {
+  const emitido = issueCreditNoteForTest();
+  const saleRes = doPostRaw('sales.create', buildValidSaleData({ clienteId: 'CLI-T01', clienteNombre: 'Cliente Test' }), adminToken);
+
+  const applyRes = doPostRaw('creditNotes.apply', { creditoFavorId: emitido.id, ventaId: saleRes.saleId, monto: 500 }, adminToken);
+  assert(applyRes.success === true, JSON.stringify(applyRes));
+  assertEqual(applyRes.saldoRestante, 680);
+  assertEqual(applyRes.estado, 'PARCIALMENTE_APLICADA');
+
+  const credito = runInContext(`DbHelper.findById('Creditos_Favor', '${emitido.id}')`);
+  assertEqual(Number(credito.saldo_disponible), 680);
+  assertEqual(Number(credito.monto_aplicado), 500);
+  assertEqual(credito.estado, 'PARCIALMENTE_APLICADA');
+});
+
+test('CREDIT_NOTE_APPLY_FULL_MARKS_APLICADA', () => {
+  const emitido = issueCreditNoteForTest();
+  const saleRes = doPostRaw('sales.create', buildValidSaleData({ clienteId: 'CLI-T01', clienteNombre: 'Cliente Test' }), adminToken);
+
+  const applyRes = doPostRaw('creditNotes.apply', { creditoFavorId: emitido.id, ventaId: saleRes.saleId, monto: 1180 }, adminToken);
+  assert(applyRes.success === true, JSON.stringify(applyRes));
+  assertEqual(applyRes.saldoRestante, 0);
+  assertEqual(applyRes.estado, 'APLICADA');
+});
+
+test('CREDIT_NOTE_APPLY_MORE_THAN_BALANCE_REJECTED', () => {
+  const emitido = issueCreditNoteForTest();
+  const saleRes = doPostRaw('sales.create', buildValidSaleData({ clienteId: 'CLI-T01', clienteNombre: 'Cliente Test' }), adminToken);
+
+  const applyRes = doPostRaw('creditNotes.apply', { creditoFavorId: emitido.id, ventaId: saleRes.saleId, monto: 5000 }, adminToken);
+  assert(applyRes.success === false, 'no debe permitir aplicar más que el saldo disponible');
+  assert(String(applyRes.error || '').indexOf('SALDO_INSUFICIENTE') === 0, applyRes.error);
+
+  const credito = runInContext(`DbHelper.findById('Creditos_Favor', '${emitido.id}')`);
+  assertEqual(Number(credito.saldo_disponible), 1180, 'el saldo no debe alterarse tras un intento rechazado');
+});
+
+test('CREDIT_NOTE_APPLICATION_HISTORY_TRACKS_EACH_APPLICATION', () => {
+  const emitido = issueCreditNoteForTest();
+  const sale1 = doPostRaw('sales.create', buildValidSaleData({ clienteId: 'CLI-T01', clienteNombre: 'Cliente Test' }), adminToken);
+  const sale2 = doPostRaw('sales.create', buildValidSaleData({ clienteId: 'CLI-T01', clienteNombre: 'Cliente Test' }), adminToken);
+
+  doPostRaw('creditNotes.apply', { creditoFavorId: emitido.id, ventaId: sale1.saleId, monto: 300 }, adminToken);
+  doPostRaw('creditNotes.apply', { creditoFavorId: emitido.id, ventaId: sale2.saleId, monto: 200 }, adminToken);
+
+  const list = doPostRaw('creditNotes.list', {}, adminToken);
+  const found = list.creditNotes.find(c => c.id === emitido.id);
+  assertEqual(found.montoAplicado, 500);
+  assertEqual(found.saldoDisponible, 680);
+  assertEqual(found.aplicaciones.length, 2, 'debe existir una fila de historial por cada aplicación, nunca solo el saldo actualizado');
+  const ventasAplicadas = found.aplicaciones.map(a => a.ventaId).sort();
+  assertEqual(JSON.stringify(ventasAplicadas), JSON.stringify([sale1.saleId, sale2.saleId].sort()), 'el historial debe permitir reconstruir en qué ventas se usó');
+});
+
+test('CREDIT_NOTE_SEQUENTIAL_APPLICATIONS_CANNOT_EXCEED_BALANCE_EVEN_ACROSS_CALLS', () => {
+  // Aproximación a la Parte 11 (concurrencia) verificable en un arnés
+  // síncrono de Node: cada aplicación relee el saldo REAL desde
+  // Creditos_Favor en el momento de aplicar (nunca un valor cacheado) --
+  // esto es lo que, bajo LockService real en producción, impide que dos
+  // solicitudes simultáneas aprueben ambas un monto que juntas excederían
+  // el saldo. Aquí se prueba secuencialmente: la primera aplicación de
+  // RD$800 sobre un saldo de RD$1,180 debe dejar RD$380 -- una segunda
+  // aplicación de RD$700 (que hubiera cabido en el saldo ORIGINAL) debe
+  // ser rechazada contra el saldo YA reducido.
+  const emitido = issueCreditNoteForTest();
+  const sale1 = doPostRaw('sales.create', buildValidSaleData({ clienteId: 'CLI-T01', clienteNombre: 'Cliente Test' }), adminToken);
+  const sale2 = doPostRaw('sales.create', buildValidSaleData({ clienteId: 'CLI-T01', clienteNombre: 'Cliente Test' }), adminToken);
+
+  const apply1 = doPostRaw('creditNotes.apply', { creditoFavorId: emitido.id, ventaId: sale1.saleId, monto: 800 }, adminToken);
+  assert(apply1.success === true, JSON.stringify(apply1));
+
+  const apply2 = doPostRaw('creditNotes.apply', { creditoFavorId: emitido.id, ventaId: sale2.saleId, monto: 700 }, adminToken);
+  assert(apply2.success === false, 'la segunda aplicación NO debe aprobarse -- el saldo real ya solo tiene RD$380');
+  assert(String(apply2.error || '').indexOf('SALDO_INSUFICIENTE') === 0, apply2.error);
+
+  const credito = runInContext(`DbHelper.findById('Creditos_Favor', '${emitido.id}')`);
+  assertEqual(Number(credito.saldo_disponible), 380, 'el saldo final debe ser consistente -- nunca negativo ni sobregirado');
+});
+
+test('CREDIT_NOTE_VOID_SUCCEEDS_WHEN_NEVER_APPLIED', () => {
+  const emitido = issueCreditNoteForTest();
+  const voidRes = doPostRaw('creditNotes.void', { creditoFavorId: emitido.id, motivo: 'Prueba de anulación limpia' }, adminToken);
+  assert(voidRes.success === true, JSON.stringify(voidRes));
+
+  const credito = runInContext(`DbHelper.findById('Creditos_Favor', '${emitido.id}')`);
+  assertEqual(credito.estado, 'ANULADA');
+  assertEqual(Number(credito.saldo_disponible), 0);
+  assertEqual(credito.motivo_anulacion, 'Prueba de anulación limpia');
+});
+
+test('CREDIT_NOTE_VOID_BLOCKED_WHEN_ALREADY_APPLIED', () => {
+  const emitido = issueCreditNoteForTest();
+  const saleRes = doPostRaw('sales.create', buildValidSaleData({ clienteId: 'CLI-T01', clienteNombre: 'Cliente Test' }), adminToken);
+  doPostRaw('creditNotes.apply', { creditoFavorId: emitido.id, ventaId: saleRes.saleId, monto: 100 }, adminToken);
+
+  const voidRes = doPostRaw('creditNotes.void', { creditoFavorId: emitido.id, motivo: 'Intento inválido' }, adminToken);
+  assert(voidRes.success === false, 'no debe poder anularse directamente un crédito que ya fue aplicado');
+  assert(String(voidRes.error || '').indexOf('NO_ANULABLE') === 0, voidRes.error);
+
+  const credito = runInContext(`DbHelper.findById('Creditos_Favor', '${emitido.id}')`);
+  assert(credito.estado !== 'ANULADA', 'el estado no debe cambiar tras un intento de anulación rechazado');
+});
+
+test('CREDIT_NOTE_VOID_ALREADY_VOIDED_REJECTED', () => {
+  const emitido = issueCreditNoteForTest();
+  doPostRaw('creditNotes.void', { creditoFavorId: emitido.id, motivo: 'Primera anulación' }, adminToken);
+  const secondVoid = doPostRaw('creditNotes.void', { creditoFavorId: emitido.id, motivo: 'Segunda anulación' }, adminToken);
+  assert(secondVoid.success === false, 'no debe poder anularse dos veces');
+  assert(String(secondVoid.error || '').indexOf('INVALID_STATE') === 0, secondVoid.error);
+});
+
+test('CREDIT_NOTE_VOID_UNAUTHORIZED_REJECTED', () => {
+  // SUPERVISOR/CAJERO/VENDEDOR tienen creditos_favor.aplicar pero NO
+  // creditos_favor.anular (mismo criterio restrictivo que
+  // creditos.anular_abonos, solo ADMIN/GERENTE).
+  const emitido = issueCreditNoteForTest();
+  const cajeroSession = login('cajero', 'cajero123'); // CAJERO tiene .aplicar pero NO .anular (GERENTE/ADMIN sí tienen ambos)
+  const voidRes = doPostRaw('creditNotes.void', { creditoFavorId: emitido.id, motivo: 'Intento sin permiso' }, cajeroSession.sessionToken);
+  assert(voidRes.success === false, 'CAJERO no debe poder anular créditos/notas');
+  assert(String(voidRes.error || '').indexOf('FORBIDDEN') === 0, voidRes.error);
+});
+
+test('SALE_APPLIES_CREDIT_NOTE_PARTIALLY_REST_PAID_CASH_NO_FAKE_CASH_ENTRY', () => {
+  // Integración completa POS + crédito (Parte 13/24/31): se emite un
+  // crédito de RD$1,180 (fixture VAR-T01) y se aplica en su totalidad a
+  // una venta nueva del mismo importe -- confirma que la venta acepta un
+  // pago cuyo método es 'CREDITO_FAVOR' (no EFECTIVO), que el saldo del
+  // crédito se reduce como parte de la MISMA transacción, y que NO se
+  // genera ningún movimiento de caja por ese monto (Parte 24).
+  const emitido = issueCreditNoteForTest();
+
+  const cajaAntes = runInContext("DbHelper.getAllRows('Caja_Movimientos').length");
+
+  const saleRes = doPostRaw('sales.create', buildValidSaleData({
+    clienteId: 'CLI-T01', clienteNombre: 'Cliente Test',
+    pagos: [{ metodo: 'CREDITO_FAVOR', monto: 1180 }],
+    creditoFavorAplicado: { id: emitido.id, monto: 1180 }
+  }), adminToken);
+  assert(saleRes.success === true, JSON.stringify(saleRes));
+  assert(!!saleRes.creditoFavorAplicado, 'debe confirmar la aplicación del crédito en la respuesta de la venta');
+  assertEqual(saleRes.creditoFavorAplicado.saldoRestante, 0);
+
+  const credito = runInContext(`DbHelper.findById('Creditos_Favor', '${emitido.id}')`);
+  assertEqual(Number(credito.saldo_disponible), 0, 'el saldo del crédito debe reducirse como parte de la misma venta');
+  assertEqual(credito.estado, 'APLICADA');
+
+  const aplicaciones = runInContext(`DbHelper.findRows('Creditos_Favor_Aplicaciones', a => a.venta_id === '${saleRes.saleId}')`);
+  assertEqual(aplicaciones.length, 1, 'debe quedar registrada la aplicación vinculada a esta venta específica');
+
+  const cajaDespues = runInContext("DbHelper.getAllRows('Caja_Movimientos').length");
+  assertEqual(cajaDespues, cajaAntes, 'aplicar un crédito a favor NUNCA debe generar un movimiento de caja -- no hay entrada de efectivo real');
+
+  const ventaGuardada = runInContext(`DbHelper.findById('Ventas', '${saleRes.saleId}')`);
+  const pagosGuardados = JSON.parse(ventaGuardada.pagos_json);
+  assert(pagosGuardados.some(p => p.metodo === 'CREDITO_FAVOR' && Number(p.monto) === 1180), 'la venta debe conservar la trazabilidad de que se pagó con crédito a favor');
+});
+
+test('SALE_CREDIT_NOTE_APPLICATION_FAILURE_ROLLS_BACK_ENTIRE_SALE', () => {
+  // Atomicidad (Parte 11): si el crédito referenciado no tiene saldo
+  // suficiente, la VENTA COMPLETA debe revertirse -- ni stock deducido,
+  // ni fila de Ventas, ni Venta_Items, ni Kardex.
+  const emitido = issueCreditNoteForTest(); // saldo real: 1180
+  resetVarT01Stock(5);
+  const stockAntes = Number(runInContext("DbHelper.findById('Variantes', 'VAR-T01')").stock);
+  const ventasAntes = runInContext("DbHelper.getAllRows('Ventas').length");
+
+  // FASE 7: `pagos`/`creditoFavorAplicado.monto` deben coincidir ENTRE SÍ
+  // y con el total real de la venta (nueva validación cruzada, ver
+  // SALE_REJECTS_CREDITO_FAVOR_PAGOS_MISMATCH) -- por eso esta venta usa 2
+  // unidades (total real 2,360, ver recalculateSaleAuthoritatively) en vez
+  // del total por defecto de 1,180: así el monto declarado (2,360) pasa
+  // esa validación de consistencia, y el rechazo real ocurre donde este
+  // test lo espera: más adentro, al releer el saldo REAL del crédito
+  // (1,180) dentro de applyToSaleWithinTx_ y encontrarlo insuficiente.
+  const saleRes = doPostRaw('sales.create', buildValidSaleData({
+    clienteId: 'CLI-T01', clienteNombre: 'Cliente Test',
+    subtotal: 2000, impuestoTotal: 360, total: 2360, costoTotal: 1000,
+    items: [{
+      productoId: 'PRD-T01', varianteId: 'VAR-T01', nombreProducto: 'Producto Test', sku: 'SKU-T01-U',
+      talla: 'M', color: 'Negro', cantidad: 2, costoUnitario: 500, precioUnitario: 1000,
+      descuentoPorcentaje: 0, descuentoMonto: 0, subtotal: 2000, impuestoMonto: 360, total: 2360
+    }],
+    pagos: [{ metodo: 'CREDITO_FAVOR', monto: 2360 }],
+    creditoFavorAplicado: { id: emitido.id, monto: 2360 } // excede el saldo real (1180) -> debe fallar
+  }), adminToken);
+
+  assert(saleRes.success === false, 'la venta debe rechazarse si el crédito aplicado excede su saldo');
+  assert(String(saleRes.error || '').indexOf('SALDO_INSUFICIENTE') === 0, saleRes.error);
+
+  const stockDespues = Number(runInContext("DbHelper.findById('Variantes', 'VAR-T01')").stock);
+  assertEqual(stockDespues, stockAntes, 'el stock no debe descontarse si la venta se revierte por completo');
+
+  const ventasDespues = runInContext("DbHelper.getAllRows('Ventas').length");
+  assertEqual(ventasDespues, ventasAntes, 'no debe quedar ninguna fila nueva de Ventas tras el rollback');
+
+  const credito = runInContext(`DbHelper.findById('Creditos_Favor', '${emitido.id}')`);
+  assertEqual(Number(credito.saldo_disponible), 1180, 'el crédito no debe verse afectado por una venta que se revirtió por completo');
+});
+
+test('LEGACY_DEVOLUCION_WITH_CREDITO_CUENTA_HISTORICAL_VALUE_STILL_READS_CORRECTLY', () => {
+  // Parte 16/33 (compatibilidad con históricos): una fila de Devoluciones
+  // guardada ANTES de esta fase, con el valor histórico CREDITO_CUENTA,
+  // debe seguir apareciendo intacta en returns.list -- sin migración
+  // automática, sin romperse.
+  runInContext(`
+    DbHelper.insertRow('Devoluciones', {
+      id: 'DEV-LEGACY-01', numero_devolucion: 'DEV-LEGACY-01', venta_id: 'PRD-T01', numero_venta: 'VEN-LEGACY-01',
+      cliente_id: '', cliente_nombre: 'Consumidor Final', items_json: '[]', monto_devuelto: 250,
+      tipo_reembolso: 'CREDITO_CUENTA', motivo: 'Devolución histórica pre-Fase 6',
+      usuario_id: 'USR-001', usuario_nombre: 'Carlos Mendoza', fecha: getNowFormatted()
+    });
+  `);
+  const list = doPostRaw('returns.list', {}, adminToken);
+  const found = list.returns.find(r => r.id === 'DEV-LEGACY-01');
+  assert(!!found, 'la devolución histórica debe seguir apareciendo');
+  assertEqual(found.tipoReembolso, 'CREDITO_CUENTA', 'el valor histórico se conserva tal cual, sin migrarse automáticamente');
+});
+
+test('LEGACY_DEVOLUCION_WITH_VALE_TIENDA_HISTORICAL_VALUE_STILL_READS_CORRECTLY', () => {
+  runInContext(`
+    DbHelper.insertRow('Devoluciones', {
+      id: 'DEV-LEGACY-02', numero_devolucion: 'DEV-LEGACY-02', venta_id: 'PRD-T01', numero_venta: 'VEN-LEGACY-02',
+      cliente_id: '', cliente_nombre: 'Consumidor Final', items_json: '[]', monto_devuelto: 150,
+      tipo_reembolso: 'VALE_TIENDA', motivo: 'Devolución histórica pre-Fase 6',
+      usuario_id: 'USR-001', usuario_nombre: 'Carlos Mendoza', fecha: getNowFormatted()
+    });
+  `);
+  const list = doPostRaw('returns.list', {}, adminToken);
+  const found = list.returns.find(r => r.id === 'DEV-LEGACY-02');
+  assert(!!found, 'la devolución histórica debe seguir apareciendo');
+  assertEqual(found.tipoReembolso, 'VALE_TIENDA');
+  // Importante: esta fila histórica NUNCA tuvo un Creditos_Favor real
+  // asociado (se guardó antes de que existiera esta fase) -- confirmar
+  // que no se intenta vincular/crear uno retroactivamente.
+  const creditoAsociado = runInContext("DbHelper.findRows('Creditos_Favor', c => c.devolucion_id === 'DEV-LEGACY-02')");
+  assertEqual(creditoAsociado.length, 0, 'no debe inventarse un crédito retroactivo para una devolución histórica');
+});
+
+/* ================================================================
+   FASE 7 -- INTEGRACIÓN OPERATIVA DE CRÉDITOS EN POS
+   Cobertura nueva: pertenencia del crédito al cliente correcto (hallazgo
+   de auditoría corregido en esta misma fase, Parte 3/15), Consumidor
+   Final nunca puede usar crédito a favor (Parte 14), consistencia
+   pagos/creditoFavorAplicado (Parte 3/17/31), pagos mixtos reales
+   crédito+efectivo/tarjeta/transferencia/cuenta por cobrar sin generar
+   dinero falso en caja (Partes 10-13/24), aplicación parcial que deja
+   saldo disponible en el documento (Parte 13), anulación/estado inválido
+   adicionales, rollback ante stock insuficiente, y concurrencia a través
+   del flujo COMPLETO de sales.create (no solo la acción independiente
+   creditNotes.apply, ya cubierta en la sección FASE 6 de arriba).
+   ================================================================ */
+
+test('CREDIT_NOTE_LIST_NEVER_LEAKS_ANOTHER_CLIENTS_CREDIT', () => {
+  // Parte 2/20: el filtro clienteId de creditNotes.list nunca debe
+  // devolver créditos de otro cliente.
+  const emitido = issueCreditNoteForTest(); // pertenece a CLI-T01
+  const list = doPostRaw('creditNotes.list', { clienteId: 'CLI-T02' }, adminToken);
+  assert(list.success === true, JSON.stringify(list));
+  const found = list.creditNotes.find(c => c.id === emitido.id);
+  assert(!found, 'un crédito de CLI-T01 nunca debe aparecer al filtrar por CLI-T02');
+});
+
+test('SALE_REJECTS_CREDIT_NOTE_FROM_DIFFERENT_CLIENT', () => {
+  // Parte 3/15 (hallazgo de auditoría corregido ANTES de construir la UI
+  // del POS, como exige esta fase): applyToSaleWithinTx_ antes NO
+  // verificaba a quién pertenece el crédito -- cualquier creditoFavorId
+  // válido podía aplicarse a la venta de CUALQUIER cliente.
+  const emitido = issueCreditNoteForTest(); // pertenece a CLI-T01, saldo 1180
+  resetVarT01Stock(5);
+  const stockAntes = Number(runInContext("DbHelper.findById('Variantes', 'VAR-T01')").stock);
+
+  const saleRes = doPostRaw('sales.create', buildValidSaleData({
+    clienteId: 'CLI-T02', clienteNombre: 'Cliente Caja', // OTRO cliente
+    pagos: [{ metodo: 'CREDITO_FAVOR', monto: 1180 }],
+    creditoFavorAplicado: { id: emitido.id, monto: 1180 }
+  }), adminToken);
+
+  assert(saleRes.success === false, 'un crédito de CLI-T01 nunca debe poder aplicarse a una venta de CLI-T02');
+  assert(String(saleRes.error || '').indexOf('CREDITO_NO_PERTENECE_AL_CLIENTE') === 0, saleRes.error);
+
+  const stockDespues = Number(runInContext("DbHelper.findById('Variantes', 'VAR-T01')").stock);
+  assertEqual(stockDespues, stockAntes, 'la venta completa debe revertirse, incluyendo el stock');
+
+  const credito = runInContext(`DbHelper.findById('Creditos_Favor', '${emitido.id}')`);
+  assertEqual(Number(credito.saldo_disponible), 1180, 'el crédito de CLI-T01 no debe verse afectado');
+});
+
+test('APPLY_CREDIT_NOTE_REJECTS_DIFFERENT_CLIENT', () => {
+  // Mismo hallazgo que la prueba anterior, pero por la acción
+  // independiente creditNotes.apply (handleApplyCreditNote), que también
+  // pasa por applyToSaleWithinTx_.
+  const emitido = issueCreditNoteForTest(); // pertenece a CLI-T01
+  const saleCli02 = doPostRaw('sales.create', buildValidSaleData({ clienteId: 'CLI-T02', clienteNombre: 'Cliente Caja' }), adminToken);
+  assert(saleCli02.success === true, JSON.stringify(saleCli02));
+
+  const applyRes = doPostRaw('creditNotes.apply', { creditoFavorId: emitido.id, ventaId: saleCli02.saleId, monto: 100 }, adminToken);
+  assert(applyRes.success === false, 'no debe poder aplicarse un crédito de CLI-T01 a una venta de CLI-T02');
+  assert(String(applyRes.error || '').indexOf('CREDITO_NO_PERTENECE_AL_CLIENTE') === 0, applyRes.error);
+
+  const credito = runInContext(`DbHelper.findById('Creditos_Favor', '${emitido.id}')`);
+  assertEqual(Number(credito.saldo_disponible), 1180, 'el saldo no debe alterarse tras un intento rechazado');
+});
+
+test('SALE_REJECTS_CREDITO_FAVOR_FOR_CONSUMIDOR_FINAL', () => {
+  // Parte 14: "Consumidor Final" nunca puede utilizar un saldo a favor,
+  // ni siquiera si el frontend enviara manualmente un creditoFavorId real.
+  const emitido = issueCreditNoteForTest(); // pertenece a CLI-T01, saldo 1180
+  resetVarT01Stock(5);
+
+  const saleRes = doPostRaw('sales.create', buildValidSaleData({
+    // Sin clienteId -- Consumidor Final.
+    metodoPago: 'CREDITO_FAVOR',
+    pagos: [{ metodo: 'CREDITO_FAVOR', monto: 1180 }],
+    creditoFavorAplicado: { id: emitido.id, monto: 1180 }
+  }), adminToken);
+
+  assert(saleRes.success === false, 'Consumidor Final nunca debe poder aplicar un crédito a favor');
+  assert(String(saleRes.error || '').indexOf('CLIENTE_REQUERIDO') === 0, saleRes.error);
+
+  const credito = runInContext(`DbHelper.findById('Creditos_Favor', '${emitido.id}')`);
+  assertEqual(Number(credito.saldo_disponible), 1180, 'el crédito no debe verse afectado');
+});
+
+test('SALE_REJECTS_CREDITO_FAVOR_PAGOS_MISMATCH', () => {
+  // Parte 3/17/31 (nunca confiar en lo declarado por el frontend): el
+  // monto de la línea `pagos` con metodo CREDITO_FAVOR debe coincidir
+  // EXACTAMENTE con creditoFavorAplicado.monto -- de lo contrario, se
+  // podría declarar un pago "cuadrado" en pagos sin que el backend
+  // realmente descuente ese saldo (o viceversa).
+  const emitido = issueCreditNoteForTest();
+  resetVarT01Stock(5);
+
+  const saleRes = doPostRaw('sales.create', buildValidSaleData({
+    clienteId: 'CLI-T01', clienteNombre: 'Cliente Test',
+    pagos: [{ metodo: 'CREDITO_FAVOR', monto: 1180 }],
+    creditoFavorAplicado: { id: emitido.id, monto: 500 } // no coincide con la línea de pagos (1180)
+  }), adminToken);
+
+  assert(saleRes.success === false, 'debe rechazarse si pagos y creditoFavorAplicado no coinciden');
+  assert(String(saleRes.error || '').indexOf('PRICE_MISMATCH') === 0, saleRes.error);
+
+  const credito = runInContext(`DbHelper.findById('Creditos_Favor', '${emitido.id}')`);
+  assertEqual(Number(credito.saldo_disponible), 1180, 'el crédito no debe tocarse si la venta se rechaza');
+});
+
+test('SALE_REJECTS_CREDITO_FAVOR_PAGOS_LINE_WITHOUT_APLICADO_FIELD', () => {
+  // Complemento del test anterior: una línea de pagos con metodo
+  // CREDITO_FAVOR sin el campo creditoFavorAplicado correspondiente NUNCA
+  // debe aceptarse -- de lo contrario, sumaPagos cuadraría con el total
+  // sin que ningún saldo real se haya descontado (fuga de mercancía).
+  resetVarT01Stock(5);
+  const saleRes = doPostRaw('sales.create', buildValidSaleData({
+    clienteId: 'CLI-T01', clienteNombre: 'Cliente Test',
+    pagos: [{ metodo: 'CREDITO_FAVOR', monto: 1180 }]
+    // Sin creditoFavorAplicado.
+  }), adminToken);
+
+  assert(saleRes.success === false, 'debe rechazarse una línea CREDITO_FAVOR sin creditoFavorAplicado');
+  assert(String(saleRes.error || '').indexOf('VALIDATION_ERROR') === 0, saleRes.error);
+});
+
+test('SALE_CREDITO_FAVOR_PLUS_EFECTIVO_CASH_REGISTERS_ONLY_REMAINDER', () => {
+  // Parte 10 (venta mixta obligatoria) + Parte 24 (no inventar dinero
+  // físico): venta de RD$2,360 (2 unidades VAR-T01), RD$1,180 cubiertos
+  // con crédito a favor y RD$1,180 en efectivo -- la caja SOLO debe
+  // reflejar el efectivo real, nunca el total completo de la venta.
+  const emitido = issueCreditNoteForTest(); // saldo 1180
+  resetVarT01Stock(5);
+
+  const openRes = doPostRaw('cash.open', { montoInicial: 1000 }, adminToken);
+  assert(openRes.success === true, JSON.stringify(openRes));
+  const cajaId = openRes.session.id;
+
+  const saleRes = doPostRaw('sales.create', buildValidSaleData({
+    clienteId: 'CLI-T01', clienteNombre: 'Cliente Test', cajaSesionId: cajaId,
+    subtotal: 2000, impuestoTotal: 360, total: 2360, costoTotal: 1000,
+    items: [{
+      productoId: 'PRD-T01', varianteId: 'VAR-T01', nombreProducto: 'Producto Test', sku: 'SKU-T01-U',
+      talla: 'M', color: 'Negro', cantidad: 2, costoUnitario: 500, precioUnitario: 1000,
+      descuentoPorcentaje: 0, descuentoMonto: 0, subtotal: 2000, impuestoMonto: 360, total: 2360
+    }],
+    metodoPago: 'MIXTO',
+    pagos: [{ metodo: 'CREDITO_FAVOR', monto: 1180 }, { metodo: 'EFECTIVO', monto: 1180 }],
+    creditoFavorAplicado: { id: emitido.id, monto: 1180 }
+  }), adminToken);
+  assert(saleRes.success === true, JSON.stringify(saleRes));
+
+  const caja = runInContext(`DbHelper.findById('Cajas', '${cajaId}')`);
+  assertEqual(Number(caja.ventas_efectivo), 1180, 'ventas_efectivo debe reflejar SOLO el efectivo real, nunca el total de la venta (2360)');
+
+  const movimientos = runInContext(`DbHelper.findRows('Caja_Movimientos', r => r.caja_sesion_id === '${cajaId}')`);
+  assertEqual(movimientos.length, 1, 'debe existir exactamente un movimiento de caja');
+  assertEqual(Number(movimientos[0].monto), 1180, 'el movimiento de caja debe ser por el monto real en efectivo');
+
+  const credito = runInContext(`DbHelper.findById('Creditos_Favor', '${emitido.id}')`);
+  assertEqual(Number(credito.saldo_disponible), 0);
+  assertEqual(credito.estado, 'APLICADA');
+
+  doPostRaw('cash.close', { efectivoRealContado: 2180 }, adminToken);
+});
+
+test('SALE_CREDITO_FAVOR_PLUS_TRANSFERENCIA_NO_CASH_MOVEMENT', () => {
+  // Parte 11: crédito a favor + transferencia -- no debe generarse NINGÚN
+  // movimiento de efectivo, con o sin caja abierta.
+  const emitido = issueCreditNoteForTest();
+  resetVarT01Stock(5);
+
+  const openRes = doPostRaw('cash.open', { montoInicial: 1000 }, adminToken);
+  assert(openRes.success === true, JSON.stringify(openRes));
+  const cajaId = openRes.session.id;
+
+  const saleRes = doPostRaw('sales.create', buildValidSaleData({
+    clienteId: 'CLI-T01', clienteNombre: 'Cliente Test', cajaSesionId: cajaId,
+    subtotal: 2000, impuestoTotal: 360, total: 2360, costoTotal: 1000,
+    items: [{
+      productoId: 'PRD-T01', varianteId: 'VAR-T01', nombreProducto: 'Producto Test', sku: 'SKU-T01-U',
+      talla: 'M', color: 'Negro', cantidad: 2, costoUnitario: 500, precioUnitario: 1000,
+      descuentoPorcentaje: 0, descuentoMonto: 0, subtotal: 2000, impuestoMonto: 360, total: 2360
+    }],
+    metodoPago: 'MIXTO',
+    pagos: [{ metodo: 'CREDITO_FAVOR', monto: 1180 }, { metodo: 'TRANSFERENCIA', monto: 1180, referencia: 'TRF-TEST-01' }],
+    creditoFavorAplicado: { id: emitido.id, monto: 1180 }
+  }), adminToken);
+  assert(saleRes.success === true, JSON.stringify(saleRes));
+
+  const caja = runInContext(`DbHelper.findById('Cajas', '${cajaId}')`);
+  assertEqual(Number(caja.ventas_efectivo), 0, 'ni el crédito a favor ni la transferencia deben afectar ventas_efectivo');
+
+  const movimientos = runInContext(`DbHelper.findRows('Caja_Movimientos', r => r.caja_sesion_id === '${cajaId}')`);
+  assertEqual(movimientos.length, 0, 'crédito a favor + transferencia NUNCA debe generar un movimiento de caja');
+
+  doPostRaw('cash.close', { efectivoRealContado: 1000 }, adminToken);
+});
+
+test('SALE_CREDITO_FAVOR_PLUS_TARJETA_NO_CASH_MOVEMENT', () => {
+  // Parte 12: crédito a favor + tarjeta -- misma garantía que transferencia.
+  const emitido = issueCreditNoteForTest();
+  resetVarT01Stock(5);
+
+  const openRes = doPostRaw('cash.open', { montoInicial: 1000 }, adminToken);
+  assert(openRes.success === true, JSON.stringify(openRes));
+  const cajaId = openRes.session.id;
+
+  const saleRes = doPostRaw('sales.create', buildValidSaleData({
+    clienteId: 'CLI-T01', clienteNombre: 'Cliente Test', cajaSesionId: cajaId,
+    subtotal: 2000, impuestoTotal: 360, total: 2360, costoTotal: 1000,
+    items: [{
+      productoId: 'PRD-T01', varianteId: 'VAR-T01', nombreProducto: 'Producto Test', sku: 'SKU-T01-U',
+      talla: 'M', color: 'Negro', cantidad: 2, costoUnitario: 500, precioUnitario: 1000,
+      descuentoPorcentaje: 0, descuentoMonto: 0, subtotal: 2000, impuestoMonto: 360, total: 2360
+    }],
+    metodoPago: 'MIXTO',
+    pagos: [{ metodo: 'CREDITO_FAVOR', monto: 1180 }, { metodo: 'TARJETA', monto: 1180, referencia: 'APR-TEST-01' }],
+    creditoFavorAplicado: { id: emitido.id, monto: 1180 }
+  }), adminToken);
+  assert(saleRes.success === true, JSON.stringify(saleRes));
+
+  const caja = runInContext(`DbHelper.findById('Cajas', '${cajaId}')`);
+  assertEqual(Number(caja.ventas_efectivo), 0, 'ni el crédito a favor ni la tarjeta deben afectar ventas_efectivo');
+
+  const movimientos = runInContext(`DbHelper.findRows('Caja_Movimientos', r => r.caja_sesion_id === '${cajaId}')`);
+  assertEqual(movimientos.length, 0, 'crédito a favor + tarjeta NUNCA debe generar un movimiento de caja');
+
+  doPostRaw('cash.close', { efectivoRealContado: 1000 }, adminToken);
+});
+
+test('SALE_CREDITO_FAVOR_PLUS_CUENTA_POR_COBRAR_FINANCES_ONLY_REMAINDER', () => {
+  // Parte 10 generalizada a un cuarto método existente ("A Crédito" /
+  // cuenta por cobrar): el crédito a favor cubre una parte, y SOLO el
+  // remanente se financia como nueva deuda -- nunca el total completo.
+  // Se usa un cliente/crédito a favor dedicados (CLI-T03, límite 5000)
+  // para no depender del historial de deuda acumulado por otras pruebas
+  // sobre CLI-T01/CLI-T02 a lo largo de todo este archivo.
+  runInContext(`
+    DbHelper.insertRow('Creditos_Favor', {
+      id: 'CFAV-T10', numero: 'CFAV-T10', tipo: 'VALE_TIENDA', cliente_id: 'CLI-T03',
+      cliente_nombre: 'Cliente Credito', devolucion_id: '', venta_origen_id: '',
+      monto_original: 300, monto_aplicado: 0, saldo_disponible: 300, estado: 'EMITIDA',
+      motivo_anulacion: '', anulado_por: '', fecha_anulacion: '',
+      usuario_id: 'USR-001', usuario_nombre: 'Sistema',
+      fecha_creacion: getNowFormatted(), actualizado_en: getNowFormatted()
+    });
+  `);
+
+  // VAR-T03: precio real 200 x 2 = 400 + 18% ITBIS = 472.
+  const saleRes = doPostRaw('sales.create', {
+    clienteId: 'CLI-T03', clienteNombre: 'Cliente Credito', cajaSesionId: '',
+    subtotal: 400, descuentoTotal: 0, impuestoTotal: 72, total: 472, costoTotal: 200,
+    metodoPago: 'MIXTO',
+    pagos: [{ metodo: 'CREDITO_FAVOR', monto: 300 }, { metodo: 'CREDITO', monto: 172 }],
+    esCredito: true, montoFinanciado: 172, aplicarImpuesto: true,
+    creditoFavorAplicado: { id: 'CFAV-T10', monto: 300 },
+    items: [{
+      productoId: 'PRD-T03', varianteId: 'VAR-T03', nombreProducto: 'Producto Credito Test', sku: 'SKU-T03-U',
+      talla: 'M', color: 'Azul', cantidad: 2, costoUnitario: 100, precioUnitario: 200,
+      descuentoPorcentaje: 0, descuentoMonto: 0, subtotal: 400, impuestoMonto: 72, total: 472
+    }]
+  }, adminToken);
+  assert(saleRes.success === true, JSON.stringify(saleRes));
+
+  const credito = runInContext(`DbHelper.findById('Creditos_Favor', 'CFAV-T10')`);
+  assertEqual(Number(credito.saldo_disponible), 0);
+  assertEqual(credito.estado, 'APLICADA');
+
+  const cuentaPorCobrar = runInContext(`DbHelper.findById('Creditos', '${saleRes.cuentaCobrarId}')`);
+  assert(!!cuentaPorCobrar, 'debe crearse una cuenta por cobrar real por el remanente');
+  assertEqual(Number(cuentaPorCobrar.monto_original), 172, 'la deuda nueva debe ser SOLO el remanente (472 - 300), nunca el total completo');
+});
+
+test('SALE_CREDITO_FAVOR_PARTIAL_APPLICATION_LEAVES_REMAINING_BALANCE_ON_DOCUMENT', () => {
+  // Parte 6/8/13: el crédito disponible (1180) es mayor que lo que se
+  // decide aplicar (400) -- el resto (780) debe permanecer disponible en
+  // el MISMO documento para una venta futura, nunca perderse ni aplicarse
+  // de más automáticamente.
+  const emitido = issueCreditNoteForTest();
+  resetVarT01Stock(5);
+
+  const saleRes = doPostRaw('sales.create', buildValidSaleData({
+    clienteId: 'CLI-T01', clienteNombre: 'Cliente Test',
+    metodoPago: 'MIXTO',
+    pagos: [{ metodo: 'CREDITO_FAVOR', monto: 400 }, { metodo: 'EFECTIVO', monto: 780 }],
+    creditoFavorAplicado: { id: emitido.id, monto: 400 }
+  }), adminToken);
+  assert(saleRes.success === true, JSON.stringify(saleRes));
+  assertEqual(saleRes.creditoFavorAplicado.saldoRestante, 780);
+  assertEqual(saleRes.creditoFavorAplicado.estado, 'PARCIALMENTE_APLICADA');
+
+  const credito = runInContext(`DbHelper.findById('Creditos_Favor', '${emitido.id}')`);
+  assertEqual(Number(credito.saldo_disponible), 780, 'el remanente debe seguir disponible en el mismo documento');
+  assertEqual(credito.estado, 'PARCIALMENTE_APLICADA');
+});
+
+test('APPLY_CREDIT_NOTE_TO_ANULADA_SALE_REJECTED', () => {
+  // Hallazgo de auditoría (Parte 3/31): aplicar un crédito a una venta ya
+  // anulada no tiene sentido comercial -- esa venta ya no representa
+  // ningún cobro pendiente real.
+  const emitido = issueCreditNoteForTest();
+  const saleRes = doPostRaw('sales.create', buildValidSaleData({ clienteId: 'CLI-T01', clienteNombre: 'Cliente Test' }), adminToken);
+  assert(saleRes.success === true, JSON.stringify(saleRes));
+  const voidRes = doPostRaw('sales.void', { saleId: saleRes.saleId, motivo: 'Prueba de venta anulada' }, adminToken);
+  assert(voidRes.success === true, JSON.stringify(voidRes));
+
+  const applyRes = doPostRaw('creditNotes.apply', { creditoFavorId: emitido.id, ventaId: saleRes.saleId, monto: 100 }, adminToken);
+  assert(applyRes.success === false, 'no debe poder aplicarse un crédito a una venta anulada');
+  assert(String(applyRes.error || '').indexOf('INVALID_STATE') === 0, applyRes.error);
+});
+
+test('APPLY_ALREADY_VOIDED_CREDIT_NOTE_REJECTED', () => {
+  // Complementa CREDIT_NOTE_APPLY_MORE_THAN_BALANCE_REJECTED: un crédito
+  // ANULADO debe rechazarse incluso si el monto solicitado sí cabría en
+  // su saldo original.
+  const emitido = issueCreditNoteForTest();
+  doPostRaw('creditNotes.void', { creditoFavorId: emitido.id, motivo: 'Anulado antes de aplicar' }, adminToken);
+
+  const saleRes = doPostRaw('sales.create', buildValidSaleData({ clienteId: 'CLI-T01', clienteNombre: 'Cliente Test' }), adminToken);
+  const applyRes = doPostRaw('creditNotes.apply', { creditoFavorId: emitido.id, ventaId: saleRes.saleId, monto: 100 }, adminToken);
+  assert(applyRes.success === false, 'no debe poder aplicarse un crédito ya anulado');
+  assert(String(applyRes.error || '').indexOf('INVALID_STATE') === 0, applyRes.error);
+});
+
+test('SALE_INSUFFICIENT_STOCK_WITH_CREDIT_NOTE_NEVER_TOUCHES_CREDIT_BALANCE', () => {
+  // Parte 17/25 (rollback/consistencia): si la venta falla por stock
+  // insuficiente -- ANTES de siquiera abrir la transacción -- el crédito a
+  // favor referenciado nunca debe tocarse.
+  const emitido = issueCreditNoteForTest(); // saldo 1180
+  resetVarT01Stock(1); // solo 1 unidad disponible
+
+  const saleRes = doPostRaw('sales.create', buildValidSaleData({
+    clienteId: 'CLI-T01', clienteNombre: 'Cliente Test',
+    subtotal: 2000, impuestoTotal: 360, total: 2360, costoTotal: 1000,
+    items: [{
+      productoId: 'PRD-T01', varianteId: 'VAR-T01', nombreProducto: 'Producto Test', sku: 'SKU-T01-U',
+      talla: 'M', color: 'Negro', cantidad: 2, costoUnitario: 500, precioUnitario: 1000, // pide 2, solo hay 1
+      descuentoPorcentaje: 0, descuentoMonto: 0, subtotal: 2000, impuestoMonto: 360, total: 2360
+    }],
+    pagos: [{ metodo: 'CREDITO_FAVOR', monto: 1180 }, { metodo: 'EFECTIVO', monto: 1180 }],
+    creditoFavorAplicado: { id: emitido.id, monto: 1180 }
+  }), adminToken);
+
+  assert(saleRes.success === false, 'la venta debe rechazarse por stock insuficiente');
+  assert(String(saleRes.error || '').indexOf('STOCK_INSUFICIENTE') === 0, saleRes.error);
+
+  const credito = runInContext(`DbHelper.findById('Creditos_Favor', '${emitido.id}')`);
+  assertEqual(Number(credito.saldo_disponible), 1180, 'el crédito nunca debe tocarse si la venta falla antes de aplicar nada');
+  resetVarT01Stock(5);
+});
+
+test('TWO_SEQUENTIAL_SALES_CANNOT_BOTH_CONSUME_SAME_CREDIT_BALANCE', () => {
+  // Aproximación a la Parte 16 (concurrencia) a través del flujo COMPLETO
+  // de sales.create (no solo la acción independiente creditNotes.apply,
+  // ya cubierta arriba) -- confirma que el rollback de la SEGUNDA venta
+  // (rechazada) también revierte su propio stock, no solo el saldo del
+  // crédito.
+  const emitido = issueCreditNoteForTest(); // saldo 1180
+  resetVarT01Stock(5);
+
+  const sale1 = doPostRaw('sales.create', buildValidSaleData({
+    clienteId: 'CLI-T01', clienteNombre: 'Cliente Test',
+    metodoPago: 'MIXTO',
+    pagos: [{ metodo: 'CREDITO_FAVOR', monto: 800 }, { metodo: 'EFECTIVO', monto: 380 }],
+    creditoFavorAplicado: { id: emitido.id, monto: 800 }
+  }), adminToken);
+  assert(sale1.success === true, JSON.stringify(sale1));
+  assertEqual(sale1.creditoFavorAplicado.saldoRestante, 380);
+
+  const stockAntesSale2 = Number(runInContext("DbHelper.findById('Variantes', 'VAR-T01')").stock);
+
+  // Terminal B intenta usar RD$700 -- hubiera cabido en el saldo ORIGINAL
+  // (1180) pero no en el saldo YA reducido por la venta anterior (380).
+  const sale2 = doPostRaw('sales.create', buildValidSaleData({
+    clienteId: 'CLI-T01', clienteNombre: 'Cliente Test',
+    metodoPago: 'MIXTO',
+    pagos: [{ metodo: 'CREDITO_FAVOR', monto: 700 }, { metodo: 'EFECTIVO', monto: 480 }],
+    creditoFavorAplicado: { id: emitido.id, monto: 700 }
+  }), adminToken);
+  assert(sale2.success === false, 'la segunda venta no debe aprobarse -- el saldo real ya solo tiene RD$380');
+  assert(String(sale2.error || '').indexOf('SALDO_INSUFICIENTE') === 0, sale2.error);
+
+  const stockDespuesSale2 = Number(runInContext("DbHelper.findById('Variantes', 'VAR-T01')").stock);
+  assertEqual(stockDespuesSale2, stockAntesSale2, 'el stock de la segunda venta rechazada también debe revertirse por completo');
+
+  const credito = runInContext(`DbHelper.findById('Creditos_Favor', '${emitido.id}')`);
+  assertEqual(Number(credito.saldo_disponible), 380, 'el saldo final debe reflejar solo la primera venta exitosa');
+});
+
+/* ================================================================
+   FASE 8 (Parte 4) -- CASOS ADICIONALES DE HARDENING sobre la aplicación
+   de Crédito a Favor/Nota de Crédito en ventas, no cubiertos todavía por
+   los tests de Fase 6/7 de arriba.
+   ================================================================ */
+
+test('SALE_ACCEPTS_MINIMAL_PARTIAL_CREDIT_APPLICATION', () => {
+  // Parte 4, ítem 6: una aplicación parcial mínima (RD$1 de un saldo de
+  // RD$1,180) debe aceptarse -- no existe (ni debe inventarse) un piso
+  // artificial de monto mínimo.
+  const emitido = issueCreditNoteForTest();
+  const saleRes = doPostRaw('sales.create', buildValidSaleData({
+    clienteId: 'CLI-T01', clienteNombre: 'Cliente Test',
+    metodoPago: 'MIXTO',
+    pagos: [{ metodo: 'CREDITO_FAVOR', monto: 1 }, { metodo: 'EFECTIVO', monto: 1179 }],
+    creditoFavorAplicado: { id: emitido.id, monto: 1 }
+  }), adminToken);
+  assert(saleRes.success === true, JSON.stringify(saleRes));
+  assertEqual(saleRes.creditoFavorAplicado.saldoRestante, 1179);
+  assertEqual(saleRes.creditoFavorAplicado.estado, 'PARCIALMENTE_APLICADA');
+});
+
+test('SALE_REJECTS_CREDITO_FAVOR_MONTO_ZERO', () => {
+  // Parte 4, ítem 7: monto 0 debe rechazarse -- nunca se registra una
+  // "aplicación" vacía en el historial.
+  const emitido = issueCreditNoteForTest();
+  const saleRes = doPostRaw('sales.create', buildValidSaleData({
+    clienteId: 'CLI-T01', clienteNombre: 'Cliente Test',
+    creditoFavorAplicado: { id: emitido.id, monto: 0 }
+  }), adminToken);
+  assert(saleRes.success === false, 'un monto de crédito 0 debe rechazarse');
+  assert(String(saleRes.error || '').indexOf('VALIDATION_ERROR') === 0, saleRes.error);
+
+  const credito = runInContext(`DbHelper.findById('Creditos_Favor', '${emitido.id}')`);
+  assertEqual(Number(credito.saldo_disponible), 1180, 'el crédito no debe tocarse');
+  const aplicaciones = runInContext(`DbHelper.findRows('Creditos_Favor_Aplicaciones', a => a.credito_favor_id === '${emitido.id}')`);
+  assertEqual(aplicaciones.length, 0, 'no debe registrarse ninguna aplicación con monto 0');
+});
+
+test('SALE_REJECTS_CREDITO_FAVOR_MONTO_NEGATIVE', () => {
+  // Parte 4, ítem 8: monto negativo debe rechazarse.
+  const emitido = issueCreditNoteForTest();
+  const saleRes = doPostRaw('sales.create', buildValidSaleData({
+    clienteId: 'CLI-T01', clienteNombre: 'Cliente Test',
+    creditoFavorAplicado: { id: emitido.id, monto: -100 }
+  }), adminToken);
+  assert(saleRes.success === false, 'un monto de crédito negativo debe rechazarse');
+  assert(String(saleRes.error || '').indexOf('VALIDATION_ERROR') === 0, saleRes.error);
+
+  const credito = runInContext(`DbHelper.findById('Creditos_Favor', '${emitido.id}')`);
+  assertEqual(Number(credito.saldo_disponible), 1180, 'el crédito no debe tocarse');
+});
+
+test('SALE_REJECTS_CREDITO_FAVOR_MONTO_EXCEEDING_SALE_TOTAL', () => {
+  // Parte 4, ítem 10: el monto de crédito declarado nunca puede superar el
+  // total real de la venta -- queda estructuralmente imposible de colar
+  // porque sumaPagos siempre debe cuadrar exactamente con el total
+  // recalculado autoritativamente por el servidor.
+  const emitido = issueCreditNoteForTest(); // saldo 1180, mayor al total de esta venta (1180 exacto)
+  resetVarT01Stock(5);
+  const saleRes = doPostRaw('sales.create', buildValidSaleData({
+    clienteId: 'CLI-T01', clienteNombre: 'Cliente Test',
+    // La venta real (fixture) totaliza 1180 -- se declara un crédito de
+    // 5000, muy por encima, intentando "sobre-cubrir" el total.
+    pagos: [{ metodo: 'CREDITO_FAVOR', monto: 5000 }],
+    creditoFavorAplicado: { id: emitido.id, monto: 5000 }
+  }), adminToken);
+  assert(saleRes.success === false, 'un crédito declarado por encima del total real de la venta debe rechazarse');
+  assert(String(saleRes.error || '').indexOf('PRICE_MISMATCH') === 0, saleRes.error);
+
+  const credito = runInContext(`DbHelper.findById('Creditos_Favor', '${emitido.id}')`);
+  assertEqual(Number(credito.saldo_disponible), 1180, 'el crédito no debe tocarse');
+});
+
+test('SALE_REJECTS_CREDITO_FAVOR_FOR_INACTIVE_CUSTOMER', () => {
+  // Parte 4, ítem 13: un cliente marcado INACTIVO no debe poder aplicar un
+  // crédito a favor, igual que ya no puede comprar a cuenta por cobrar.
+  runInContext(`
+    DbHelper.insertRow('Clientes', {
+      id: 'CLI-T-INACTIVO', nombre: 'Cliente', apellido: 'Inactivo', documento: '000-0000000-9', telefono: '000',
+      correo: '', direccion: '', ciudad: '', limite_credito: 500, dias_credito_por_defecto: 15,
+      notas: '', estado: 'INACTIVO', creado_en: getNowFormatted()
+    });
+    DbHelper.insertRow('Creditos_Favor', {
+      id: 'CFAV-INACTIVO', numero: 'CFAV-INACTIVO', tipo: 'VALE_TIENDA', cliente_id: 'CLI-T-INACTIVO',
+      cliente_nombre: 'Cliente Inactivo', devolucion_id: '', venta_origen_id: '',
+      monto_original: 500, monto_aplicado: 0, saldo_disponible: 500, estado: 'EMITIDA',
+      motivo_anulacion: '', anulado_por: '', fecha_anulacion: '',
+      usuario_id: 'USR-001', usuario_nombre: 'Sistema',
+      fecha_creacion: getNowFormatted(), actualizado_en: getNowFormatted()
+    });
+  `);
+  resetVarT01Stock(5);
+
+  const saleRes = doPostRaw('sales.create', buildValidSaleData({
+    clienteId: 'CLI-T-INACTIVO', clienteNombre: 'Cliente Inactivo',
+    pagos: [{ metodo: 'CREDITO_FAVOR', monto: 1180 }],
+    creditoFavorAplicado: { id: 'CFAV-INACTIVO', monto: 1180 }
+  }), adminToken);
+  assert(saleRes.success === false, 'un cliente inactivo no debe poder aplicar un crédito a favor');
+  assert(String(saleRes.error || '').indexOf('CREDIT_ERROR') === 0, saleRes.error);
+
+  const credito = runInContext(`DbHelper.findById('Creditos_Favor', 'CFAV-INACTIVO')`);
+  assertEqual(Number(credito.saldo_disponible), 500, 'el crédito no debe tocarse');
+});
+
+test('SALE_REJECTS_REUSING_ALREADY_APLICADA_CREDIT_NOTE', () => {
+  // Parte 4, ítem 15: reutilizar un documento ya en estado APLICADA (saldo
+  // agotado por una aplicación TOTAL anterior, no solo parcial) debe
+  // rechazarse igual que cualquier saldo insuficiente.
+  const emitido = issueCreditNoteForTest(); // saldo 1180
+  const primeraVenta = doPostRaw('sales.create', buildValidSaleData({
+    clienteId: 'CLI-T01', clienteNombre: 'Cliente Test',
+    pagos: [{ metodo: 'CREDITO_FAVOR', monto: 1180 }],
+    creditoFavorAplicado: { id: emitido.id, monto: 1180 }
+  }), adminToken);
+  assert(primeraVenta.success === true, JSON.stringify(primeraVenta));
+  assertEqual(primeraVenta.creditoFavorAplicado.estado, 'APLICADA');
+
+  resetVarT01Stock(5);
+  const segundaVenta = doPostRaw('sales.create', buildValidSaleData({
+    clienteId: 'CLI-T01', clienteNombre: 'Cliente Test',
+    pagos: [{ metodo: 'CREDITO_FAVOR', monto: 1 }, { metodo: 'EFECTIVO', monto: 1179 }],
+    creditoFavorAplicado: { id: emitido.id, monto: 1 }
+  }), adminToken);
+  assert(segundaVenta.success === false, 'un documento ya APLICADA no debe poder reutilizarse ni por un monto mínimo');
+  assert(String(segundaVenta.error || '').indexOf('SALDO_INSUFICIENTE') === 0, segundaVenta.error);
+});
+
+/* ================================================================
+   FASE 8 -- MIGRACIÓN IDEMPOTENTE DE PERMISOS creditos_favor.*
+   (Parte 2): instalación nueva ya los recibe vía seedInitialData()
+   (probado directamente contra el estado real sembrado al inicio de esta
+   suite); instalación existente los recibe al migrar; los permisos ya
+   presentes (estándar o personalizados) se conservan intactos; ejecutar
+   la migración más de una vez nunca duplica nada; roles desconocidos y
+   filas con permisos_json inválido nunca se tocan.
+   ================================================================ */
+
+function setRolePermisosJsonForTest(rol, permisosArray) {
+  const rawJson = JSON.stringify(permisosArray);
+  runInContext(`
+    (function() {
+      const sheet = DbHelper.getSheet('Roles_Permisos');
+      const data = sheet.getDataRange().getValues();
+      const headers = data[0].map(h => String(h).trim());
+      const rolIdx = headers.indexOf('rol');
+      const jsonIdx = headers.indexOf('permisos_json');
+      for (let i = 1; i < data.length; i++) {
+        if (String(data[i][rolIdx]).trim() === ${JSON.stringify(rol)}) {
+          sheet.getRange(i + 1, jsonIdx + 1).setValue(${JSON.stringify(rawJson)});
+          break;
+        }
+      }
+    })();
+  `);
+}
+
+function getRolePermisosJsonForTest(rol) {
+  const row = runInContext(`DbHelper.getAllRows('Roles_Permisos').find(r => r.rol === ${JSON.stringify(rol)})`);
+  return JSON.parse(row.permisos_json || '[]');
+}
+
+// A diferencia de setRolePermisosJsonForTest (que siempre escribe un
+// JSON.stringify válido de un arreglo real), esta variante escribe texto
+// CRUDO en la celda -- necesaria para simular una celda ya corrupta.
+function setRolePermisosRawCellForTest(rol, rawValue) {
+  runInContext(`
+    (function() {
+      const sheet = DbHelper.getSheet('Roles_Permisos');
+      const data = sheet.getDataRange().getValues();
+      const headers = data[0].map(h => String(h).trim());
+      const rolIdx = headers.indexOf('rol');
+      const jsonIdx = headers.indexOf('permisos_json');
+      for (let i = 1; i < data.length; i++) {
+        if (String(data[i][rolIdx]).trim() === ${JSON.stringify(rol)}) {
+          sheet.getRange(i + 1, jsonIdx + 1).setValue(${JSON.stringify(rawValue)});
+          break;
+        }
+      }
+    })();
+  `);
+}
+
+test('PERMISSIONS_NEW_INSTALL_ALREADY_HAS_CREDITOS_FAVOR_VIA_SEED', () => {
+  // "Instalación nueva recibe permisos": seedInitialData() ya corrió al
+  // inicio de esta misma suite (setupDatabase(); seedInitialData();) --
+  // se confirma directamente contra ese estado real, sin migrar nada.
+  const admin = getRolePermisosJsonForTest('ADMIN');
+  const gerente = getRolePermisosJsonForTest('GERENTE');
+  const supervisor = getRolePermisosJsonForTest('SUPERVISOR');
+  const cajero = getRolePermisosJsonForTest('CAJERO');
+  const vendedor = getRolePermisosJsonForTest('VENDEDOR');
+
+  ['creditos_favor.ver', 'creditos_favor.crear', 'creditos_favor.aplicar', 'creditos_favor.anular'].forEach(p => {
+    assert(admin.includes(p), `ADMIN debe tener ${p} desde el seed de una instalación nueva`);
+    assert(gerente.includes(p), `GERENTE debe tener ${p} desde el seed de una instalación nueva`);
+  });
+  ['creditos_favor.ver', 'creditos_favor.crear', 'creditos_favor.aplicar'].forEach(p => {
+    assert(supervisor.includes(p), `SUPERVISOR debe tener ${p} desde el seed`);
+  });
+  assert(!supervisor.includes('creditos_favor.anular'), 'SUPERVISOR NUNCA debe tener creditos_favor.anular por defecto');
+  ['creditos_favor.ver', 'creditos_favor.aplicar'].forEach(p => {
+    assert(cajero.includes(p), `CAJERO debe tener ${p} desde el seed`);
+    assert(vendedor.includes(p), `VENDEDOR debe tener ${p} desde el seed`);
+  });
+  assert(!cajero.includes('creditos_favor.crear') && !cajero.includes('creditos_favor.anular'), 'CAJERO NUNCA debe tener crear/anular por defecto');
+});
+
+test('PERMISSIONS_MIGRATION_ADDS_MISSING_PERMISSIONS_TO_EXISTING_INSTALL', () => {
+  // Simula una instalación EXISTENTE (sembrada antes de la Fase 6): el rol
+  // CAJERO tiene sus permisos normales pero SIN ninguno de
+  // creditos_favor.*.
+  setRolePermisosJsonForTest('CAJERO', ['ventas.crear', 'ventas.ver', 'caja.abrir', 'caja.ver', 'clientes.ver']);
+  const before = getRolePermisosJsonForTest('CAJERO');
+  assert(!before.includes('creditos_favor.ver'), 'fixture debe simular una instalación sin estos permisos todavía');
+
+  const migRes = doPostRaw('system.migrateCreditosFavorPermissions', {}, adminToken);
+  assert(migRes.success === true, JSON.stringify(migRes));
+  const cajeroUpdated = migRes.rolesUpdated.find(r => r.rol === 'CAJERO');
+  assert(!!cajeroUpdated, 'CAJERO debe reportarse como actualizado');
+  assertEqual(JSON.stringify(cajeroUpdated.permisosAgregados.slice().sort()), JSON.stringify(['creditos_favor.aplicar', 'creditos_favor.ver'].sort()));
+
+  const after = getRolePermisosJsonForTest('CAJERO');
+  assert(after.includes('creditos_favor.ver') && after.includes('creditos_favor.aplicar'), 'CAJERO debe recibir los permisos faltantes');
+  assert(!after.includes('creditos_favor.crear') && !after.includes('creditos_favor.anular'), 'CAJERO nunca debe recibir crear/anular (no le corresponden)');
+});
+
+test('PERMISSIONS_MIGRATION_PRESERVES_EXISTING_AND_CUSTOM_PERMISSIONS', () => {
+  // "Permisos existentes se conservan": se incluye deliberadamente un
+  // permiso personalizado inventado por el negocio (que nunca existió en
+  // ningún catálogo de este sistema) para confirmar que la migración
+  // JAMÁS lo toca ni lo reordena fuera de su lugar.
+  setRolePermisosJsonForTest('VENDEDOR', ['ventas.crear', 'ventas.ver', 'reportes.experimental_del_negocio']);
+
+  const migRes = doPostRaw('system.migrateCreditosFavorPermissions', {}, adminToken);
+  assert(migRes.success === true, JSON.stringify(migRes));
+
+  const after = getRolePermisosJsonForTest('VENDEDOR');
+  assert(after.includes('ventas.crear'), 'un permiso estándar preexistente no debe perderse');
+  assert(after.includes('ventas.ver'), 'un permiso estándar preexistente no debe perderse');
+  assert(after.includes('reportes.experimental_del_negocio'), 'un permiso personalizado del negocio NUNCA debe eliminarse ni reemplazarse');
+  assert(after.includes('creditos_favor.ver') && after.includes('creditos_favor.aplicar'), 'los permisos nuevos que le corresponden deben agregarse');
+  assertEqual(after.length, 5, 'el resultado debe ser exactamente los 3 originales + los 2 nuevos que le corresponden a VENDEDOR, sin nada extra');
+});
+
+test('PERMISSIONS_MIGRATION_RUNNING_TWICE_NEVER_DUPLICATES', () => {
+  setRolePermisosJsonForTest('SUPERVISOR', ['ventas.crear', 'caja.abrir']);
+
+  const first = doPostRaw('system.migrateCreditosFavorPermissions', {}, adminToken);
+  assert(first.success === true, JSON.stringify(first));
+  const afterFirst = getRolePermisosJsonForTest('SUPERVISOR');
+
+  const second = doPostRaw('system.migrateCreditosFavorPermissions', {}, adminToken);
+  assert(second.success === true, JSON.stringify(second));
+  const afterSecond = getRolePermisosJsonForTest('SUPERVISOR');
+
+  assertEqual(JSON.stringify(afterFirst.slice().sort()), JSON.stringify(afterSecond.slice().sort()), 'ejecutar la migración dos veces debe producir exactamente el mismo resultado');
+  const uniqueCount = new Set(afterSecond).size;
+  assertEqual(uniqueCount, afterSecond.length, 'no debe haber ninguna cadena de permiso duplicada tras ejecutar la migración dos veces');
+
+  const secondSupervisorEntry = second.rolesUpdated.find(r => r.rol === 'SUPERVISOR');
+  assert(!secondSupervisorEntry, 'la segunda ejecución no debe reportar a SUPERVISOR como actualizado -- ya no le falta nada');
+  assert(second.rolesUnchanged.includes('SUPERVISOR'), 'la segunda ejecución debe reportar a SUPERVISOR como sin cambios');
+});
+
+test('PERMISSIONS_MIGRATION_NEVER_TOUCHES_UNKNOWN_CUSTOM_ROLE', () => {
+  // Un rol personalizado creado por el negocio (fuera de los 5 estándar)
+  // -- la migración no tiene un conjunto "correcto" definido para él, así
+  // que debe dejarlo completamente intacto.
+  runInContext(`
+    DbHelper.insertRow('Roles_Permisos', {
+      rol: 'CONSULTOR_EXTERNO', nombre: 'Consultor Externo', descripcion: 'Rol personalizado del negocio',
+      permisos_json: JSON.stringify(['reportes.ventas'])
+    });
+  `);
+
+  const migRes = doPostRaw('system.migrateCreditosFavorPermissions', {}, adminToken);
+  assert(migRes.success === true, JSON.stringify(migRes));
+  assert(migRes.rolesSkippedUnknown.includes('CONSULTOR_EXTERNO'), 'el rol personalizado debe reportarse como no reconocido, nunca como actualizado');
+
+  const after = getRolePermisosJsonForTest('CONSULTOR_EXTERNO');
+  assertEqual(JSON.stringify(after), JSON.stringify(['reportes.ventas']), 'un rol personalizado desconocido nunca debe modificarse');
+});
+
+test('PERMISSIONS_MIGRATION_NEVER_OVERWRITES_INVALID_JSON_CELL', () => {
+  // Defensa adicional: si por alguna razón permisos_json de un rol
+  // ESTÁNDAR reconocido (no uno personalizado -- ese caso ya lo cubre
+  // PERMISSIONS_MIGRATION_NEVER_TOUCHES_UNKNOWN_CUSTOM_ROLE) quedó
+  // corrupto (no es JSON válido), la migración nunca debe sobreescribirlo
+  // a ciegas -- se reporta para revisión manual en vez de arriesgar datos.
+  setRolePermisosRawCellForTest('SUPERVISOR', 'esto no es JSON válido {{{');
+
+  const migRes = doPostRaw('system.migrateCreditosFavorPermissions', {}, adminToken);
+  assert(migRes.success === true, JSON.stringify(migRes));
+  assert(migRes.rolesSkippedInvalidJson.includes('SUPERVISOR'), 'una fila con permisos_json inválido debe reportarse, nunca sobreescribirse a ciegas');
+  assert(!migRes.rolesUpdated.some(r => r.rol === 'SUPERVISOR'), 'un rol con JSON corrupto nunca debe reportarse como actualizado');
+
+  const rawAfter = runInContext(`DbHelper.getAllRows('Roles_Permisos').find(r => r.rol === 'SUPERVISOR').permisos_json`);
+  assertEqual(rawAfter, 'esto no es JSON válido {{{', 'la celda corrupta debe permanecer exactamente igual, sin tocarse');
+
+  // Restaurado a un estado válido para no dejar SUPERVISOR permanentemente
+  // corrupto en el contexto compartido de esta suite.
+  setRolePermisosJsonForTest('SUPERVISOR', ['ventas.crear', 'caja.abrir', 'creditos_favor.ver', 'creditos_favor.crear', 'creditos_favor.aplicar']);
+});
+
+test('PERMISSIONS_MIGRATION_REQUIRES_ADMIN_ROLES_PERMISSION', () => {
+  // Nunca debe poder ejecutarse sin autorización -- requiere el mismo
+  // permiso administrativo que ya protege la gestión de roles.
+  const cajeroSession = login('cajero', 'cajero123');
+  const res = doPostRaw('system.migrateCreditosFavorPermissions', {}, cajeroSession.sessionToken);
+  assert(res.success === false, 'CAJERO no debe poder ejecutar la migración de permisos');
+  assert(String(res.error || '').indexOf('FORBIDDEN') === 0, res.error);
 });
 
 /* ------------------------------------------------------------

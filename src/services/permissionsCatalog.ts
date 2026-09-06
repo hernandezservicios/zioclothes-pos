@@ -70,6 +70,22 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
     ],
   },
   {
+    // FASE 7 (Parte 27 -- "no dejar referencias incompletas"): estos 4
+    // permisos ya existen y se validan en el backend real desde la FASE 6
+    // (CreditNotesController.gs/SeedSetup.gs) -- se agregan aquí también
+    // para que este catálogo (usado como fallback antes de tener una
+    // sesión real, ver AuthContext.hasPermission) no quede desactualizado
+    // respecto a lo que el backend realmente reconoce.
+    modulo: 'CREDITOS_FAVOR',
+    nombre: 'Créditos a Favor / Vales y Notas de Crédito',
+    permisos: [
+      { codigo: 'creditos_favor.ver', nombre: 'Ver créditos a favor', descripcion: 'Consultar Vales/Notas de Crédito y su saldo disponible' },
+      { codigo: 'creditos_favor.crear', nombre: 'Emitir créditos a favor', descripcion: 'Generar un Vale/Nota de Crédito a partir de una devolución' },
+      { codigo: 'creditos_favor.aplicar', nombre: 'Aplicar créditos a favor', descripcion: 'Usar el saldo de un Vale/Nota de Crédito como pago en una venta' },
+      { codigo: 'creditos_favor.anular', nombre: 'Anular créditos a favor', descripcion: 'Anular un Vale/Nota de Crédito emitido que aún no fue aplicado' },
+    ],
+  },
+  {
     modulo: 'CAJA',
     nombre: 'Caja y Efectivo',
     permisos: [
@@ -146,6 +162,12 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<UserRole, PermissionCode[]> = {
     'abonos.crear',
     'creditos.ver_deudas',
     'creditos.ver_vencidas',
+    // FASE 7 (Parte 27): mismo criterio ya usado en SeedSetup.gs -- CAJERO
+    // puede consultar y aplicar créditos a favor/notas de crédito en una
+    // venta, pero no emitirlos (no procesa devoluciones por defecto) ni
+    // anularlos.
+    'creditos_favor.ver',
+    'creditos_favor.aplicar',
     'caja.abrir',
     'caja.cerrar',
     'caja.ver',
@@ -178,6 +200,12 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<UserRole, PermissionCode[]> = {
     'creditos.anular_abonos',
     'creditos.ver_deudas',
     'creditos.ver_vencidas',
+    // FASE 7 (Parte 27): mismo criterio ya usado en SeedSetup.gs -- igual
+    // que con 'creditos.anular_abonos' arriba, SUPERVISOR puede ver/crear/
+    // aplicar créditos a favor pero no anularlos.
+    'creditos_favor.ver',
+    'creditos_favor.crear',
+    'creditos_favor.aplicar',
     'caja.abrir',
     'caja.cerrar',
     'caja.ver',
@@ -203,6 +231,10 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<UserRole, PermissionCode[]> = {
     'clientes.crear',
     'creditos.ver',
     'creditos.ver_deudas',
+    // FASE 7 (Parte 27): mismo criterio ya usado en SeedSetup.gs -- puede
+    // ver/aplicar créditos a favor en el POS, no emitirlos ni anularlos.
+    'creditos_favor.ver',
+    'creditos_favor.aplicar',
   ],
   GERENTE: [
     ...ALL_PERMISSIONS.filter((p) => p !== 'admin.configuracion' && p !== 'admin.roles'),

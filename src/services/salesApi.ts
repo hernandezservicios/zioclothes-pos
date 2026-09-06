@@ -11,6 +11,15 @@
  * transacción con rollback de compensación). Este archivo NUNCA calcula ni
  * decide esas cosas: solo envía lo que el usuario armó en el carrito y
  * refleja exactamente lo que el backend confirmó.
+ *
+ * FASE 7 (integración operativa de Créditos a Favor / Notas de Crédito en
+ * el POS): `creditoFavorAplicado` es opcional -- si el cajero aplicó un
+ * saldo a favor del cliente como parte del pago, se envía junto con una
+ * línea `{metodo:'CREDITO_FAVOR', monto}` dentro de `pagos` (con el MISMO
+ * monto exacto, el backend lo exige). El backend relee/revalida el saldo,
+ * la pertenencia al cliente y el estado del crédito dentro del mismo
+ * candado/transacción de la venta -- nunca se confía en lo que declare
+ * este payload para decidir el resultado, solo para intentarlo.
  */
 import { Sale, SaleItem, SalePaymentSplit, PaymentMethodType } from '../types';
 import { storageService } from './storageService';
@@ -35,6 +44,11 @@ export interface CreateSalePayload {
   esCredito: boolean;
   montoFinanciado?: number;
   aplicarImpuesto: boolean;
+  // FASE 7: si el POS aplicó un Crédito a Favor/Nota de Crédito a esta
+  // venta, el backend exige que `monto` coincida EXACTAMENTE con la suma
+  // de las líneas de `pagos` cuyo `metodo` sea 'CREDITO_FAVOR' (ver
+  // SalesController.handleCreateSale) -- nunca se envía uno sin el otro.
+  creditoFavorAplicado?: { id: string; monto: number };
 }
 
 class SalesApi {
@@ -110,6 +124,7 @@ class SalesApi {
       // se usa la hora local del cliente solo como aproximación de
       // visualización en el recibo, nunca como registro autoritativo.
       fecha: new Date().toISOString().replace('T', ' ').substring(0, 19),
+      creditoFavorAplicado: raw.creditoFavorAplicado || undefined,
     };
 
     return {

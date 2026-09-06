@@ -247,6 +247,36 @@ const ReturnsController = {
           }
         }
 
+        // FASE 6 (créditos a favor / notas de crédito): si el reembolso
+        // elegido es VALE_TIENDA o NOTA_CREDITO (o su valor histórico
+        // equivalente CREDITO_CUENTA -- ver Parte 17 del reporte de esta
+        // fase, compatibilidad sin romper datos existentes), se emite un
+        // Crédito a Favor/Nota de Crédito real por el monto de la
+        // devolución, DENTRO de esta misma transacción.
+        //
+        // Guarda deliberada: NO se emite si la venta original ya generó
+        // una cuenta por cobrar (sale.cuenta_cobrar_id) -- en ese caso el
+        // bloque de abajo YA reduce esa deuda por el mismo monto
+        // devuelto (lógica preexistente, sin tocar); emitir además un
+        // crédito nuevo duplicaría el beneficio para el cliente por la
+        // misma devolución. Este caso límite (devolución de una venta A
+        // CRÉDITO eligiendo específicamente "Vale"/"Nota de Crédito")
+        // queda documentado como riesgo pendiente en el reporte -- no se
+        // inventó una política de negocio para él.
+        let creditoFavorEmitido = null;
+        const esCreditoFavor = data.tipoReembolso === 'VALE_TIENDA';
+        const esNotaCredito = data.tipoReembolso === 'NOTA_CREDITO' || data.tipoReembolso === 'CREDITO_CUENTA';
+        if ((esCreditoFavor || esNotaCredito) && !sale.cuenta_cobrar_id) {
+          creditoFavorEmitido = CreditNotesController.issueFromReturnWithinTx_(
+            tx,
+            esNotaCredito ? 'NOTA_CREDITO' : 'VALE_TIENDA',
+            sale,
+            returnId,
+            computed.totalRefund,
+            user
+          );
+        }
+
         // If the return corresponds to a credit sale, reduce the
         // outstanding credit balance proportionally (crédito real, no
         // inventado): solo si la venta generó una cuenta por cobrar.
@@ -327,7 +357,8 @@ const ReturnsController = {
           success: true,
           message: `Devolución ${returnId} procesada exitosamente por RD$${computed.totalRefund.toLocaleString()}.`,
           devolucionId: returnId,
-          montoDevuelto: computed.totalRefund
+          montoDevuelto: computed.totalRefund,
+          creditoFavorEmitido: creditoFavorEmitido || undefined
         };
 
       } catch (err) {

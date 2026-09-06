@@ -32,7 +32,18 @@
  *                      independientemente de tipoReembolso (ver
  *                      ReturnsController.gs líneas ~250-269; documentado
  *                      en el reporte de esta fase). Devuelve
- *                      { success, message, devolucionId, montoDevuelto }.
+ *                      { success, message, devolucionId, montoDevuelto,
+ *                      creditoFavorEmitido? }.
+ *
+ * FASE 6 (créditos a favor / notas de crédito): si tipoReembolso es
+ * 'VALE_TIENDA' o 'NOTA_CREDITO' (o el valor histórico equivalente
+ * 'CREDITO_CUENTA') Y la venta original tiene un cliente real (nunca
+ * "Consumidor Final" -- se rechaza con CLIENTE_REQUERIDO), el backend
+ * emite un Crédito a Favor/Nota de Crédito real DENTRO de esta misma
+ * transacción (ver CreditNotesController.gs) y lo devuelve en
+ * `creditoFavorEmitido`. No ocurre si la venta original ya tenía cuenta
+ * por cobrar propia (ese caso reduce esa deuda en su lugar, lógica
+ * preexistente sin cambios).
  *
  * NO existe `returns.void` en Main.gs/ReturnsController.gs -- no se
  * inventa. El frontend nunca debe llamar cashApi.addMovement() ni tocar
@@ -78,7 +89,11 @@ class ReturnsApi {
    * subtotal, descuento, impuesto, costo o stock resultante: el backend
    * recalcula todo eso desde la venta original real.
    */
-  public async create(payload: CreateReturnPayload): Promise<ApiResponse<{ devolucionId: string; montoDevuelto: number }>> {
+  public async create(payload: CreateReturnPayload): Promise<ApiResponse<{
+    devolucionId: string;
+    montoDevuelto: number;
+    creditoFavorEmitido?: { id: string; numero: string; tipo: 'VALE_TIENDA' | 'NOTA_CREDITO'; montoOriginal: number };
+  }>> {
     const token = this.token();
     if (!token) {
       return {
@@ -105,7 +120,11 @@ class ReturnsApi {
     return {
       success: true,
       message: res.message || `Devolución ${raw.devolucionId} procesada.`,
-      data: { devolucionId: raw.devolucionId, montoDevuelto: Number(raw.montoDevuelto) },
+      data: {
+        devolucionId: raw.devolucionId,
+        montoDevuelto: Number(raw.montoDevuelto),
+        creditoFavorEmitido: raw.creditoFavorEmitido || undefined,
+      },
     };
   }
 }

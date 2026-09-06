@@ -136,6 +136,17 @@ function doPost(e) {
       case 'system.seedInitialData':
         result = seedInitialData();
         break;
+      // FASE 8 (Parte 2): migración idempotente de permisos
+      // creditos_favor.* para instalaciones YA EXISTENTES -- a diferencia
+      // de setupDatabase/seedInitialData (bootstrap de una instalación
+      // nueva, sin usuarios todavía), esta acción opera sobre una
+      // instalación real ya en uso, así que SÍ exige una sesión válida y
+      // el mismo permiso administrativo que ya protege la gestión de
+      // roles (admin.roles) -- nunca se agrega a `publicActions`.
+      case 'system.migrateCreditosFavorPermissions':
+        Security.requirePermission(currentUser, 'admin.roles');
+        result = migrateCreditosFavorPermissions();
+        break;
       case 'system.getBootstrapData':
         result = SettingsController.handleGetBootstrapData();
         break;
@@ -202,6 +213,18 @@ function doPost(e) {
         break;
       case 'credits.voidAbono':
         result = CreditsController.handleVoidAbono(data, currentUser);
+        break;
+
+      // --- CREDIT NOTES / STORE CREDIT (Créditos a Favor / Vales / Notas
+      // de Crédito -- FASE 6) ---
+      case 'creditNotes.list':
+        result = CreditNotesController.handleListCreditNotes(data);
+        break;
+      case 'creditNotes.apply':
+        result = CreditNotesController.handleApplyCreditNote(data, currentUser);
+        break;
+      case 'creditNotes.void':
+        result = CreditNotesController.handleVoidCreditNote(data, currentUser);
         break;
 
       // --- CASH REGISTER ---

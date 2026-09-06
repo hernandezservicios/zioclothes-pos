@@ -18,6 +18,8 @@ import {
   Settings,
   X,
   FileSpreadsheet,
+  FileText,
+  Gift,
 } from 'lucide-react';
 
 interface SidebarProps {
@@ -59,10 +61,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
         // "Devoluciones" -- se conserva el `id` interno ('returns') para
         // no romper la navegación/permisos, solo cambia la etiqueta visible.
         { id: 'returns', label: 'Devoluciones', icon: RotateCcw, permission: 'devoluciones.ver' },
-        // "Notas de Crédito" NO se agrega aquí todavía -- esa pantalla no
-        // existe (ver auditoría en el reporte de esta fase). Agregarla
-        // ahora sería un botón sin funcionalidad real, explícitamente
-        // prohibido por esta misma fase.
+        // FASE 6: ahora sí existe una pantalla real detrás de esta
+        // etiqueta (CreditNotesView, filtrada a tipo NOTA_CREDITO) --
+        // búsqueda por número/cliente/venta, detalle con historial de
+        // aplicaciones, e impresión/reimpresión.
+        { id: 'creditNotes', label: 'Notas de Crédito', icon: FileText, permission: 'creditos_favor.ver' },
         { id: 'customers', label: 'Clientes', icon: Users, permission: 'clientes.ver' },
       ],
     },
@@ -81,9 +84,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
       items: [
         { id: 'credits', label: 'Cuentas por Cobrar', icon: CreditCard, permission: 'creditos.ver' },
         { id: 'installments', label: 'Abonos Recibidos', icon: Coins, permission: 'abonos.ver' },
-        // "Créditos a Favor / Vales" NO se agrega aquí todavía -- misma
-        // razón que "Notas de Crédito" arriba: no existe una pantalla real
-        // detrás de esa etiqueta hoy (ver auditoría en el reporte).
+        // FASE 6: misma pantalla que "Notas de Crédito" (CreditNotesView),
+        // filtrada a tipo VALE_TIENDA -- saldo reutilizable a favor del
+        // cliente, no debe confundirse con "Cuentas por Cobrar" de arriba
+        // (naturaleza opuesta: ahí el cliente le debe al negocio).
+        { id: 'storeCredits', label: 'Créditos a Favor / Vales', icon: Gift, permission: 'creditos_favor.ver' },
         { id: 'cash', label: 'Caja & Cuadres de Turno', icon: Wallet, permission: 'caja.ver' },
       ],
     },

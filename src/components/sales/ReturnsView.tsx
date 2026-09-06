@@ -18,8 +18,17 @@ export const ReturnsView: React.FC = () => {
   // (ReturnsController.handleListReturns -> Google Sheets real). Este
   // dominio (`returns`) no está duplicado en ninguna otra vista, así que
   // sigue siendo propio de este componente.
-  const { sales, salesLoading, salesError, salesStale, refreshSales, refreshProducts, refreshCredits, refreshCustomers } =
-    useDataStore();
+  const {
+    sales,
+    salesLoading,
+    salesError,
+    salesStale,
+    refreshSales,
+    refreshProducts,
+    refreshCredits,
+    refreshCreditNotes,
+    refreshCustomers,
+  } = useDataStore();
 
   const [returns, setReturns] = useState<ReturnRecord[]>([]);
   const [returnsLoading, setReturnsLoading] = useState(true);
@@ -51,6 +60,14 @@ export const ReturnsView: React.FC = () => {
   const [returnReason, setReturnReason] = useState('Cambio por talla diferente');
   const [refundType, setRefundType] = useState<string>('EFECTIVO');
   const [processing, setProcessing] = useState(false);
+  // FASE 6: confirmación visible del Crédito a Favor/Nota de Crédito recién
+  // emitido por el backend (creditoFavorEmitido), si la devolución generó
+  // uno -- se limpia al buscar otra venta o iniciar una nueva devolución.
+  const [lastIssuedCreditNote, setLastIssuedCreditNote] = useState<{
+    numero: string;
+    tipo: 'VALE_TIENDA' | 'NOTA_CREDITO';
+    montoOriginal: number;
+  } | null>(null);
 
   const handleSearchSale = (e: React.FormEvent) => {
     e.preventDefault();
@@ -74,6 +91,7 @@ export const ReturnsView: React.FC = () => {
     setSelectedVariantId(sale.items?.[0]?.varianteId || '');
     setReturnQuantity(1);
     setRefundType('EFECTIVO');
+    setLastIssuedCreditNote(null);
   };
 
   const selectedItem = (foundSale?.items || []).find((i) => i.varianteId === selectedVariantId);
@@ -138,19 +156,33 @@ export const ReturnsView: React.FC = () => {
       showToast('Devolución Procesada', res.message, 'exito');
       setFoundSale(null);
       setSearchSaleCode('');
+      // FASE 6: si la devolución emitió un Crédito a Favor/Nota de Crédito
+      // real (creditoFavorEmitido), se muestra su número de inmediato --
+      // ausente si el reembolso fue en efectivo, si la venta ya tenía
+      // cuenta por cobrar propia, o en devoluciones históricas.
+      setLastIssuedCreditNote(res.data?.creditoFavorEmitido
+        ? {
+            numero: res.data.creditoFavorEmitido.numero,
+            tipo: res.data.creditoFavorEmitido.tipo,
+            montoOriginal: res.data.creditoFavorEmitido.montoOriginal,
+          }
+        : null);
       // CORREGIR AUDITORÍA (§5): invalida el DataStore central de ventas,
       // productos (stock reintegrado) y créditos (el backend reduce el
       // saldo de la cuenta por cobrar asociada si existía, sin importar
       // tipoReembolso -- ver ReturnsController.gs) -- POS/Catálogo/
       // Inventario/Créditos/Dashboard/Reportes reflejan el resultado de
       // inmediato, sin logout/login ni F5. Si el reembolso fue en
-      // efectivo, la caja activa real también pudo cambiar.
+      // efectivo, la caja activa real también pudo cambiar. FASE 6: además
+      // invalida creditNotes si se emitió un Crédito a Favor/Nota de
+      // Crédito real.
       await Promise.all([
         fetchReturns(),
         refreshSales({ force: true }),
         refreshProducts({ force: true }),
         refreshCredits({ force: true }),
         refreshCustomers({ force: true }),
+        ...(res.data?.creditoFavorEmitido ? [refreshCreditNotes({ force: true })] : []),
       ]);
       if (refundType === 'EFECTIVO') {
         await refreshActiveCashSession();
@@ -212,6 +244,28 @@ export const ReturnsView: React.FC = () => {
           </div>
           <button type="button" onClick={() => fetchReturns()} className="px-3 py-1.5 rounded-lg bg-rose-700 text-white font-bold text-[11px] shrink-0">
             Reintentar
+          </button>
+        </div>
+      )}
+
+      {/* FASE 6: confirmación del Crédito a Favor/Nota de Crédito recién emitido */}
+      {lastIssuedCreditNote && (
+        <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-200 text-emerald-900 text-xs flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 shrink-0" />
+            <span>
+              Se emitió {lastIssuedCreditNote.tipo === 'NOTA_CREDITO' ? 'la Nota de Crédito' : 'el Crédito a Favor / Vale'}{' '}
+              <strong className="font-mono">{lastIssuedCreditNote.numero}</strong> por{' '}
+              {formatCurrency(lastIssuedCreditNote.montoOriginal, settings.simboloMoneda)}. Puede consultarlo en{' '}
+              {lastIssuedCreditNote.tipo === 'NOTA_CREDITO' ? '"Notas de Crédito"' : '"Créditos a Favor / Vales"'} en el menú.
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setLastIssuedCreditNote(null)}
+            className="px-3 py-1.5 rounded-lg bg-emerald-700 text-white font-bold text-[11px] shrink-0"
+          >
+            Entendido
           </button>
         </div>
       )}
@@ -349,9 +403,36 @@ export const ReturnsView: React.FC = () => {
                       className="w-full px-3 py-2 rounded-xl border border-[#E4DDD2] bg-white font-semibold"
                     >
                       <option value="EFECTIVO">Efectivo (afecta la caja real)</option>
-                      <option value="VALE_TIENDA">Vale de Tienda / Crédito a Favor</option>
-                      <option value="CREDITO_CUENTA">Nota de Crédito / Otro</option>
+                      <option value="VALE_TIENDA">Crédito a Favor / Vale</option>
+                      <option value="NOTA_CREDITO">Nota de Crédito</option>
                     </select>
+                    {/* FASE 6: emitir un Crédito a Favor/Nota de Crédito real
+                        exige un cliente registrado (para que el saldo sea
+                        recuperable) -- el backend rechaza con
+                        CLIENTE_REQUERIDO si la venta es "Consumidor Final". */}
+                    {(refundType === 'VALE_TIENDA' || refundType === 'NOTA_CREDITO') && !foundSale.clienteId && (
+                      <p className="mt-1 text-[10px] text-rose-700 leading-relaxed">
+                        ⚠ Esta venta no tiene un cliente registrado (Consumidor Final). El backend rechazará esta
+                        devolución: un Crédito a Favor/Nota de Crédito debe quedar asociado a un cliente real para
+                        poder recuperarse después.
+                      </p>
+                    )}
+                    {/* FASE 7 (Parte 19 -- evitar doble reconocimiento del
+                        mismo monto): si la venta original ya generó una
+                        cuenta por cobrar, el backend SIEMPRE reduce esa
+                        deuda por el monto devuelto y, deliberadamente, NO
+                        emite además un Crédito a Favor/Nota de Crédito
+                        nuevo (ver ReturnsController.gs) -- se avisa aquí
+                        para que el cajero no piense que eligiendo "Vale" o
+                        "Nota de Crédito" se generará un documento aparte
+                        en este caso. */}
+                    {(refundType === 'VALE_TIENDA' || refundType === 'NOTA_CREDITO') && foundSale.clienteId && foundSale.cuentaCobrarId && (
+                      <p className="mt-1 text-[10px] text-amber-700 leading-relaxed">
+                        ⚠ Esta venta fue a crédito: el sistema reducirá el saldo pendiente de la cuenta por cobrar por
+                        este monto y NO emitirá además un Vale/Nota de Crédito aparte (evita reconocer el mismo
+                        monto dos veces).
+                      </p>
+                    )}
                   </div>
 
                   <div className="sm:col-span-2">

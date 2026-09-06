@@ -34,6 +34,20 @@ const SCHEMAS = {
   Gastos: ['id', 'numero_gasto', 'categoria', 'descripcion', 'proveedor', 'monto', 'metodo_pago', 'comprobante', 'caja_sesion_id', 'usuario_id', 'usuario_nombre', 'fecha', 'pagado_con_caja_activa'],
   Compras: ['id', 'numero_compra', 'proveedor_id', 'proveedor', 'numero_factura_proveedor', 'items_json', 'total', 'forma_pago', 'estado', 'usuario_id', 'usuario_nombre', 'fecha', 'notas'],
   Devoluciones: ['id', 'numero_devolucion', 'venta_id', 'numero_venta', 'cliente_id', 'cliente_nombre', 'items_json', 'monto_devuelto', 'tipo_reembolso', 'motivo', 'usuario_id', 'usuario_nombre', 'fecha'],
+  // FASE 6 (devoluciones/notas de crédito/créditos a favor): un crédito a
+  // favor (VALE_TIENDA) y una nota de crédito (NOTA_CREDITO) son el MISMO
+  // pasivo comercial ("el negocio le debe un valor al cliente") con la
+  // misma necesidad de número/monto/saldo/estado/aplicaciones -- se
+  // modelan en UNA sola hoja distinguida por `tipo`, en vez de duplicar
+  // dos estructuras idénticas (ver decisión documentada en el reporte,
+  // Parte J). Espeja exactamente el mismo patrón ya usado por
+  // Creditos/Abonos (documento + hoja de aplicaciones/movimientos
+  // separada), solo que en la dirección opuesta del saldo.
+  Creditos_Favor: ['id', 'numero', 'tipo', 'cliente_id', 'cliente_nombre', 'devolucion_id', 'venta_origen_id', 'monto_original', 'monto_aplicado', 'saldo_disponible', 'estado', 'motivo_anulacion', 'anulado_por', 'fecha_anulacion', 'usuario_id', 'usuario_nombre', 'fecha_creacion', 'actualizado_en'],
+  // Historial de aplicaciones -- nunca se sobreescribe, solo se agregan
+  // filas, para poder reconstruir exactamente en qué ventas se usó cada
+  // crédito/nota (Parte 10 de la fase).
+  Creditos_Favor_Aplicaciones: ['id', 'credito_favor_id', 'venta_id', 'numero_venta', 'monto', 'fecha', 'usuario_id', 'usuario_nombre'],
   Inventario_Kardex: ['id', 'producto_id', 'producto_nombre', 'variante_id', 'sku', 'talla', 'color', 'cantidad', 'tipo', 'stock_anterior', 'stock_nuevo', 'motivo', 'referencia', 'usuario_id', 'usuario_nombre', 'fecha'],
   Auditoria: ['id', 'fecha', 'usuario_id', 'usuario_nombre', 'usuario_rol', 'accion', 'modulo', 'entidad', 'entidad_id', 'descripcion', 'detalle', 'resultado'],
   Secuencias: ['prefijo', 'siguiente_numero', 'actualizado_en']
@@ -84,7 +98,11 @@ function seedInitialData() {
   // 1. Initial Sequences
   const secSheet = DbHelper.getSheet('Secuencias');
   if (secSheet.getLastRow() <= 1) {
-    const prefixes = ['VEN', 'CLI', 'PRD', 'VAR', 'CAJA', 'ABO', 'CRED', 'MOV', 'GAS', 'COM', 'DEV', 'AUD', 'USR', 'ITM', 'CAT', 'SIZ', 'COL', 'PRV'];
+    // FASE 6: 'NC' (Nota de Crédito) y 'VALE' (Crédito a Favor/Vale) para
+    // Creditos_Favor.id/numero -- mismo id sirve de "numero" visible,
+    // igual que ya hace Abonos (numero_recibo = id) y Devoluciones
+    // (numero_devolucion = id). 'CFAPP' para Creditos_Favor_Aplicaciones.id.
+    const prefixes = ['VEN', 'CLI', 'PRD', 'VAR', 'CAJA', 'ABO', 'CRED', 'MOV', 'GAS', 'COM', 'DEV', 'AUD', 'USR', 'ITM', 'CAT', 'SIZ', 'COL', 'PRV', 'NC', 'VALE', 'CFAPP'];
     const rows = prefixes.map(p => [p, 100, nowStr]);
     DbHelper.insertRows('Secuencias', rows.map(r => ({ prefijo: r[0], siguiente_numero: r[1], actualizado_en: r[2] })));
   }
@@ -99,6 +117,10 @@ function seedInitialData() {
       'inventario.ver', 'inventario.ajustar',
       'clientes.ver', 'clientes.crear', 'clientes.editar',
       'creditos.ver', 'creditos.crear', 'abonos.crear', 'creditos.anular_abonos',
+      // FASE 6 (créditos a favor / notas de crédito): un solo grupo de
+      // permisos para ambos documentos -- son el mismo pasivo comercial
+      // (ver Creditos_Favor.tipo), así que comparten control de acceso.
+      'creditos_favor.ver', 'creditos_favor.crear', 'creditos_favor.aplicar', 'creditos_favor.anular',
       'gastos.ver', 'gastos.crear',
       'compras.ver', 'compras.crear', 'compras.proveedores',
       'devoluciones.ver', 'devoluciones.crear',
@@ -109,9 +131,17 @@ function seedInitialData() {
     const roleDefinitions = [
       { rol: 'ADMIN', nombre: 'Administrador General', descripcion: 'Acceso total y configuración del sistema', permisos_json: JSON.stringify(allPermissions) },
       { rol: 'GERENTE', nombre: 'Gerente de Tienda', descripcion: 'Supervisión operativa, reportes y anulación controlada', permisos_json: JSON.stringify(allPermissions.filter(p => !p.startsWith('admin.'))) },
-      { rol: 'SUPERVISOR', nombre: 'Supervisor de Turno', descripcion: 'Gestión de caja, arqueos, descuentos e inventario', permisos_json: JSON.stringify(['ventas.crear', 'ventas.ver', 'ventas.anular', 'ventas.descuento', 'caja.abrir', 'caja.cerrar', 'caja.movimientos', 'caja.ver', 'productos.ver', 'inventario.ver', 'inventario.ajustar', 'clientes.ver', 'clientes.crear', 'creditos.ver', 'abonos.crear', 'gastos.ver', 'gastos.crear', 'devoluciones.ver', 'devoluciones.crear', 'reportes.ventas', 'reportes.caja']) },
-      { rol: 'CAJERO', nombre: 'Cajero / POS', descripcion: 'Cobro de ventas, recepción de abonos y cuadre de turno', permisos_json: JSON.stringify(['ventas.crear', 'ventas.ver', 'caja.abrir', 'caja.cerrar', 'caja.movimientos', 'caja.ver', 'productos.ver', 'clientes.ver', 'clientes.crear', 'creditos.ver', 'abonos.crear']) },
-      { rol: 'VENDEDOR', nombre: 'Asesor de Ventas', descripcion: 'Consulta de catálogo y registro de ventas', permisos_json: JSON.stringify(['ventas.crear', 'ventas.ver', 'productos.ver', 'clientes.ver', 'clientes.crear']) }
+      // FASE 6: SUPERVISOR obtiene creditos_favor.ver/crear/aplicar (ya
+      // procesa devoluciones.crear, de donde se emiten) pero NO
+      // creditos_favor.anular -- mismo criterio restrictivo ya usado para
+      // creditos.anular_abonos (tampoco en la lista de SUPERVISOR, solo
+      // vía ADMIN/GERENTE). CAJERO/VENDEDOR obtienen solo
+      // creditos_favor.ver/aplicar (pueden aplicar un crédito ya emitido
+      // durante una venta), no .crear (no procesan devoluciones hoy) ni
+      // .anular.
+      { rol: 'SUPERVISOR', nombre: 'Supervisor de Turno', descripcion: 'Gestión de caja, arqueos, descuentos e inventario', permisos_json: JSON.stringify(['ventas.crear', 'ventas.ver', 'ventas.anular', 'ventas.descuento', 'caja.abrir', 'caja.cerrar', 'caja.movimientos', 'caja.ver', 'productos.ver', 'inventario.ver', 'inventario.ajustar', 'clientes.ver', 'clientes.crear', 'creditos.ver', 'abonos.crear', 'creditos_favor.ver', 'creditos_favor.crear', 'creditos_favor.aplicar', 'gastos.ver', 'gastos.crear', 'devoluciones.ver', 'devoluciones.crear', 'reportes.ventas', 'reportes.caja']) },
+      { rol: 'CAJERO', nombre: 'Cajero / POS', descripcion: 'Cobro de ventas, recepción de abonos y cuadre de turno', permisos_json: JSON.stringify(['ventas.crear', 'ventas.ver', 'caja.abrir', 'caja.cerrar', 'caja.movimientos', 'caja.ver', 'productos.ver', 'clientes.ver', 'clientes.crear', 'creditos.ver', 'abonos.crear', 'creditos_favor.ver', 'creditos_favor.aplicar']) },
+      { rol: 'VENDEDOR', nombre: 'Asesor de Ventas', descripcion: 'Consulta de catálogo y registro de ventas', permisos_json: JSON.stringify(['ventas.crear', 'ventas.ver', 'productos.ver', 'clientes.ver', 'clientes.crear', 'creditos_favor.ver', 'creditos_favor.aplicar']) }
     ];
 
     DbHelper.insertRows('Roles_Permisos', roleDefinitions);
@@ -281,5 +311,114 @@ function seedInitialData() {
     success: true,
     message: 'Base de datos inicializada con usuarios semilla (admin/admin123, cajero/cajero123, gerente/gerente123) y roles maestros.',
     productImageStorage: productImageStorage
+  };
+}
+
+/**
+ * FASE 8 (Parte 2) — Migración IDEMPOTENTE de permisos `creditos_favor.*`
+ * para instalaciones YA EXISTENTES.
+ *
+ * Por qué es necesaria: `seedInitialData()` solo siembra `Roles_Permisos`
+ * `if (rolesSheet.getLastRow() <= 1)` -- una instalación que ya tenía
+ * roles sembrados ANTES de la Fase 6 nunca recibió automáticamente
+ * `creditos_favor.ver/crear/aplicar/anular` (riesgo documentado en los
+ * reportes de Fase 6 y 7). Esta función cierra ese hueco sin necesidad de
+ * editar la hoja a mano.
+ *
+ * Limitación de arquitectura detectada (documentada, no rodeada con un
+ * hack): `Roles_Permisos` NO tiene columna `id` -- su clave natural es
+ * `rol` (una fila por rol). `DbHelper.updateRowById`/`findById` están
+ * codificados para buscar específicamente una columna llamada `id`
+ * (`headers.indexOf('id')`), así que no sirven aquí. En vez de modificar
+ * `DbHelper.gs` (fuera del alcance de esta fase, y usado por muchas otras
+ * hojas que sí tienen `id`), esta función replica el mismo patrón de
+ * lectura/escritura de `DbHelper.updateRowById` (leer todas las filas,
+ * ubicar el índice de fila, reescribir solo la celda necesaria) pero
+ * localizando la fila por `rol` en vez de por `id` -- ningún dato ni
+ * columna existente se toca fuera de `permisos_json`.
+ *
+ * Garantías (Parte 2, requisitos explícitos):
+ *  - Solo AGREGA las 4 cadenas nuevas que falten -- nunca quita, nunca
+ *    reemplaza el arreglo completo.
+ *  - Nunca duplica: compara contra el arreglo actual antes de agregar.
+ *  - Roles fuera de los 5 estándar (ADMIN/GERENTE/SUPERVISOR/CAJERO/
+ *    VENDEDOR) -- p. ej. un rol personalizado creado por el negocio -- se
+ *    dejan completamente intactos, porque no existe un conjunto "correcto"
+ *    definido para ellos y esta fase prohíbe explícitamente inventar uno.
+ *  - Una fila cuyo `permisos_json` no se pueda parsear como arreglo JSON
+ *    válido NUNCA se sobreescribe (se reporta para revisión manual) --
+ *    nunca se arriesga a corromper datos ya existentes.
+ *  - Ejecutarla dos (o más) veces produce exactamente el mismo resultado
+ *    que ejecutarla una vez.
+ */
+const CREDITOS_FAVOR_PERMISSIONS_BY_ROLE = {
+  ADMIN: ['creditos_favor.ver', 'creditos_favor.crear', 'creditos_favor.aplicar', 'creditos_favor.anular'],
+  GERENTE: ['creditos_favor.ver', 'creditos_favor.crear', 'creditos_favor.aplicar', 'creditos_favor.anular'],
+  SUPERVISOR: ['creditos_favor.ver', 'creditos_favor.crear', 'creditos_favor.aplicar'],
+  CAJERO: ['creditos_favor.ver', 'creditos_favor.aplicar'],
+  VENDEDOR: ['creditos_favor.ver', 'creditos_favor.aplicar']
+};
+
+function migrateCreditosFavorPermissions() {
+  const sheet = DbHelper.getSheet('Roles_Permisos');
+  const data = sheet.getDataRange().getValues();
+
+  if (data.length <= 1) {
+    return {
+      success: true,
+      message: 'Roles_Permisos está vacía -- nada que migrar (seedInitialData la sembrará ya con estos permisos incluidos).',
+      rolesUpdated: [], rolesUnchanged: [], rolesSkippedUnknown: [], rolesSkippedInvalidJson: []
+    };
+  }
+
+  const headers = data[0].map(h => String(h).trim());
+  const rolColIdx = headers.indexOf('rol');
+  const jsonColIdx = headers.indexOf('permisos_json');
+  if (rolColIdx === -1 || jsonColIdx === -1) {
+    throw new Error("MIGRATION_UNSAFE: La hoja 'Roles_Permisos' no tiene las columnas esperadas ('rol'/'permisos_json') -- no se ejecuta ninguna escritura para evitar corromper datos.");
+  }
+
+  const rolesUpdated = [];
+  const rolesUnchanged = [];
+  const rolesSkippedUnknown = [];
+  const rolesSkippedInvalidJson = [];
+
+  for (let i = 1; i < data.length; i++) {
+    const rol = String(data[i][rolColIdx] || '').trim();
+    const target = CREDITOS_FAVOR_PERMISSIONS_BY_ROLE[rol];
+    if (!target) {
+      if (rol) rolesSkippedUnknown.push(rol);
+      continue;
+    }
+
+    let current;
+    try {
+      current = JSON.parse(data[i][jsonColIdx] || '[]');
+      if (!Array.isArray(current)) throw new Error('permisos_json no es un arreglo');
+    } catch (e) {
+      rolesSkippedInvalidJson.push(rol);
+      continue;
+    }
+
+    const missing = target.filter(p => current.indexOf(p) === -1);
+    if (missing.length === 0) {
+      rolesUnchanged.push(rol);
+      continue;
+    }
+
+    const merged = current.concat(missing);
+    sheet.getRange(i + 1, jsonColIdx + 1).setValue(JSON.stringify(merged));
+    rolesUpdated.push({ rol: rol, permisosAgregados: missing });
+  }
+
+  Logger.log(`[FASE 8] Migración creditos_favor.* -- actualizados: ${JSON.stringify(rolesUpdated)}; sin cambios: ${JSON.stringify(rolesUnchanged)}; roles no reconocidos (intactos): ${JSON.stringify(rolesSkippedUnknown)}; permisos_json inválido (intacto): ${JSON.stringify(rolesSkippedInvalidJson)}`);
+
+  return {
+    success: true,
+    message: `Migración completada. Roles actualizados: ${rolesUpdated.length}. Sin cambios: ${rolesUnchanged.length}.`,
+    rolesUpdated: rolesUpdated,
+    rolesUnchanged: rolesUnchanged,
+    rolesSkippedUnknown: rolesSkippedUnknown,
+    rolesSkippedInvalidJson: rolesSkippedInvalidJson
   };
 }

@@ -53,6 +53,12 @@ export const ReportsView: React.FC = () => {
     creditsLoading,
     creditsError,
     refreshCredits,
+    // FASE 7 (Parte 29 -- reportes): mismo dominio central ya usado por
+    // CreditNotesView/POS desde la Fase 6, sin pedir una llamada de red
+    // adicional propia de este componente.
+    creditNotes: rawCreditNotes,
+    creditNotesLoading,
+    refreshCreditNotes,
     expenses: rawExpenses,
     expensesLoading,
     expensesError,
@@ -62,8 +68,9 @@ export const ReportsView: React.FC = () => {
   useEffect(() => {
     refreshSales();
     refreshCredits();
+    refreshCreditNotes();
     refreshExpenses();
-  }, [refreshSales, refreshCredits, refreshExpenses]);
+  }, [refreshSales, refreshCredits, refreshCreditNotes, refreshExpenses]);
 
   const sales = (rawSales || []).filter((s) => s && s.estado === 'COMPLETADA');
   const expenses = rawExpenses || [];
@@ -91,6 +98,19 @@ export const ReportsView: React.FC = () => {
   const totalPendingDebt = credits
     .filter((c) => c && c.estado !== 'PAGADA' && c.estado !== 'ANULADA')
     .reduce((acc, c) => acc + (c.saldoPendiente || 0), 0);
+
+  // FASE 7 (Parte 29): Créditos a Favor / Notas de Crédito -- concepto
+  // DISTINTO de la cartera por cobrar de arriba (aquí el negocio le debe
+  // al cliente, no al revés; ver Creditos_Favor vs Creditos en el
+  // backend). Nunca se suman entre sí.
+  const creditNotes = rawCreditNotes || [];
+  const totalCreditNotesIssued = creditNotes
+    .filter((c) => c && c.estado !== 'ANULADA')
+    .reduce((acc, c) => acc + (c.montoOriginal || 0), 0);
+  const totalCreditNotesApplied = creditNotes.reduce((acc, c) => acc + (c.montoAplicado || 0), 0);
+  const totalCreditNotesPending = creditNotes
+    .filter((c) => c && c.estado !== 'ANULADA')
+    .reduce((acc, c) => acc + (c.saldoDisponible || 0), 0);
 
   // Sales by Category Chart Data
   const categorySalesMap: Record<string, number> = {};
@@ -273,13 +293,43 @@ export const ReportsView: React.FC = () => {
           </p>
         </div>
       </div>
+
+      {/* Créditos a Favor / Notas de Crédito -- FASE 7 (Parte 29): concepto
+          opuesto a la cartera por cobrar de arriba, mostrado por separado
+          para no mezclar ambos saldos en la misma lectura. */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <div className="p-4 bg-white rounded-2xl border border-[#E4DDD2]">
+          <span className="text-[10px] font-bold text-[#756E65] uppercase">Créditos a Favor / Notas Emitidos</span>
+          <p className="text-base font-bold text-[#2F2A25] mt-1">
+            {creditNotesLoading ? '...' : formatCurrency(totalCreditNotesIssued, settings.simboloMoneda)}
+          </p>
+        </div>
+        <div className="p-4 bg-white rounded-2xl border border-[#E4DDD2]">
+          <span className="text-[10px] font-bold text-emerald-700 uppercase">Aplicados en Ventas</span>
+          <p className="text-base font-bold text-emerald-800 mt-1">
+            {creditNotesLoading ? '...' : formatCurrency(totalCreditNotesApplied, settings.simboloMoneda)}
+          </p>
+        </div>
+        <div className="p-4 bg-white rounded-2xl border border-[#E4DDD2]">
+          <span className="text-[10px] font-bold text-amber-800 uppercase">Saldo a Favor Pendiente de Usar</span>
+          <p className="text-base font-bold text-amber-900 mt-1">
+            {creditNotesLoading ? '...' : formatCurrency(totalCreditNotesPending, settings.simboloMoneda)}
+          </p>
+        </div>
+      </div>
       {/* Charts Section */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Sales by Category */}
         <div className="p-5 bg-white rounded-3xl border border-[#E4DDD2] shadow-xs space-y-4">
           <div className="flex items-center justify-between">
+            {/* FASE 7 (Parte 38 -- auditoría final de texto): "de Ropa" era
+                terminología específica de vestimenta en el título de una
+                pantalla/gráfico (mismo patrón ya corregido antes en
+                "Devoluciones de Prendas" -> "Devoluciones") -- se retira
+                sin tocar el cálculo (categorySalesMap ya usa la categoría
+                real del producto, nunca una etiqueta de ropa fija). */}
             <h3 className="font-serif font-bold text-base text-[#2F2A25]">
-              Distribución de Ventas por Categoría de Ropa
+              Distribución de Ventas por Categoría
             </h3>
             <PieIcon className="w-4 h-4 text-[#756E65]" />
           </div>
