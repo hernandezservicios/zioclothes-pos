@@ -47,9 +47,19 @@ vi.mock('./services/storageService', () => ({
 // también puede montar InitialSetupView (cuando no hay URL configurada),
 // que llama a esto para su "Probar conexión" real -- se mockea aquí para
 // no depender de una red real (ya probado a fondo en apiService.test.ts).
+// TAREA -- PRIMER ADMIN: getInstallationStatus por defecto resuelve
+// "ya tiene administrador" (installationConfigured/initialAdminConfigured
+// ambos true) para que estas pruebas (sobre login/redirección, no sobre
+// el flujo del primer ADMIN, que tiene su propia suite dedicada en
+// InitialSetupView.test.tsx) sigan yendo directo al Login como siempre.
 vi.mock('./services/apiService', () => ({
   apiService: {
     checkBackendConnection: vi.fn(),
+    getInstallationStatus: vi.fn().mockResolvedValue({
+      success: true,
+      message: 'OK',
+      data: { installationConfigured: true, initialAdminConfigured: true },
+    }),
   },
 }));
 
@@ -373,7 +383,12 @@ describe('App -- configuración inicial del backend antes del Login', () => {
     fireEvent.click(screen.getByRole('button', { name: /Continuar/i }));
 
     expect(mockedStorageService.setGoogleAppsScriptUrl).toHaveBeenCalledWith(CONFIGURED_URL);
-    expect(screen.getByText('Iniciar Sesión')).toBeInTheDocument();
+    // TAREA -- PRIMER ADMIN: "Continuar" ahora es async (consulta
+    // system.installationStatus antes de pasar al Login) -- el mock por
+    // defecto de getInstallationStatus resuelve "ya tiene administrador",
+    // así que termina en el mismo destino de siempre, solo que un tick
+    // después.
+    await waitFor(() => expect(screen.getByText('Iniciar Sesión')).toBeInTheDocument());
     expect(screen.queryByText('Configuración Inicial')).not.toBeInTheDocument();
   });
 });

@@ -89,13 +89,50 @@ function setupDatabase() {
 }
 
 /**
- * Seeds initial essential configuration, roles, tallas, colores, and admin user.
+ * TAREA — INSTALACIÓN LIMPIA PARA NUEVOS CLIENTES.
+ *
+ * `seedInitialData()` mezclaba, en una sola función, dos cosas
+ * conceptualmente distintas: (A) ESTRUCTURA/CONFIGURACIÓN necesaria para
+ * que el sistema funcione (secuencias, roles/permisos) y (B) DATOS DE
+ * DEMOSTRACIÓN (usuarios admin/cajero/gerente con contraseñas conocidas,
+ * catálogo de ejemplo ZIO CLOTHES, configuración de negocio ficticia).
+ * Para una instalación NUEVA real de un cliente, (B) es exactamente lo
+ * que NO debe ejecutarse -- una BD "lista para vender" con datos ficticios
+ * mezclados es peor que una BD vacía, y las credenciales demo conocidas
+ * son un riesgo de seguridad real si alguien las deja sin cambiar.
+ *
+ * Se separó en 4 funciones internas (Fase 2 de la tarea):
+ *   seedSequences_()            -- estructura: Secuencias.
+ *   seedRolesAndPermissions_()  -- estructura: Roles_Permisos (roles
+ *                                   oficiales + permisos funcionales +
+ *                                   vista.* + creditos_favor.*, ninguno
+ *                                   es "dato demo", son permisos reales
+ *                                   que CUALQUIER instalación necesita).
+ *   seedSystemConfiguration_()  -- estructura: Configuracion con
+ *                                   SOLAMENTE valores técnicos/default
+ *                                   seguros (moneda, % de impuesto,
+ *                                   comportamiento del POS) -- los campos
+ *                                   de identidad comercial (nombre,
+ *                                   RNC, teléfono, correo, dirección,
+ *                                   mensajes de ticket) quedan '' vacíos,
+ *                                   nunca con un valor ficticio.
+ *   seedDemoData_()              -- SOLO datos de demostración: usuarios
+ *                                   admin/cajero/gerente con contraseñas
+ *                                   conocidas, catálogo de ejemplo
+ *                                   (Categorias/Tallas/Colores/
+ *                                   Proveedores) y la fila de
+ *                                   Configuracion con identidad comercial
+ *                                   ficticia "ZIO CLOTHES".
+ *
+ * `seedInitialData()` (preservada, comportamiento 100% idéntico al de
+ * antes -- sigue siendo lo que usan `seedAllTestData()`/`system.
+ * seedInitialData` para entornos de desarrollo/demo) llama a las 4, en el
+ * mismo orden de siempre. La instalación comercial nueva
+ * (`SetupInstaller.gs` -> `seedInitialDataStructural_()`) llama
+ * DELIBERADAMENTE solo a las 3 primeras -- NUNCA a `seedDemoData_()`.
  */
-function seedInitialData() {
-  setupDatabase();
+function seedSequences_() {
   const nowStr = getNowFormatted();
-
-  // 1. Initial Sequences
   const secSheet = DbHelper.getSheet('Secuencias');
   if (secSheet.getLastRow() <= 1) {
     // FASE 6: 'NC' (Nota de Crédito) y 'VALE' (Crédito a Favor/Vale) para
@@ -106,8 +143,9 @@ function seedInitialData() {
     const rows = prefixes.map(p => [p, 100, nowStr]);
     DbHelper.insertRows('Secuencias', rows.map(r => ({ prefijo: r[0], siguiente_numero: r[1], actualizado_en: r[2] })));
   }
+}
 
-  // 2. Roles & Permissions
+function seedRolesAndPermissions_() {
   const rolesSheet = DbHelper.getSheet('Roles_Permisos');
   if (rolesSheet.getLastRow() <= 1) {
     const allPermissions = [
@@ -152,8 +190,58 @@ function seedInitialData() {
 
     DbHelper.insertRows('Roles_Permisos', roleDefinitions);
   }
+}
 
-  // 3. Initial Users (with SHA-256 + Salt hashed passwords)
+/**
+ * TAREA — INSTALACIÓN LIMPIA: Configuracion con SOLO valores técnicos
+ * (Fase 5) -- misma clave/estructura que `seedDemoData_()` siembra para
+ * el catálogo de ejemplo, pero cada campo de IDENTIDAD comercial
+ * (nombreNegocio/rnc/telefono/correo/direccion/pieTicket/
+ * politicaDevolucion) queda como cadena vacía en vez de un valor
+ * ficticio -- el cliente los completa desde Configuración → Negocio &
+ * Ticket una vez tiene su propio ADMIN. Los valores técnicos/de
+ * comportamiento (moneda, % de impuesto, alertas de stock, plazo de
+ * crédito) sí llevan un default seguro real -- sin ellos el POS no podría
+ * calcular impuestos ni advertir de stock bajo desde el primer uso.
+ */
+function seedSystemConfiguration_() {
+  const nowStr = getNowFormatted();
+  const confSheet = DbHelper.getSheet('Configuracion');
+  if (confSheet.getLastRow() <= 1) {
+    const configs = [
+      { clave: 'nombreNegocio', valor: '', descripcion: 'Nombre comercial de la boutique', actualizado_en: nowStr },
+      { clave: 'rnc', valor: '', descripcion: 'RNC fiscal de la empresa', actualizado_en: nowStr },
+      { clave: 'telefono', valor: '', descripcion: 'Teléfono de contacto tienda', actualizado_en: nowStr },
+      { clave: 'correo', valor: '', descripcion: 'Correo oficial', actualizado_en: nowStr },
+      { clave: 'direccion', valor: '', descripcion: 'Dirección física', actualizado_en: nowStr },
+      { clave: 'moneda', valor: 'RD$', descripcion: 'Símbolo monetario por defecto', actualizado_en: nowStr },
+      { clave: 'impuestoPorcentaje', valor: '18', descripcion: 'Porcentaje ITBIS aplicable', actualizado_en: nowStr },
+      { clave: 'pieTicket', valor: '', descripcion: 'Mensaje al pie del comprobante', actualizado_en: nowStr },
+      { clave: 'politicaDevolucion', valor: '', descripcion: 'Términos de cambio', actualizado_en: nowStr },
+      { clave: 'permitirVentaSinStock', valor: 'false', descripcion: 'Restricción estricta de inventario en POS', actualizado_en: nowStr },
+      { clave: 'notificarStockBajo', valor: 'true', descripcion: 'Alerta visual en POS ante agotamiento', actualizado_en: nowStr },
+      { clave: 'umbralStockBajo', valor: '5', descripcion: 'Unidades mínimas de alerta', actualizado_en: nowStr },
+      { clave: 'diasCreditoPorDefecto', valor: '15', descripcion: 'Plazo predeterminado de cuentas por cobrar', actualizado_en: nowStr }
+    ];
+    DbHelper.insertRows('Configuracion', configs);
+  }
+}
+
+/**
+ * SOLO datos de DEMOSTRACIÓN -- usuarios con contraseñas conocidas,
+ * catálogo de ejemplo, y configuración de negocio ficticia "ZIO
+ * CLOTHES". Llamada por `seedInitialData()` (comportamiento histórico
+ * preservado para entornos de desarrollo/demo: `seedAllTestData()` en
+ * SeedTestData.gs, o quien invoque `system.seedInitialData`
+ * autenticado). La instalación comercial nueva (`SetupInstaller.gs`)
+ * NUNCA llama a esta función.
+ */
+function seedDemoData_() {
+  const nowStr = getNowFormatted();
+
+  // 1. Usuarios de demostración (con SHA-256 + Salt real, mismo
+  // mecanismo de siempre -- lo inseguro es que la contraseña en TEXTO
+  // PLANO es pública/conocida, no el algoritmo de hashing en sí).
   const usersSheet = DbHelper.getSheet('Usuarios');
   if (usersSheet.getLastRow() <= 1) {
     const adminSalt = Security.generateSalt(16);
@@ -216,7 +304,7 @@ function seedInitialData() {
     DbHelper.insertRows('Usuarios', initialUsers);
   }
 
-  // 4. Categories
+  // 2. Categories
   const catSheet = DbHelper.getSheet('Categorias');
   if (catSheet.getLastRow() <= 1) {
     const categories = [
@@ -230,7 +318,7 @@ function seedInitialData() {
     DbHelper.insertRows('Categorias', categories);
   }
 
-  // 5. Sizes
+  // 3. Sizes
   const sizeSheet = DbHelper.getSheet('Tallas');
   if (sizeSheet.getLastRow() <= 1) {
     const sizes = [
@@ -247,7 +335,7 @@ function seedInitialData() {
     DbHelper.insertRows('Tallas', sizes);
   }
 
-  // 6. Colors
+  // 4. Colors
   const colorSheet = DbHelper.getSheet('Colores');
   if (colorSheet.getLastRow() <= 1) {
     const colors = [
@@ -262,7 +350,7 @@ function seedInitialData() {
     DbHelper.insertRows('Colores', colors);
   }
 
-  // 7. Suppliers
+  // 5. Suppliers
   const supSheet = DbHelper.getSheet('Proveedores');
   if (supSheet.getLastRow() <= 1) {
     const suppliers = [
@@ -272,7 +360,9 @@ function seedInitialData() {
     DbHelper.insertRows('Proveedores', suppliers);
   }
 
-  // 8. Default System Settings
+  // 6. Default System Settings (identidad comercial ficticia -- ver
+  // seedSystemConfiguration_() para el equivalente de instalación limpia,
+  // con estos mismos campos vacíos).
   const confSheet = DbHelper.getSheet('Configuracion');
   if (confSheet.getLastRow() <= 1) {
     const configs = [
@@ -292,6 +382,23 @@ function seedInitialData() {
     ];
     DbHelper.insertRows('Configuracion', configs);
   }
+}
+
+/**
+ * Seeds initial essential configuration, roles, tallas, colores, and
+ * admin user. PRESERVADA -- comportamiento 100% idéntico al de siempre
+ * (mismo orden, mismos datos, mismo mensaje de retorno) para no romper a
+ * quien ya la use (`seedAllTestData()`, `system.seedInitialData`
+ * autenticado). Incluye datos de DEMOSTRACIÓN -- ver `seedDemoData_()`.
+ * Para una instalación comercial nueva, real, usar en su lugar
+ * `seedInitialDataStructural_()` (SetupInstaller.gs), que llama a las
+ * mismas 3 funciones estructurales de abajo pero SIN `seedDemoData_()`.
+ */
+function seedInitialData() {
+  setupDatabase();
+  seedSequences_();
+  seedRolesAndPermissions_();
+  seedDemoData_();
 
   // FASE FINAL (integración CONFIG -> almacenamiento de imágenes): una
   // instalación "lista para usar" también debe dejar resuelta su carpeta
@@ -316,6 +423,35 @@ function seedInitialData() {
   return {
     success: true,
     message: 'Base de datos inicializada con usuarios semilla (admin/admin123, cajero/cajero123, gerente/gerente123) y roles maestros.',
+    productImageStorage: productImageStorage
+  };
+}
+
+/**
+ * TAREA — INSTALACIÓN LIMPIA PARA NUEVOS CLIENTES.
+ *
+ * Equivalente estructural-únicamente de `seedInitialData()` -- misma
+ * estructura/roles/permisos/secuencias, CERO datos de demostración, CERO
+ * usuarios. Usada exclusivamente por `setupNuevaInstalacion()`/
+ * `verificarYRepararInstalacion()` en SetupInstaller.gs. La hoja
+ * `Usuarios` queda vacía hasta que el cliente cree su propio ADMIN
+ * mediante `system.setupInitialAdmin`.
+ */
+function seedInitialDataStructural_() {
+  setupDatabase();
+  seedSequences_();
+  seedRolesAndPermissions_();
+  seedSystemConfiguration_();
+
+  // Mismo motivo que en seedInitialData() -- ver comentario ahí. Sigue
+  // siendo puramente técnico (una carpeta de Drive vacía), no un dato
+  // comercial.
+  const productImageStorage = ProductsController.initializeProductImageStorage();
+
+  Logger.log('[SeedSetup] Estructura, roles, permisos, secuencias y configuración técnica inicializados -- SIN datos de demostración, SIN usuarios.');
+  return {
+    success: true,
+    message: 'Instalación estructural completada -- sin datos comerciales, sin usuarios. El primer administrador debe crearse mediante el flujo seguro (system.setupInitialAdmin).',
     productImageStorage: productImageStorage
   };
 }

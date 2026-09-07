@@ -157,6 +157,12 @@ class MockSpreadsheet {
     return s;
   }
   getName() { return 'ZIO CLOTHES -- SPREADSHEET DE PRUEBA (harness)'; }
+  getId() { return scriptProperties.SPREADSHEET_ID; }
+  // TAREA -- INSTALADOR AUTOMÁTICO: SetupInstaller.gs llama getUrl() real
+  // (Spreadsheet.getUrl() existe en Apps Script real) para reportar el
+  // enlace de la instalación -- nunca se usa para lógica de negocio, solo
+  // texto informativo, así que un URL simulado de este mock es suficiente.
+  getUrl() { return `https://docs.google.com/spreadsheets/d/${scriptProperties.SPREADSHEET_ID}/edit`; }
   // FASE B: registro/borrado/renombrado de hojas -- ver comentario de
   // MockSheet.copyTo/setName arriba.
   _registerSheet(sheet) {
@@ -431,7 +437,13 @@ const loadOrder = [
   // referencia DbHelper/Security/AuditController/LockServiceHelper/CONFIG,
   // todos ya cargados arriba.
   'RolesController.gs',
-  'SeedSetup.gs', 'Main.gs'
+  'SeedSetup.gs',
+  // TAREA -- INSTALADOR AUTOMÁTICO DE NUEVAS INSTALACIONES:
+  // SetupInstaller.gs reutiliza setupDatabase/seedInitialData/
+  // migrateCreditosFavorPermissions/migrateViewPermissions/SCHEMAS, todos
+  // ya cargados arriba en SeedSetup.gs.
+  'SetupInstaller.gs',
+  'Main.gs'
 ];
 
 const combined = loadOrder
@@ -6966,6 +6978,133 @@ test('CXC_E2E_VENTA_ANULADA_NUNCA_APARECE_COMO_VENCIDA', () => {
   runInContext(`DbHelper.updateRowById('Creditos', '${creditId}', { fecha_vencimiento: ${JSON.stringify(daysAgoStr_(60))} })`);
   credit = creditFromList_(creditId);
   assertEqual(credit.estado, 'ANULADA', 'una cuenta anulada nunca debe pasar a VENCIDA, sin importar la fecha');
+});
+
+/* ================================================================
+   TAREA -- INSTALADOR AUTOMÁTICO DE NUEVAS INSTALACIONES.
+
+   Este arnés comparte UN solo Spreadsheet mock con SPREADSHEET_ID YA
+   configurado desde el arranque (`setupDatabase(); seedInitialData();`
+   arriba) -- exactamente el escenario real de "esta copia de Apps Script
+   ya tiene una instalación configurada", así que aquí solo se prueba el
+   camino CASO B (rechazo) de setupNuevaInstalacion() y el camino
+   verificarYRepararInstalacion() contra una instalación real ya rica en
+   datos (todos los tests anteriores de este archivo ya escribieron
+   ventas/clientes/productos/etc. reales sobre este mismo Spreadsheet
+   mock). El camino CASO A (creación real desde cero, sin SPREADSHEET_ID)
+   requiere un Spreadsheet mock NUEVO por prueba -- se cubre aparte en
+   run-installer-tests.cjs, documentado en el reporte de esta fase.
+   ================================================================ */
+
+test('INSTALLER_SETUP_REFUSES_WHEN_SPREADSHEET_ID_ALREADY_CONFIGURED', () => {
+  const res = runInContext('setupNuevaInstalacion()');
+  assert(res.success === false, JSON.stringify(res));
+  assert(res.alreadyConfigured === true, 'debe reportar explícitamente que ya existe una instalación');
+  assertEqual(res.spreadsheetId, 'MOCK-SPREADSHEET-ID');
+  assert(res.message.indexOf('INSTALACIÓN YA CONFIGURADA') !== -1, res.message);
+});
+
+test('INSTALLER_SETUP_REFUSAL_NEVER_TOUCHES_SPREADSHEETAPP_CREATE', () => {
+  // El mock de SpreadsheetApp de ESTE arnés deliberadamente NO define
+  // .create() (ver run-installer-tests.cjs para eso) -- si el camino de
+  // rechazo alguna vez llegara a invocarlo por error, esta prueba
+  // fallaría con un TypeError real, no silenciosamente.
+  let threw = false;
+  try {
+    runInContext(`typeof SpreadsheetApp.create === 'function'`);
+  } catch (e) {
+    threw = true;
+  }
+  assert(!threw, 'no debería lanzar solo por consultar el tipo');
+  const hasCreate = runInContext(`typeof SpreadsheetApp.create === 'function'`);
+  assertEqual(hasCreate, false, 'este arnés no mockea SpreadsheetApp.create -- confirma que el camino de rechazo nunca la necesita');
+});
+
+test('INSTALLER_REPAIR_ON_REAL_EXISTING_INSTALLATION_SUCCEEDS_AND_NEVER_DUPLICATES', () => {
+  // Instalación real con cientos de filas reales ya escritas por TODOS
+  // los tests anteriores de este archivo -- el escenario más parecido
+  // posible a ejecutar esto por accidente sobre producción (Fase 12).
+  const rolesBefore = runInContext(`DbHelper.getAllRows('Roles_Permisos').length`);
+  const usersBefore = runInContext(`DbHelper.getAllRows('Usuarios').length`);
+  const salesBefore = runInContext(`DbHelper.getAllRows('Ventas').length`);
+  const customersBefore = runInContext(`DbHelper.getAllRows('Clientes').length`);
+
+  const res = runInContext('verificarYRepararInstalacion()');
+  // TAREA -- INSTALACIÓN LIMPIA: verificarYRepararInstalacion() sobre una
+  // instalación real YA EN USO (como esta, con cientos de filas reales)
+  // debe reportarse EXITOSA -- la exigencia de "BD comercial vacía" es
+  // exclusiva de una instalación recién creada en la misma corrida
+  // (setupNuevaInstalacion()), nunca de una reparación/reverificación
+  // posterior sobre datos reales legítimos.
+  assert(res.success === true, JSON.stringify(res.verification || res));
+  assertEqual(res.spreadsheetId, 'MOCK-SPREADSHEET-ID');
+  // El conteo real SÍ se informa honestamente (nunca se oculta), solo no
+  // bloquea el éxito en este camino.
+  assert(res.verification.commercialDataEmpty === false, 'debe informar honestamente que la BD real NO está vacía');
+  assert(res.verification.commercialCounts.Ventas > 0, 'debe reportar el conteo real de Ventas, no inventar 0');
+
+  const rolesAfter = runInContext(`DbHelper.getAllRows('Roles_Permisos').length`);
+  const usersAfter = runInContext(`DbHelper.getAllRows('Usuarios').length`);
+  const salesAfter = runInContext(`DbHelper.getAllRows('Ventas').length`);
+  const customersAfter = runInContext(`DbHelper.getAllRows('Clientes').length`);
+
+  assertEqual(rolesAfter, rolesBefore, 'verificarYRepararInstalacion nunca debe duplicar roles');
+  assertEqual(usersAfter, usersBefore, 'verificarYRepararInstalacion nunca debe duplicar/tocar usuarios reales');
+  assertEqual(salesAfter, salesBefore, 'verificarYRepararInstalacion nunca debe alterar ventas reales existentes');
+  assertEqual(customersAfter, customersBefore, 'verificarYRepararInstalacion nunca debe alterar clientes reales existentes');
+});
+
+test('INSTALLER_REPAIR_VERIFICATION_REPORTS_ALL_SCHEMA_SHEETS_OK', () => {
+  const res = runInContext('verificarYRepararInstalacion()');
+  assert(res.success === true, JSON.stringify(res.verification));
+  const schemaNames = runInContext('Object.keys(SCHEMAS)');
+  schemaNames.forEach(name => {
+    const info = res.verification.sheets[name];
+    assert(!!info && info.exists && info.headersOk, `la hoja '${name}' debe existir con encabezados correctos -- ${JSON.stringify(info)}`);
+  });
+  assert(res.verification.rolesOk, 'los 5 roles estándar deben existir');
+  assert(res.verification.permissionsOk.vista, 'todos los roles deben tener al menos un permiso vista.*');
+  assert(res.verification.permissionsOk.creditosFavor, 'todos los roles deben tener creditos_favor.ver');
+  assert(res.verification.sequencesOk, `secuencias faltantes: ${JSON.stringify(res.verification.sequencesMissing)}`);
+  assert(res.verification.configuracionOk, 'Configuracion debe tener datos reales');
+  assert(res.verification.noDuplicateSheets, `hojas duplicadas: ${JSON.stringify(res.verification.duplicateSheetNames)}`);
+  // TAREA -- PRIMER ADMIN: esta instalación real (bootstrap del arnés)
+  // tiene usuarios admin/cajero/gerente reales -- migrateInitialAdminStatus()
+  // (parte de runInstallationSteps_) debe haber detectado esto y reportado true.
+  assert(res.verification.initialAdminConfigured === true, 'una instalación con un ADMIN real ya configurado debe reportar initialAdminConfigured=true');
+});
+
+test('INSTALLER_NEVER_LOGS_PASSWORDS', () => {
+  const before = logLines.length;
+  runInContext('verificarYRepararInstalacion()');
+  const newLines = logLines.slice(before).join('\n');
+  ['admin123', 'cajero123', 'gerente123'].forEach(pw => {
+    assert(newLines.indexOf(pw) === -1, `el instalador nunca debe imprimir contraseñas en Logger -- se encontró "${pw}"`);
+  });
+  // Confirma que el reporte sí se registró (la prueba no está vacía por
+  // un mock roto) y que refleja correctamente que ya hay un ADMIN real.
+  assert(newLines.indexOf('INSTALACIÓN POS CRM COMPLETADA') !== -1, 'debe producir el reporte real en Logger');
+  assert(newLines.indexOf('Administrador inicial:') !== -1, 'debe reportar el estado del administrador inicial');
+  assert(newLines.indexOf('✓ CONFIGURADO') !== -1, 'una instalación con ADMIN real ya configurado debe mostrarlo como CONFIGURADO, no PENDIENTE');
+});
+
+test('INSTALLER_REPAIR_REQUIRES_EXISTING_SPREADSHEET_ID', () => {
+  // No se puede simular "sin SPREADSHEET_ID" en este arnés compartido sin
+  // romper el resto de la suite (todos los demás tests dependen de que
+  // exista) -- se verifica en cambio el comportamiento real de la propia
+  // función ante un ID vacío, restaurándolo inmediatamente después.
+  const real = runInContext(`PropertiesService.getScriptProperties().getProperty('SPREADSHEET_ID')`);
+  runInContext(`PropertiesService.getScriptProperties().setProperty('SPREADSHEET_ID', '')`);
+  const res = runInContext('verificarYRepararInstalacion()');
+  runInContext(`PropertiesService.getScriptProperties().setProperty('SPREADSHEET_ID', ${JSON.stringify(real)})`);
+
+  assert(res.success === false, JSON.stringify(res));
+  assert(res.message.indexOf('Ejecute setupNuevaInstalacion() primero') !== -1, res.message);
+
+  // Confirma que la restauración realmente funcionó -- ninguna prueba
+  // posterior queda afectada.
+  const restored = runInContext(`PropertiesService.getScriptProperties().getProperty('SPREADSHEET_ID')`);
+  assertEqual(restored, real);
 });
 
 /* ------------------------------------------------------------

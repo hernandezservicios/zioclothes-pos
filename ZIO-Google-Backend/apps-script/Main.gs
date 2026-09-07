@@ -86,13 +86,31 @@ function doPost(e) {
       throw new Error('MISSING_ACTION: Debe especificar una propiedad "action" válida.');
     }
 
-    // Public actions that do not require an active session
+    // Public actions that do not require an active session.
+    //
+    // TAREA -- INSTALACIÓN LIMPIA + PRIMER ADMIN (Fase 14, auditoría):
+    // 'system.setupDatabase'/'system.seedInitialData' SALIERON de aquí --
+    // eran públicas sin ningún motivo real (nada en el frontend las
+    // llama) y, con una instalación NUEVA ahora deliberadamente vacía de
+    // usuarios hasta que el cliente crea su propio ADMIN, dejarlas
+    // públicas habría permitido a cualquier anónimo sembrar
+    // admin/admin123 en una instalación real todavía sin proteger. Siguen
+    // existiendo como acciones autenticadas (ver más abajo, gateadas por
+    // 'admin.roles') -- setupNuevaInstalacion() nunca pasa por aquí, las
+    // llama directamente como funciones de Apps Script, así que no se ve
+    // afectada.
+    //
+    // 'system.installationStatus'/'system.setupInitialAdmin' SÍ deben ser
+    // públicas -- se consultan/usan ANTES de que exista cualquier sesión
+    // posible (la primera vez que alguien abre el frontend de una
+    // instalación recién creada). Se protegen con su propia lógica
+    // interna (ver SetupInstaller.gs), nunca con sessionToken.
     const publicActions = [
       'auth.login',
       'system.ping',
-      'system.setupDatabase',
-      'system.seedInitialData',
-      'system.getSettings'
+      'system.getSettings',
+      'system.installationStatus',
+      'system.setupInitialAdmin'
     ];
 
     let currentUser = null;
@@ -130,11 +148,30 @@ function doPost(e) {
       case 'system.ping':
         result = { success: true, status: 'ONLINE', time: getNowFormatted() };
         break;
+      // TAREA -- INSTALACIÓN LIMPIA (Fase 14): ya no son públicas (ver
+      // publicActions arriba) -- ahora exigen sesión real + 'admin.roles',
+      // el mismo permiso que ya protege las migraciones de abajo.
+      // Comportamiento interno SIN CAMBIOS (siguen llamando exactamente a
+      // las mismas funciones de siempre) -- setupNuevaInstalacion() nunca
+      // pasa por aquí, no se ve afectada.
       case 'system.setupDatabase':
+        Security.requirePermission(currentUser, 'admin.roles');
         result = setupDatabase();
         break;
       case 'system.seedInitialData':
+        Security.requirePermission(currentUser, 'admin.roles');
         result = seedInitialData();
+        break;
+      // TAREA -- INSTALACIÓN LIMPIA + PRIMER ADMIN.
+      case 'system.installationStatus':
+        result = handleInstallationStatus_();
+        break;
+      case 'system.setupInitialAdmin':
+        result = handleSetupInitialAdmin_(data);
+        break;
+      case 'system.migrateInitialAdminStatus':
+        Security.requirePermission(currentUser, 'admin.roles');
+        result = migrateInitialAdminStatus();
         break;
       // FASE 8 (Parte 2): migración idempotente de permisos
       // creditos_favor.* para instalaciones YA EXISTENTES -- a diferencia

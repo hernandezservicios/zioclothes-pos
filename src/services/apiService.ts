@@ -89,9 +89,17 @@ function delay(ms: number): Promise<void> {
  */
 function isSafeToRetry(action: string): boolean {
   if (action.endsWith('.list') || action.endsWith('.listAuxiliaries') || action.endsWith('.kardex')) return true;
-  return ['system.ping', 'system.getSettings', 'system.getBootstrapData', 'auth.validateSession', 'cash.getActiveSession'].includes(
-    action
-  );
+  return [
+    'system.ping',
+    'system.getSettings',
+    'system.getBootstrapData',
+    'auth.validateSession',
+    'cash.getActiveSession',
+    // TAREA -- INSTALACIÓN LIMPIA + PRIMER ADMIN: de solo lectura, sin
+    // efectos secundarios -- mismo criterio que system.ping/getSettings.
+    // system.setupInitialAdmin NUNCA se agrega aquí (es una mutación real).
+    'system.installationStatus',
+  ].includes(action);
 }
 
 /**
@@ -1038,6 +1046,54 @@ class ApiService {
       success: true,
       message: 'Conexión establecida correctamente.',
       data: info,
+    };
+  }
+
+  /**
+   * TAREA -- INSTALACIÓN LIMPIA + PRIMER ADMIN (Fase 16). `system.
+   * installationStatus` (Main.gs, pública) -- se consulta justo después
+   * de validar la URL del backend, ANTES de cualquier login, para saber
+   * si esta instalación todavía necesita que se cree su primer
+   * administrador. Vía `syncWithGoogleAppsScript` normal (POST, sin
+   * sessionToken -- igual que auth.login) -- reutiliza el mismo
+   * transporte/timeout/clasificación de errores que el resto del
+   * sistema, nunca un mecanismo paralelo.
+   */
+  public async getInstallationStatus(): Promise<ApiResponse<{ installationConfigured: boolean; initialAdminConfigured: boolean }>> {
+    const res = await this.syncWithGoogleAppsScript('system.installationStatus', {});
+    if (!res.success) return { success: false, message: res.message, errorCode: res.errorCode };
+
+    const raw = res.data || {};
+    return {
+      success: true,
+      message: 'OK',
+      data: {
+        installationConfigured: raw.installationConfigured === true,
+        initialAdminConfigured: raw.initialAdminConfigured === true,
+      },
+    };
+  }
+
+  /**
+   * `system.setupInitialAdmin` (Main.gs, pública, protegida por su
+   * propia lógica interna -- ver SetupInstaller.gs en el backend).
+   * Crea el ÚNICO primer administrador de una instalación recién
+   * configurada. El rol siempre es ADMIN en el backend -- este método ni
+   * siquiera acepta un campo `rol` en el payload.
+   */
+  public async setupInitialAdmin(payload: {
+    nombre: string;
+    usuario: string;
+    password: string;
+  }): Promise<ApiResponse<{ userId: string }>> {
+    const res = await this.syncWithGoogleAppsScript('system.setupInitialAdmin', payload);
+    if (!res.success) return { success: false, message: res.message, errorCode: res.errorCode };
+
+    const raw = res.data || {};
+    return {
+      success: true,
+      message: res.message || 'Administrador creado exitosamente.',
+      data: { userId: raw.userId },
     };
   }
 }
