@@ -427,6 +427,10 @@ const loadOrder = [
   // cargados arriba (un único scope global concatenado, igual que
   // CreditNotesController.gs).
   'RestoreController.gs',
+  // TAREA -- SISTEMA DE PERMISOS DE VISTAS POR ROL: RolesController.gs
+  // referencia DbHelper/Security/AuditController/LockServiceHelper/CONFIG,
+  // todos ya cargados arriba.
+  'RolesController.gs',
   'SeedSetup.gs', 'Main.gs'
 ];
 
@@ -4141,6 +4145,55 @@ test('PERMISSIONS_NEW_INSTALL_ALREADY_HAS_CREDITOS_FAVOR_VIA_SEED', () => {
   assert(!cajero.includes('creditos_favor.crear') && !cajero.includes('creditos_favor.anular'), 'CAJERO NUNCA debe tener crear/anular por defecto');
 });
 
+/* ================================================================
+   TAREA -- SISTEMA DE PERMISOS DE VISTAS POR ROL.
+
+   Verificado contra el estado REAL sembrado por seedInitialData() al
+   inicio de esta suite (antes de que cualquier otro test mute
+   Roles_Permisos) -- exactamente la misma técnica que
+   PERMISSIONS_NEW_INSTALL_ALREADY_HAS_CREDITOS_FAVOR_VIA_SEED de arriba.
+   Esta prueba es también la que detecta, como regresión real, el bug de
+   auditoría original de esta fase: antes de esta tarea, Sidebar.tsx/
+   App.tsx dependían de códigos ('pos.acceso', 'dashboard.ver',
+   'abonos.ver', 'reportes.ver') que NUNCA existieron en ningún rol real
+   del backend -- con permisos de sesión reales, CAJERO/GERENTE/etc. no
+   podían ver ni "Panel Principal" ni "Caja & Mostrador POS" en el
+   Sidebar. Los nuevos vista.* sí existen realmente en Roles_Permisos.
+   ================================================================ */
+test('PERMISSIONS_VIEW_MATRIX_NEW_INSTALL_MATCHES_EXPECTED', () => {
+  const admin = getRolePermisosJsonForTest('ADMIN');
+  const gerente = getRolePermisosJsonForTest('GERENTE');
+  const supervisor = getRolePermisosJsonForTest('SUPERVISOR');
+  const cajero = getRolePermisosJsonForTest('CAJERO');
+  const vendedor = getRolePermisosJsonForTest('VENDEDOR');
+
+  const ALL_VIEWS = ['dashboard', 'pos', 'sales', 'returns', 'products', 'inventory', 'purchases', 'credits', 'installments', 'creditNotes', 'storeCredits', 'cash', 'customers', 'expenses', 'reports', 'settings'];
+  const EXPECTED = {
+    ADMIN: ALL_VIEWS,
+    GERENTE: ALL_VIEWS,
+    SUPERVISOR: ['pos', 'sales', 'returns', 'products', 'inventory', 'purchases', 'credits', 'installments', 'creditNotes', 'storeCredits', 'cash', 'customers', 'expenses', 'reports'],
+    CAJERO: ['pos', 'sales', 'returns', 'products', 'credits', 'installments', 'creditNotes', 'storeCredits', 'cash', 'customers'],
+    VENDEDOR: ['pos', 'sales', 'products', 'creditNotes', 'storeCredits', 'customers']
+  };
+  const actualByRole = { ADMIN: admin, GERENTE: gerente, SUPERVISOR: supervisor, CAJERO: cajero, VENDEDOR: vendedor };
+
+  ALL_VIEWS.forEach(view => {
+    const code = 'vista.' + view;
+    Object.keys(EXPECTED).forEach(rol => {
+      const shouldHave = EXPECTED[rol].includes(view);
+      const has = actualByRole[rol].includes(code);
+      assertEqual(has, shouldHave, `${rol} x ${code}: esperado=${shouldHave}, real=${has}`);
+    });
+  });
+
+  // Regresión explícita del hallazgo de auditoría: CAJERO SÍ puede entrar
+  // a POS con permisos de sesión reales (antes, con pos.acceso, no podía).
+  assert(cajero.includes('vista.pos'), 'CAJERO debe poder acceder a POS (Fase 8, requisito explícito)');
+  assert(!cajero.includes('vista.dashboard'), 'CAJERO NUNCA debe ver Dashboard por defecto');
+  assert(!cajero.includes('vista.reports'), 'CAJERO NUNCA debe ver Reportes por defecto');
+  assert(!cajero.includes('vista.settings'), 'CAJERO NUNCA debe ver Configuración por defecto (bloquea también Usuarios/Roles y Permisos, que viven dentro de esa pantalla)');
+});
+
 test('PERMISSIONS_MIGRATION_ADDS_MISSING_PERMISSIONS_TO_EXISTING_INSTALL', () => {
   // Simula una instalación EXISTENTE (sembrada antes de la Fase 6): el rol
   // CAJERO tiene sus permisos normales pero SIN ninguno de
@@ -4245,6 +4298,221 @@ test('PERMISSIONS_MIGRATION_REQUIRES_ADMIN_ROLES_PERMISSION', () => {
   const res = doPostRaw('system.migrateCreditosFavorPermissions', {}, cajeroSession.sessionToken);
   assert(res.success === false, 'CAJERO no debe poder ejecutar la migración de permisos');
   assert(String(res.error || '').indexOf('FORBIDDEN') === 0, res.error);
+});
+
+/* ================================================================
+   TAREA -- SISTEMA DE PERMISOS DE VISTAS POR ROL: migración
+   `system.migrateViewPermissions` (instalaciones YA EXISTENTES) --
+   mismas garantías exactas que la suite de creditos_favor de arriba,
+   verificadas contra el nuevo backfill vista.*. A partir de aquí ya no se
+   puede asumir un estado "recién sembrado" de Roles_Permisos (los tests
+   de arriba ya lo mutaron) -- cada test establece su propio fixture
+   conocido con setRolePermisosJsonForTest antes de aseverar nada.
+   ================================================================ */
+
+test('VIEW_PERMISSIONS_MIGRATION_ADDS_MISSING_TO_EXISTING_INSTALL', () => {
+  // Simula una instalación existente sembrada ANTES de esta tarea: CAJERO
+  // tiene sus permisos funcionales normales pero ningún vista.*.
+  setRolePermisosJsonForTest('CAJERO', ['ventas.crear', 'ventas.ver', 'caja.abrir', 'caja.ver', 'clientes.ver', 'creditos_favor.ver', 'creditos_favor.aplicar']);
+  const before = getRolePermisosJsonForTest('CAJERO');
+  assert(!before.some(p => p.indexOf('vista.') === 0), 'fixture debe simular una instalación sin vista.* todavía');
+
+  const migRes = doPostRaw('system.migrateViewPermissions', {}, adminToken);
+  assert(migRes.success === true, JSON.stringify(migRes));
+  const cajeroUpdated = migRes.rolesUpdated.find(r => r.rol === 'CAJERO');
+  assert(!!cajeroUpdated, 'CAJERO debe reportarse como actualizado');
+  assert(cajeroUpdated.permisosAgregados.includes('vista.pos'), 'debe agregar vista.pos a CAJERO');
+  assert(!cajeroUpdated.permisosAgregados.includes('vista.dashboard'), 'nunca debe agregar vista.dashboard a CAJERO');
+
+  const after = getRolePermisosJsonForTest('CAJERO');
+  assert(after.includes('ventas.crear') && after.includes('caja.abrir'), 'los permisos funcionales preexistentes deben conservarse intactos');
+  assert(after.includes('vista.pos') && after.includes('vista.cash') && after.includes('vista.customers'), 'CAJERO debe recibir los vista.* que le corresponden');
+  assert(!after.includes('vista.dashboard') && !after.includes('vista.reports') && !after.includes('vista.settings'), 'CAJERO nunca debe recibir vista.dashboard/reports/settings');
+});
+
+test('VIEW_PERMISSIONS_MIGRATION_PRESERVES_CUSTOM_PERMISSIONS_AND_NEVER_DUPLICATES', () => {
+  setRolePermisosJsonForTest('VENDEDOR', ['ventas.crear', 'ventas.ver', 'reportes.experimental_del_negocio', 'vista.pos']);
+
+  const first = doPostRaw('system.migrateViewPermissions', {}, adminToken);
+  assert(first.success === true, JSON.stringify(first));
+  const afterFirst = getRolePermisosJsonForTest('VENDEDOR');
+  assert(afterFirst.includes('reportes.experimental_del_negocio'), 'un permiso personalizado del negocio nunca debe eliminarse');
+  assert(afterFirst.includes('vista.pos'), 'un vista.* ya presente (personalizado o de una migración anterior) se conserva');
+  assert(afterFirst.includes('vista.creditNotes') && afterFirst.includes('vista.storeCredits') && afterFirst.includes('vista.customers'), 'debe completar los vista.* que faltaban');
+
+  const second = doPostRaw('system.migrateViewPermissions', {}, adminToken);
+  assert(second.success === true, JSON.stringify(second));
+  const afterSecond = getRolePermisosJsonForTest('VENDEDOR');
+  assertEqual(JSON.stringify(afterFirst.slice().sort()), JSON.stringify(afterSecond.slice().sort()), 'ejecutar la migración dos veces debe producir el mismo resultado');
+  assertEqual(new Set(afterSecond).size, afterSecond.length, 'no debe haber ningún vista.* duplicado tras ejecutarla dos veces');
+  const secondEntry = second.rolesUpdated.find(r => r.rol === 'VENDEDOR');
+  assert(!secondEntry, 'la segunda ejecución no debe reportar a VENDEDOR como actualizado -- ya no le falta nada');
+});
+
+test('VIEW_PERMISSIONS_MIGRATION_NEVER_OVERWRITES_PRE_EXISTING_CUSTOMIZATION', () => {
+  // "ADMIN ya personalizó una configuración: NO sobrescribirla
+  // automáticamente" -- se refiere a un rol que YA tenía algunos vista.*
+  // (ej. editados a mano en Sheets antes de que esta tarea existiera, o
+  // por una corrida anterior de esta misma migración): esos valores
+  // existentes deben conservarse exactamente, la migración solo debe
+  // completar los que de verdad faltan por completo.
+  setRolePermisosJsonForTest('SUPERVISOR', ['ventas.ver', 'caja.ver', 'vista.pos', 'vista.sales', 'vista.cash']);
+  const migRes = doPostRaw('system.migrateViewPermissions', {}, adminToken);
+  assert(migRes.success === true, JSON.stringify(migRes));
+  const after = getRolePermisosJsonForTest('SUPERVISOR');
+  assert(after.includes('vista.pos') && after.includes('vista.sales') && after.includes('vista.cash'), 'los vista.* ya presentes antes de migrar deben conservarse exactamente');
+  assert(after.includes('vista.inventory'), 'debe completar un vista.* que de verdad faltaba por completo');
+
+  // Límite honesto y documentado (compartido con migrateCreditosFavorPermissions,
+  // mismo patrón "agregar si falta" ya establecido): esta migración es una
+  // herramienta de UNA SOLA DIRECCIÓN para poblar valores por defecto, no
+  // una sincronización bidireccional. Si el ADMIN, DESPUÉS de que un rol ya
+  // fue migrado, desmarca un vista.* vía la UI real ("Acceso a Vistas"),
+  // ese desmarcado se guarda vía roles.updatePermissions -- pero volver a
+  // ejecutar la migración manual de "valores predeterminados" no puede
+  // distinguir "nunca migrado" de "quitado a propósito después", así que
+  // SÍ lo repone. Por eso el botón correspondiente en la UI se documenta
+  // explícitamente como "solo agrega lo que falte" y no se ejecuta
+  // automáticamente en cada arranque.
+  const withoutInventory = after.filter(p => p !== 'vista.inventory');
+  setRolePermisosJsonForTest('SUPERVISOR', withoutInventory);
+  doPostRaw('system.migrateViewPermissions', {}, adminToken);
+  const afterSecondRun = getRolePermisosJsonForTest('SUPERVISOR');
+  assert(afterSecondRun.includes('vista.inventory'), 'comportamiento documentado: re-ejecutar la migración manual repone un vista.* quitado después -- por diseño, no es un bug');
+});
+
+test('VIEW_PERMISSIONS_MIGRATION_NEVER_TOUCHES_UNKNOWN_CUSTOM_ROLE', () => {
+  const before = getRolePermisosJsonForTest('CONSULTOR_EXTERNO');
+  const migRes = doPostRaw('system.migrateViewPermissions', {}, adminToken);
+  assert(migRes.success === true, JSON.stringify(migRes));
+  assert(migRes.rolesSkippedUnknown.includes('CONSULTOR_EXTERNO'), 'un rol personalizado fuera de los 5 estándar nunca debe tocarse');
+  const after = getRolePermisosJsonForTest('CONSULTOR_EXTERNO');
+  assertEqual(JSON.stringify(after), JSON.stringify(before), 'su arreglo de permisos debe permanecer exactamente igual');
+});
+
+test('VIEW_PERMISSIONS_MIGRATION_NEVER_OVERWRITES_INVALID_JSON_CELL', () => {
+  setRolePermisosRawCellForTest('SUPERVISOR', 'json corrupto {{{');
+  const migRes = doPostRaw('system.migrateViewPermissions', {}, adminToken);
+  assert(migRes.success === true, JSON.stringify(migRes));
+  assert(migRes.rolesSkippedInvalidJson.includes('SUPERVISOR'), 'una fila con permisos_json inválido debe reportarse, nunca sobreescribirse a ciegas');
+  const rawAfter = runInContext(`DbHelper.getAllRows('Roles_Permisos').find(r => r.rol === 'SUPERVISOR').permisos_json`);
+  assertEqual(rawAfter, 'json corrupto {{{', 'la celda corrupta debe permanecer exactamente igual');
+  setRolePermisosJsonForTest('SUPERVISOR', ['ventas.ver', 'caja.ver', 'vista.pos', 'vista.sales', 'vista.cash']);
+});
+
+test('VIEW_PERMISSIONS_MIGRATION_REQUIRES_ADMIN_ROLES_PERMISSION', () => {
+  const cajeroSession = login('cajero', 'cajero123');
+  const res = doPostRaw('system.migrateViewPermissions', {}, cajeroSession.sessionToken);
+  assert(res.success === false, 'CAJERO no debe poder ejecutar la migración de permisos de vista');
+  assert(String(res.error || '').indexOf('FORBIDDEN') === 0, res.error);
+});
+
+/* ================================================================
+   TAREA -- SISTEMA DE PERMISOS DE VISTAS POR ROL: roles.list /
+   roles.updatePermissions (RolesController.gs) -- primera superficie de
+   administración real de Roles_Permisos desde el frontend.
+   ================================================================ */
+
+test('ROLES_LIST_REQUIRES_ADMIN_ROLES_PERMISSION', () => {
+  const cajeroSession = login('cajero', 'cajero123');
+  const res = doPostRaw('roles.list', {}, cajeroSession.sessionToken);
+  assert(res.success === false, 'CAJERO no debe poder listar roles/permisos');
+  assert(String(res.error || '').indexOf('FORBIDDEN') === 0, res.error);
+});
+
+test('ROLES_LIST_RETURNS_ALL_ROLES_WITH_PARSED_PERMISSIONS', () => {
+  const res = doPostRaw('roles.list', {}, adminToken);
+  assert(res.success === true, JSON.stringify(res));
+  assert(Array.isArray(res.roles), 'debe devolver un arreglo de roles');
+  const cajero = res.roles.find(r => r.rol === 'CAJERO');
+  assert(!!cajero, 'CAJERO debe estar en la lista');
+  assert(Array.isArray(cajero.permisos), 'permisos_json debe llegar ya parseado como arreglo, no como string crudo');
+});
+
+test('ROLES_UPDATE_PERMISSIONS_ONLY_TOUCHES_VISTA_SUBSET_PRESERVES_FUNCTIONAL', () => {
+  setRolePermisosJsonForTest('VENDEDOR', ['ventas.crear', 'ventas.ver', 'clientes.ver', 'vista.pos', 'vista.sales']);
+
+  const res = doPostRaw('roles.updatePermissions', { rol: 'VENDEDOR', vistas: ['vista.pos', 'vista.customers'] }, adminToken);
+  assert(res.success === true, JSON.stringify(res));
+
+  const after = getRolePermisosJsonForTest('VENDEDOR');
+  // Funcionales intactos, sin importar qué vista.* se haya marcado/desmarcado.
+  assert(after.includes('ventas.crear') && after.includes('ventas.ver') && after.includes('clientes.ver'), 'los permisos funcionales existentes nunca deben tocarse al editar vista.*');
+  // vista.* reemplazado EXACTAMENTE por el enviado.
+  assert(after.includes('vista.pos') && after.includes('vista.customers'), 'debe incluir los vista.* recién marcados');
+  assert(!after.includes('vista.sales'), 'un vista.* que ya no viene en la lista enviada debe considerarse desmarcado y retirarse');
+});
+
+test('ROLES_UPDATE_PERMISSIONS_REJECTS_ADMIN_ROLE_EDIT', () => {
+  const before = getRolePermisosJsonForTest('ADMIN');
+  const res = doPostRaw('roles.updatePermissions', { rol: 'ADMIN', vistas: ['vista.pos'] }, adminToken);
+  assert(res.success === false, 'nunca debe permitirse editar el rol ADMIN desde esta pantalla');
+  assert(String(res.error || '').indexOf('VALIDATION_ERROR') === 0, res.error);
+  const after = getRolePermisosJsonForTest('ADMIN');
+  assertEqual(JSON.stringify(after), JSON.stringify(before), 'el rol ADMIN no debe modificarse en absoluto tras el intento rechazado');
+});
+
+test('ROLES_UPDATE_PERMISSIONS_REJECTS_NON_VISTA_CODES', () => {
+  const res = doPostRaw('roles.updatePermissions', { rol: 'CAJERO', vistas: ['vista.pos', 'admin.configuracion'] }, adminToken);
+  assert(res.success === false, 'no debe aceptar códigos que no empiecen con vista. -- esta pantalla nunca debe poder otorgar permisos funcionales/administrativos');
+  assert(String(res.error || '').indexOf('VALIDATION_ERROR') === 0, res.error);
+});
+
+test('ROLES_UPDATE_PERMISSIONS_REJECTS_UNKNOWN_ROLE', () => {
+  const res = doPostRaw('roles.updatePermissions', { rol: 'ROL_QUE_NO_EXISTE', vistas: ['vista.pos'] }, adminToken);
+  assert(res.success === false, 'un rol inexistente nunca debe crear una fila nueva silenciosamente');
+  assert(String(res.error || '').indexOf('VALIDATION_ERROR') === 0, res.error);
+});
+
+test('ROLES_UPDATE_PERMISSIONS_REQUIRES_ADMIN_ROLES_PERMISSION', () => {
+  const cajeroSession = login('cajero', 'cajero123');
+  const res = doPostRaw('roles.updatePermissions', { rol: 'VENDEDOR', vistas: ['vista.pos'] }, cajeroSession.sessionToken);
+  assert(res.success === false, 'CAJERO no debe poder modificar permisos de ningún rol');
+  assert(String(res.error || '').indexOf('FORBIDDEN') === 0, res.error);
+});
+
+test('ROLES_UPDATE_PERMISSIONS_IS_AUDITED', () => {
+  setRolePermisosJsonForTest('VENDEDOR', ['ventas.crear']);
+  doPostRaw('roles.updatePermissions', { rol: 'VENDEDOR', vistas: ['vista.pos'] }, adminToken);
+  const logs = runInContext(`DbHelper.findRows('Auditoria', a => a.accion === 'ROLE_VIEW_PERMISSIONS_UPDATED' && a.entidad_id === 'VENDEDOR')`);
+  assert(logs.length > 0, 'la actualización de permisos de vista de un rol debe quedar auditada');
+});
+
+/* ================================================================
+   TAREA -- SISTEMA DE PERMISOS DE VISTAS POR ROL: DbHelper.updateRowByKey
+   (generalización usada por RolesController/migrateViewPermissions para
+   Roles_Permisos, que no tiene columna 'id').
+   ================================================================ */
+
+test('DBHELPER_UPDATE_ROW_BY_ID_STILL_WORKS_UNCHANGED_AFTER_GENERALIZATION', () => {
+  // Regresión directa: updateRowById ahora delega en updateRowByKey('id', ...)
+  // -- debe comportarse exactamente igual que antes para cualquier hoja
+  // real con columna 'id' (ej. Clientes).
+  const before = runInContext(`DbHelper.findById('Clientes', 'CLI-T01')`);
+  runInContext(`DbHelper.updateRowById('Clientes', 'CLI-T01', { ciudad: 'Ciudad Actualizada Por Prueba' })`);
+  const after = runInContext(`DbHelper.findById('Clientes', 'CLI-T01')`);
+  assertEqual(after.ciudad, 'Ciudad Actualizada Por Prueba');
+  assertEqual(after.nombre, before.nombre, 'los demás campos no enviados deben conservarse igual que antes');
+  // Restaura el fixture para no afectar otros tests que dependan de CLI-T01.
+  runInContext(`DbHelper.updateRowById('Clientes', 'CLI-T01', { ciudad: '${before.ciudad || ''}' })`);
+});
+
+test('DBHELPER_UPDATE_ROW_BY_KEY_WORKS_FOR_SHEET_WITHOUT_ID_COLUMN', () => {
+  setRolePermisosJsonForTest('VENDEDOR', ['ventas.crear']);
+  runInContext(`DbHelper.updateRowByKey('Roles_Permisos', 'rol', 'VENDEDOR', { descripcion: 'Descripción actualizada por prueba' })`);
+  const after = runInContext(`DbHelper.getAllRows('Roles_Permisos').find(r => r.rol === 'VENDEDOR')`);
+  assertEqual(after.descripcion, 'Descripción actualizada por prueba');
+  assertEqual(JSON.parse(after.permisos_json)[0], 'ventas.crear', 'una columna no enviada (permisos_json) debe conservarse intacta');
+});
+
+test('DBHELPER_UPDATE_ROW_BY_KEY_THROWS_ON_UNKNOWN_KEY_VALUE', () => {
+  let threw = false;
+  try {
+    runInContext(`DbHelper.updateRowByKey('Roles_Permisos', 'rol', 'ROL_INEXISTENTE_XYZ', { descripcion: 'x' })`);
+  } catch (e) {
+    threw = true;
+  }
+  assert(threw, 'debe lanzar si la clave no existe, nunca insertar silenciosamente una fila nueva');
 });
 
 /* ================================================================

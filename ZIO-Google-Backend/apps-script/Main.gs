@@ -147,6 +147,23 @@ function doPost(e) {
         Security.requirePermission(currentUser, 'admin.roles');
         result = migrateCreditosFavorPermissions();
         break;
+      // TAREA -- SISTEMA DE PERMISOS DE VISTAS POR ROL: mismo patrón y
+      // mismo permiso ('admin.roles') que la migración de arriba --
+      // backfill idempotente de los códigos 'vista.*' para instalaciones
+      // YA EXISTENTES (una instalación nueva ya los recibe sembrados
+      // directamente en seedInitialData()).
+      case 'system.migrateViewPermissions':
+        Security.requirePermission(currentUser, 'admin.roles');
+        result = migrateViewPermissions();
+        break;
+
+      // --- ROLES Y PERMISOS DE VISTA (TAREA -- SISTEMA DE PERMISOS DE VISTAS POR ROL) ---
+      case 'roles.list':
+        result = RolesController.handleListRoles(currentUser);
+        break;
+      case 'roles.updatePermissions':
+        result = RolesController.handleUpdateRolePermissions(data, currentUser);
+        break;
       case 'system.getBootstrapData':
         result = SettingsController.handleGetBootstrapData();
         break;

@@ -8,6 +8,8 @@ import { authApi } from '../../services/authApi';
 import { settingsApi } from '../../services/settingsApi';
 import { productsApi } from '../../services/productsApi';
 import { customersApi } from '../../services/customersApi';
+import { rolesApi, RolePermissions } from '../../services/rolesApi';
+import { VIEW_ACCESS_CATALOG, EDITABLE_ROLES } from '../../services/permissionsCatalog';
 import { salesApi } from '../../services/salesApi';
 import { creditsApi } from '../../services/creditsApi';
 import { creditNotesApi } from '../../services/creditNotesApi';
@@ -612,7 +614,7 @@ export const SettingsView: React.FC = () => {
     refreshReturns,
   } = useDataStore();
 
-  const [activeTab, setActiveTab] = useState<'GENERAL' | 'USUARIOS' | 'SHEETS' | 'BACKUP' | 'AUDITORIA'>('GENERAL');
+  const [activeTab, setActiveTab] = useState<'GENERAL' | 'USUARIOS' | 'ROLES' | 'SHEETS' | 'BACKUP' | 'AUDITORIA'>('GENERAL');
 
   // FASE 3.7H: configuración empresarial real vía settingsApi.get()
   // (SettingsController.handleGetSettings -> hoja Configuracion real).
@@ -750,6 +752,99 @@ export const SettingsView: React.FC = () => {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // TAREA -- SISTEMA DE PERMISOS DE VISTAS POR ROL -- "Acceso a Vistas".
+  // `viewDraft` es un borrador LOCAL por rol (solo códigos vista.*) que
+  // permite marcar/desmarcar checkboxes sin escribir nada hasta pulsar
+  // "Guardar" -- se inicializa/resincroniza siempre desde la respuesta
+  // real del backend (roles.list), nunca se inventa un valor.
+  const [rolesPermissions, setRolesPermissions] = useState<RolePermissions[]>([]);
+  const [rolesLoading, setRolesLoading] = useState(true);
+  const [rolesError, setRolesError] = useState<string | null>(null);
+  const [viewDraft, setViewDraft] = useState<Record<string, Set<string>>>({});
+  const [savingRole, setSavingRole] = useState<string | null>(null);
+  const [applyingViewDefaults, setApplyingViewDefaults] = useState(false);
+
+  const fetchRoles = useCallback(async () => {
+    setRolesLoading(true);
+    setRolesError(null);
+    const res = await rolesApi.list();
+    if (res.success) {
+      const roles = res.data || [];
+      setRolesPermissions(roles);
+      const draft: Record<string, Set<string>> = {};
+      roles.forEach((r) => {
+        draft[r.rol] = new Set(r.permisos.filter((p) => p.indexOf('vista.') === 0));
+      });
+      setViewDraft(draft);
+    } else {
+      setRolesError(res.message || 'No se pudo obtener la lista real de roles y permisos.');
+    }
+    setRolesLoading(false);
+  }, []);
+
+  useEffect(() => {
+    if (hasPermission('admin.roles')) {
+      fetchRoles();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const toggleViewDraft = (rol: string, viewId: string) => {
+    setViewDraft((prev) => {
+      const current = new Set<string>(prev[rol] || []);
+      const code = `vista.${viewId}`;
+      if (current.has(code)) {
+        current.delete(code);
+      } else {
+        current.add(code);
+      }
+      return { ...prev, [rol]: current };
+    });
+  };
+
+  const isRoleViewDraftDirty = (rol: string): boolean => {
+    const original = rolesPermissions.find((r) => r.rol === rol);
+    const originalSet = new Set((original?.permisos || []).filter((p) => p.indexOf('vista.') === 0));
+    const draftSet = viewDraft[rol] || new Set<string>();
+    if (originalSet.size !== draftSet.size) return true;
+    for (const v of Array.from(originalSet)) {
+      if (!draftSet.has(v)) return true;
+    }
+    return false;
+  };
+
+  const handleSaveRoleViews = async (rol: string) => {
+    setSavingRole(rol);
+    const vistas: string[] = Array.from(viewDraft[rol] || new Set<string>());
+    const res = await rolesApi.updateViewPermissions(rol, vistas);
+    setSavingRole(null);
+    if (res.success) {
+      showToast('Acceso a Vistas Actualizado', res.message || `Los módulos visibles para ${rol} se actualizaron correctamente.`, 'exito');
+      await fetchRoles();
+    } else {
+      showToast('Error al Guardar', res.message || 'No se pudo actualizar el acceso a vistas de este rol.', 'error');
+    }
+  };
+
+  const handleApplyViewDefaults = async () => {
+    setApplyingViewDefaults(true);
+    const res = await rolesApi.applyViewPermissionDefaults();
+    setApplyingViewDefaults(false);
+    if (res.success) {
+      const updated = res.data?.rolesUpdated.length || 0;
+      showToast(
+        'Valores Predeterminados Aplicados',
+        updated > 0
+          ? `Se completaron accesos faltantes en ${updated} rol(es). Ningún acceso ya configurado fue modificado.`
+          : 'Todos los roles ya tenían sus accesos predeterminados -- no había nada pendiente por completar.',
+        'exito'
+      );
+      await fetchRoles();
+    } else {
+      showToast('Error', res.message || 'No se pudo aplicar los valores predeterminados de acceso a vistas.', 'error');
+    }
+  };
 
   const [userModalOpen, setUserModalOpen] = useState(false);
   const [editingUserId, setEditingUserId] = useState<string | null>(null);
@@ -1347,6 +1442,25 @@ export const SettingsView: React.FC = () => {
           </button>
         )}
 
+        {/* TAREA -- SISTEMA DE PERMISOS DE VISTAS POR ROL: pestaña nueva,
+            gateada por 'admin.roles' (el mismo permiso real que ya protege
+            system.migrateCreditosFavorPermissions/migrateViewPermissions
+            -- solo ADMIN lo tiene en el seed real, GERENTE lo excluye). */}
+        {hasPermission('admin.roles') && (
+          <button
+            type="button"
+            onClick={() => setActiveTab('ROLES')}
+            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition ${
+              activeTab === 'ROLES'
+                ? 'bg-[#2F2A25] text-white shadow-xs'
+                : 'text-[#756E65] hover:bg-[#FAF8F4]'
+            }`}
+          >
+            <Shield className="w-4 h-4" />
+            <span>Roles y Permisos</span>
+          </button>
+        )}
+
         <button
           type="button"
           onClick={() => setActiveTab('SHEETS')}
@@ -1907,6 +2021,125 @@ export const SettingsView: React.FC = () => {
                   </div>
                 </form>
               </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* TAB -- ROLES Y PERMISOS ("Acceso a Vistas").
+          TAREA -- SISTEMA DE PERMISOS DE VISTAS POR ROL. Separa
+          explícitamente "acceso a vista" (¿puede entrar al módulo?) de
+          los permisos funcionales existentes (¿qué puede hacer dentro? --
+          esos se siguen gestionando donde ya vivían, esta pantalla nunca
+          los toca). ADMIN se muestra fijo/no editable: ya tiene acceso
+          total sin mirar Roles_Permisos (AuthContext.hasPermission),
+          editarlo aquí no tendría ningún efecto real. */}
+      {activeTab === 'ROLES' && (
+        <div className="bg-white p-6 rounded-3xl border border-[#E4DDD2] space-y-6 shadow-xs">
+          <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-3">
+            <div>
+              <h3 className="font-serif font-bold text-base text-[#2F2A25]">Roles y Permisos — Acceso a Vistas</h3>
+              <p className="text-xs text-[#756E65]">
+                Controle qué módulos puede ABRIR cada rol. "Acceso a vista" no otorga permiso total sobre el
+                módulo -- las acciones dentro de cada pantalla (crear, editar, anular, eliminar) siguen
+                controladas por los permisos de esta misma configuración.
+              </p>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => fetchRoles()}
+                disabled={rolesLoading}
+                className="flex items-center gap-2 px-3 py-2 rounded-xl bg-white border border-[#E4DDD2] text-xs font-semibold text-[#2F2A25] hover:bg-[#F6F1E8] disabled:opacity-50"
+              >
+                <RefreshCw className={`w-4 h-4 text-[#756E65] ${rolesLoading ? 'animate-spin' : ''}`} />
+                <span>{rolesLoading ? 'Actualizando...' : 'Actualizar'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleApplyViewDefaults}
+                disabled={applyingViewDefaults || rolesLoading}
+                title="Completa el acceso a vistas que le falte a cada rol según los valores predeterminados. Nunca quita nada ya configurado."
+                className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-[#2F2A25] text-white text-xs font-bold hover:bg-[#403932] disabled:opacity-50"
+              >
+                <Shield className="w-4 h-4 text-[#E8DCC8]" />
+                <span>{applyingViewDefaults ? 'Aplicando...' : 'Aplicar Valores Predeterminados'}</span>
+              </button>
+            </div>
+          </div>
+
+          {rolesError && (
+            <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                <span>No se pudo cargar Roles y Permisos: {rolesError}</span>
+              </div>
+              <button type="button" onClick={() => fetchRoles()} className="px-3 py-1.5 rounded-lg bg-rose-700 text-white font-bold text-[11px] shrink-0">
+                Reintentar
+              </button>
+            </div>
+          )}
+
+          {rolesLoading && rolesPermissions.length === 0 ? (
+            <div className="text-center py-10 text-[#756E65] text-xs">Consultando roles y permisos reales en el backend...</div>
+          ) : (
+            <div className="space-y-6">
+              <div className="p-3 rounded-2xl bg-[#F6F1E8] border border-[#E4DDD2] text-xs text-[#756E65] flex items-center gap-2">
+                <Shield className="w-4 h-4 shrink-0 text-[#2F2A25]" />
+                <span>
+                  <strong className="text-[#2F2A25]">ADMIN</strong> siempre tiene acceso completo a todas las vistas
+                  y no se muestra aquí como editable.
+                </span>
+              </div>
+
+              {EDITABLE_ROLES.map((rol) => {
+                const roleData = rolesPermissions.find((r) => r.rol === rol);
+                const draft = viewDraft[rol] || new Set<string>();
+                const dirty = isRoleViewDraftDirty(rol);
+                return (
+                  <div key={rol} className="border border-[#E4DDD2] rounded-2xl overflow-hidden">
+                    <div className="flex items-center justify-between gap-3 px-4 py-3 bg-[#F6F1E8] border-b border-[#E4DDD2]">
+                      <div>
+                        <p className="text-sm font-bold text-[#2F2A25]">{roleData?.nombre || rol}</p>
+                        <p className="text-[10px] uppercase tracking-wider text-[#756E65] font-semibold">{rol}</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleSaveRoleViews(rol)}
+                        disabled={!dirty || savingRole === rol}
+                        className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-[#2F2A25] text-white text-xs font-bold hover:bg-[#403932] disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        <Save className="w-3.5 h-3.5 text-[#E8DCC8]" />
+                        <span>{savingRole === rol ? 'Guardando...' : dirty ? 'Guardar Cambios' : 'Sin Cambios'}</span>
+                      </button>
+                    </div>
+                    <div className="p-4 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2.5">
+                      {VIEW_ACCESS_CATALOG.map((view) => {
+                        const code = `vista.${view.id}`;
+                        const checked = draft.has(code);
+                        return (
+                          <label
+                            key={view.id}
+                            className={`flex items-center gap-2 px-3 py-2 rounded-xl border text-xs font-semibold cursor-pointer transition ${
+                              checked
+                                ? 'bg-emerald-50 border-emerald-300 text-emerald-900'
+                                : 'bg-white border-[#E4DDD2] text-[#756E65] hover:bg-[#FAF8F4]'
+                            }`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() => toggleViewDraft(rol, view.id)}
+                              className="w-3.5 h-3.5 accent-[#2F2A25]"
+                            />
+                            <span>{view.label}</span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>

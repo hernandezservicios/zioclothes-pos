@@ -107,7 +107,28 @@ export type PermissionCode =
   | 'admin.configuracion'
   | 'usuarios.gestionar'
   | 'auditoria.ver'
-  | 'configuracion.ver';
+  | 'configuracion.ver'
+  // TAREA -- SISTEMA DE PERMISOS DE VISTAS POR ROL: un código por cada
+  // `AppView` real de App.tsx (ninguno inventado -- ver VALID_VIEWS).
+  // Decide exclusivamente si el usuario puede ENTRAR al módulo; los
+  // permisos de arriba (ventas.ver, caja.abrir, etc.) siguen decidiendo
+  // qué puede HACER una vez dentro -- ver AuthContext.canView().
+  | 'vista.dashboard'
+  | 'vista.pos'
+  | 'vista.sales'
+  | 'vista.returns'
+  | 'vista.products'
+  | 'vista.inventory'
+  | 'vista.purchases'
+  | 'vista.credits'
+  | 'vista.installments'
+  | 'vista.creditNotes'
+  | 'vista.storeCredits'
+  | 'vista.cash'
+  | 'vista.customers'
+  | 'vista.expenses'
+  | 'vista.reports'
+  | 'vista.settings';
 
 export interface RolePermissionConfig {
   role: UserRole;

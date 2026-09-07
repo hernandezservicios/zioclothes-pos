@@ -13,6 +13,14 @@ interface AuthContextType {
   settings: SystemSettings;
   activeCashSession: CashSession | undefined;
   hasPermission: (permission: PermissionCode) => boolean;
+  // TAREA -- SISTEMA DE PERMISOS DE VISTAS POR ROL: helper centralizado
+  // (Fase 5) para "¿puede este usuario ENTRAR a este módulo?". Envuelve
+  // hasPermission -- reutiliza el mismo sistema real de permisos (sesión
+  // backend/Roles_Permisos), nunca compara contra el nombre del rol.
+  // `viewId` es el mismo id real que ya usa `AppView`/`Sidebar` (ej.
+  // 'pos', 'dashboard', 'customers') -- el código de permiso real que se
+  // consulta es `vista.<viewId>`.
+  canView: (viewId: string) => boolean;
   login: (usernameOrEmail: string, pass: string) => Promise<boolean>;
   quickSwitchUser: (userId: string) => void;
   logout: () => void;
@@ -180,6 +188,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       return permissions.includes(permission);
     },
     [currentUser]
+  );
+
+  // TAREA -- SISTEMA DE PERMISOS DE VISTAS POR ROL: envoltorio delgado
+  // sobre hasPermission -- ningún estado ni catálogo propio, para que
+  // quede imposible que "poder ver X" y "poder ejecutar acciones de X" se
+  // desincronicen en dos lugares distintos.
+  const canView = useCallback(
+    (viewId: string): boolean => hasPermission(`vista.${viewId}` as PermissionCode),
+    [hasPermission]
   );
 
   /**
@@ -389,6 +406,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         settings,
         activeCashSession,
         hasPermission,
+        canView,
         login,
         quickSwitchUser,
         logout,

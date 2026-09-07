@@ -171,26 +171,48 @@ const DbHelper = {
    * @returns {Object} updated row
    */
   updateRowById(sheetName, id, updatesObj) {
+    return this.updateRowByKey(sheetName, 'id', id, updatesObj);
+  },
+
+  /**
+   * AUDITORÍA (permisos de vista -- Fase 2/5): generalización de
+   * `updateRowById` para hojas cuya clave natural NO es una columna `id`
+   * -- caso real confirmado de `Roles_Permisos`, que se identifica por
+   * `rol` (una fila por rol, sin columna `id` en absoluto). Antes de
+   * agregar esto, la única alternativa habría sido duplicar esta misma
+   * lógica de lectura/escritura fuera de DbHelper (como ya se hizo una
+   * vez, documentado en `migrateCreditosFavorPermissions`); en vez de
+   * repetir ese patrón una segunda vez, se generaliza aquí una sola vez.
+   * `updateRowById` ahora es un caso particular de este método
+   * (`keyColumn: 'id'`) -- mismo comportamiento exacto que antes, ninguna
+   * hoja existente cambia de comportamiento.
+   * @param {string} sheetName
+   * @param {string} keyColumn - Nombre de la columna clave (ej. 'id', 'rol').
+   * @param {string} keyValue
+   * @param {Object} updatesObj
+   * @returns {Object} updated row
+   */
+  updateRowByKey(sheetName, keyColumn, keyValue, updatesObj) {
     const sheet = this.getSheet(sheetName);
     const data = sheet.getDataRange().getValues();
-    if (data.length <= 1) throw new Error(`[DbHelper] No se encontró el registro con ID '${id}' en '${sheetName}'.`);
+    if (data.length <= 1) throw new Error(`[DbHelper] No se encontró el registro con ${keyColumn}='${keyValue}' en '${sheetName}'.`);
 
     const headers = data[0].map(h => String(h).trim());
-    const idColIndex = headers.indexOf('id');
-    if (idColIndex === -1) throw new Error(`[DbHelper] La hoja '${sheetName}' no tiene columna 'id'.`);
+    const keyColIndex = headers.indexOf(keyColumn);
+    if (keyColIndex === -1) throw new Error(`[DbHelper] La hoja '${sheetName}' no tiene columna '${keyColumn}'.`);
 
-    const cleanId = String(id).trim();
+    const cleanKey = String(keyValue).trim();
     let rowIndex = -1;
 
     for (let i = 1; i < data.length; i++) {
-      if (String(data[i][idColIndex]).trim() === cleanId) {
+      if (String(data[i][keyColIndex]).trim() === cleanKey) {
         rowIndex = i + 1; // 1-based index in Sheet
         break;
       }
     }
 
     if (rowIndex === -1) {
-      throw new Error(`[DbHelper] No se encontró el registro con ID '${id}' en '${sheetName}'.`);
+      throw new Error(`[DbHelper] No se encontró el registro con ${keyColumn}='${keyValue}' en '${sheetName}'.`);
     }
 
     const currentRow = data[rowIndex - 1];

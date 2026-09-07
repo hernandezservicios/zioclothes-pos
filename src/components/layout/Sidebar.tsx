@@ -33,7 +33,6 @@ interface MenuItem {
   id: string;
   label: string;
   icon: React.ElementType;
-  permission?: string;
   badge?: string;
 }
 
@@ -43,69 +42,71 @@ export const Sidebar: React.FC<SidebarProps> = ({
   activeView,
   onNavigate,
 }) => {
-  const { hasPermission, settings } = useAuth();
+  // TAREA -- SISTEMA DE PERMISOS DE VISTAS POR ROL: `canView(item.id)`
+  // reemplaza los permisos funcionales reutilizados que este Sidebar
+  // aplicaba antes item por item (varios de ellos -- 'pos.acceso',
+  // 'dashboard.ver' -- nunca existieron en ningún rol real del backend).
+  // `item.id` YA ES el mismo id real de `AppView`/`vista.<id>` -- no hace
+  // falta guardar un campo `permission` aparte por ítem: una sola llamada
+  // centralizada decide, sin ninguna regla por rol hardcodeada aquí.
+  const { canView, settings } = useAuth();
 
   const sections: { title: string; items: MenuItem[] }[] = [
     {
       title: 'Principal',
       items: [
-        { id: 'dashboard', label: 'Panel Principal', icon: LayoutDashboard, permission: 'dashboard.ver' },
-        { id: 'pos', label: 'Caja & Mostrador POS', icon: ShoppingBag, permission: 'pos.acceso' },
+        { id: 'dashboard', label: 'Panel Principal', icon: LayoutDashboard },
+        { id: 'pos', label: 'Caja & Mostrador POS', icon: ShoppingBag },
       ],
     },
     {
       title: 'Ventas & Clientes',
       items: [
-        { id: 'sales', label: 'Historial de Ventas', icon: Receipt, permission: 'ventas.ver' },
+        { id: 'sales', label: 'Historial de Ventas', icon: Receipt },
         // FASE (normalización comercial): "Devoluciones de Prendas" ->
         // "Devoluciones" -- se conserva el `id` interno ('returns') para
         // no romper la navegación/permisos, solo cambia la etiqueta visible.
-        { id: 'returns', label: 'Devoluciones', icon: RotateCcw, permission: 'devoluciones.ver' },
+        { id: 'returns', label: 'Devoluciones', icon: RotateCcw },
         // FASE 6: ahora sí existe una pantalla real detrás de esta
         // etiqueta (CreditNotesView, filtrada a tipo NOTA_CREDITO) --
         // búsqueda por número/cliente/venta, detalle con historial de
         // aplicaciones, e impresión/reimpresión.
-        { id: 'creditNotes', label: 'Notas de Crédito', icon: FileText, permission: 'creditos_favor.ver' },
-        { id: 'customers', label: 'Clientes', icon: Users, permission: 'clientes.ver' },
+        { id: 'creditNotes', label: 'Notas de Crédito', icon: FileText },
+        { id: 'customers', label: 'Clientes', icon: Users },
       ],
     },
     {
       title: 'Catálogo & Inventario',
       items: [
-        { id: 'products', label: 'Productos', icon: Shirt, permission: 'productos.ver' },
-        { id: 'inventory', label: 'Inventario / Kardex', icon: Boxes, permission: 'inventario.ver' },
-        // FASE 3.7D-FIX: compras.ver es el permiso real y propio de este
-        // módulo (SeedSetup.gs), separado de inventario.ver.
-        { id: 'purchases', label: 'Órdenes de Compra', icon: Truck, permission: 'compras.ver' },
+        { id: 'products', label: 'Productos', icon: Shirt },
+        { id: 'inventory', label: 'Inventario / Kardex', icon: Boxes },
+        { id: 'purchases', label: 'Órdenes de Compra', icon: Truck },
       ],
     },
     {
       title: 'Créditos & Caja',
       items: [
-        { id: 'credits', label: 'Cuentas por Cobrar', icon: CreditCard, permission: 'creditos.ver' },
-        { id: 'installments', label: 'Abonos Recibidos', icon: Coins, permission: 'abonos.ver' },
+        { id: 'credits', label: 'Cuentas por Cobrar', icon: CreditCard },
+        { id: 'installments', label: 'Abonos Recibidos', icon: Coins },
         // FASE 6: misma pantalla que "Notas de Crédito" (CreditNotesView),
         // filtrada a tipo VALE_TIENDA -- saldo reutilizable a favor del
         // cliente, no debe confundirse con "Cuentas por Cobrar" de arriba
         // (naturaleza opuesta: ahí el cliente le debe al negocio).
-        { id: 'storeCredits', label: 'Créditos a Favor / Vales', icon: Gift, permission: 'creditos_favor.ver' },
-        { id: 'cash', label: 'Caja & Cuadres de Turno', icon: Wallet, permission: 'caja.ver' },
+        { id: 'storeCredits', label: 'Créditos a Favor / Vales', icon: Gift },
+        { id: 'cash', label: 'Caja & Cuadres de Turno', icon: Wallet },
       ],
     },
     {
       title: 'Finanzas & Sistema',
       items: [
-        { id: 'expenses', label: 'Gastos Operativos', icon: DollarSign, permission: 'gastos.ver' },
-        { id: 'reports', label: 'Reportes & Margen', icon: BarChart3, permission: 'reportes.ver' },
-        // FASE 3.7G-FIX: admin.configuracion es el permiso real
-        // (SeedSetup.gs/SettingsController.gs); configuracion.ver nunca
-        // existió en el backend.
+        { id: 'expenses', label: 'Gastos Operativos', icon: DollarSign },
+        { id: 'reports', label: 'Reportes & Margen', icon: BarChart3 },
         // FASE (normalización comercial): "Configuración & Sheets" ->
         // "Configuración" -- la integración técnica con Google Sheets
         // sigue existiendo DENTRO de la pantalla de Configuración (pestaña
         // "Google Sheets Sync", uso administrativo explícito), solo deja
         // de aparecer en la navegación principal.
-        { id: 'settings', label: 'Configuración', icon: Settings, permission: 'admin.configuracion' },
+        { id: 'settings', label: 'Configuración', icon: Settings },
       ],
     },
   ];
@@ -163,9 +164,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         {/* Menu Navigation Scrollable */}
         <nav className="flex-1 overflow-y-auto p-3 space-y-5">
           {sections.map((section, sIdx) => {
-            const visibleItems = section.items.filter(
-              (item) => !item.permission || hasPermission(item.permission as any)
-            );
+            const visibleItems = section.items.filter((item) => canView(item.id));
 
             if (visibleItems.length === 0) return null;
 

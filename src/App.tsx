@@ -48,40 +48,41 @@ export type AppView =
   | 'reports'
   | 'settings';
 
-// FASE 3.6E (hallazgo de la prueba de F5): mismos códigos de permiso que
-// Sidebar.tsx usa para decidir qué mostrar en el menú -- se duplican aquí
-// (en vez de importar la config interna de Sidebar) solo para poder
-// validar, antes de restaurar una vista persistida, que el usuario
-// realmente autenticado todavía tiene permiso sobre ella. 'dashboard' no
-// tiene guardia porque todo usuario autenticado puede verla.
-const VIEW_PERMISSIONS: Partial<Record<AppView, string>> = {
-  pos: 'pos.acceso',
-  sales: 'ventas.ver',
-  returns: 'devoluciones.ver',
-  customers: 'clientes.ver',
-  products: 'productos.ver',
-  inventory: 'inventario.ver',
-  // FASE 3.7D-FIX: Compras es un dominio de permisos propio y real
-  // (compras.ver/compras.crear, ver SeedSetup.gs), separado de Inventario
-  // -- antes reutilizaba inventario.ver por error, lo que habría dejado
-  // fuera a cualquier rol futuro con compras.ver pero sin inventario.ver.
-  purchases: 'compras.ver',
-  credits: 'creditos.ver',
-  installments: 'abonos.ver',
-  // FASE 6: mismo permiso real para ambas entradas -- ver `creditNotes`/
-  // `storeCredits` en el tipo AppView de arriba.
-  creditNotes: 'creditos_favor.ver',
-  storeCredits: 'creditos_favor.ver',
-  cash: 'caja.ver',
-  expenses: 'gastos.ver',
-  reports: 'reportes.ver',
-  // FASE 3.7G-FIX: 'configuracion.ver' nunca existió en el backend real
-  // (ver SeedSetup.gs) -- el permiso real que gatea Configuración es
-  // 'admin.configuracion' (usado por SettingsController.gs). Antes de
-  // este fix, la vista era técnicamente inalcanzable para cualquier rol
-  // no-ADMIN (invisible en la práctica solo porque AuthContext.
-  // hasPermission da bypass total a ADMIN).
-  settings: 'admin.configuracion',
+// TAREA -- SISTEMA DE PERMISOS DE VISTAS POR ROL.
+//
+// Reemplaza el mapa anterior (que mezclaba, sin un criterio consistente,
+// permisos funcionales reales reutilizados como si fueran "permiso de
+// vista" -- ventas.ver, clientes.ver, etc. -- con códigos que JAMÁS
+// existieron en ningún rol real del backend: 'pos.acceso', 'dashboard.ver'
+// no tenía siquiera una entrada aquí, 'abonos.ver', 'reportes.ver'. Con
+// permisos de SESIÓN reales, ese mapa dejaba a CAJERO/GERENTE/SUPERVISOR/
+// VENDEDOR sin poder entrar ni a "Panel Principal" ni -- crítico -- a
+// "Caja & Mostrador POS", el módulo operativo principal del negocio,
+// porque ningún rol real tenía 'pos.acceso' en Roles_Permisos).
+//
+// Ahora cada vista real tiene su propio permiso `vista.<id>` dedicado
+// (ver RolesController.gs/SeedSetup.gs -- backend, fuente de verdad),
+// separado por completo de los permisos funcionales (que siguen
+// gatekeeping acciones DENTRO de cada vista, sin ningún cambio: ver
+// ReturnsView/CashView/etc.). `id` es exactamente el valor real de
+// `AppView` -- ninguno inventado.
+const VIEW_PERMISSIONS: Record<AppView, string> = {
+  dashboard: 'vista.dashboard',
+  pos: 'vista.pos',
+  sales: 'vista.sales',
+  returns: 'vista.returns',
+  products: 'vista.products',
+  inventory: 'vista.inventory',
+  purchases: 'vista.purchases',
+  credits: 'vista.credits',
+  installments: 'vista.installments',
+  creditNotes: 'vista.creditNotes',
+  storeCredits: 'vista.storeCredits',
+  cash: 'vista.cash',
+  customers: 'vista.customers',
+  expenses: 'vista.expenses',
+  reports: 'vista.reports',
+  settings: 'vista.settings',
 };
 
 const VALID_VIEWS: AppView[] = [
@@ -102,6 +103,28 @@ const VALID_VIEWS: AppView[] = [
   'reports',
   'settings',
 ];
+
+/** ¿El usuario real autenticado puede ENTRAR a esta vista? */
+function isViewAuthorized(view: AppView, hasPermission: (p: string) => boolean): boolean {
+  return hasPermission(VIEW_PERMISSIONS[view]);
+}
+
+// AUDITORÍA (Fase 10/11) -- helper centralizado de navegación: "si la
+// vista solicitada/restaurada no está autorizada, ¿a cuál se redirige?".
+// Orden de preferencia: Dashboard (destino tradicional tras un login,
+// FASE -- CORREGIR REDIRECCIÓN POST-LOGIN AL DASHBOARD), luego POS
+// (vista operativa principal para roles sin Dashboard -- CAJERO/
+// VENDEDOR, requisito explícito de esta tarea), luego el resto en su
+// orden real de declaración. Devuelve `null` únicamente en el caso
+// degenerado de un rol sin NINGUNA vista autorizada (imposible para
+// ADMIN, que siempre tiene bypass total en AuthContext.hasPermission).
+function pickFirstAuthorizedView(hasPermission: (p: string) => boolean): AppView | null {
+  const order: AppView[] = ['dashboard', 'pos', ...VALID_VIEWS.filter((v) => v !== 'dashboard' && v !== 'pos')];
+  for (const view of order) {
+    if (isViewAuthorized(view, hasPermission)) return view;
+  }
+  return null;
+}
 
 const MainAppContent: React.FC = () => {
   const { isAuthenticated, currentUser, hasPermission } = useAuth();
@@ -128,24 +151,36 @@ const MainAppContent: React.FC = () => {
   // que el carrito del POS) desde la última vista guardada, pero solo si
   // el usuario real autenticado todavía tiene permiso sobre ella; nunca se
   // usa para otorgar acceso, solo para restaurar navegación.
+  //
+  // AUDITORÍA (Fase 10/12): la autorización se valida AQUÍ, dentro del
+  // propio inicializador de estado -- que corre de forma síncrona en el
+  // primer render, ANTES de la primera pintura -- y no en un useEffect
+  // posterior (como antes). Esto evita que una vista no autorizada llegue
+  // a renderizarse siquiera por un instante (y, con ella, que sus datos
+  // sensibles lleguen a pedirse) tras un F5 con sesión ya válida.
+  // `useAuth()` arriba ya deja `hasPermission` disponible en este mismo
+  // render porque AuthProvider hidrata `currentUser` de forma igualmente
+  // síncrona (mismo patrón, ver AuthContext.tsx).
   const [currentView, setCurrentView] = useState<AppView>(() => {
     const persisted = storageService.getCurrentView();
-    if (persisted && (VALID_VIEWS as string[]).includes(persisted)) {
+    if (persisted && (VALID_VIEWS as string[]).includes(persisted) && isViewAuthorized(persisted as AppView, hasPermission)) {
       return persisted as AppView;
     }
-    return 'dashboard';
+    return pickFirstAuthorizedView(hasPermission) || 'dashboard';
   });
   const [navigationFilter, setNavigationFilter] = useState<string | undefined>(undefined);
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
-  // Si la vista restaurada requiere un permiso que el usuario real
-  // autenticado no tiene (ej. sesión distinta en el mismo navegador),
-  // se cae a 'dashboard' en vez de mostrar una vista no autorizada.
+  // Cubre el caso que el inicializador de arriba NO puede cubrir: un
+  // cambio de usuario SIN desmontar MainAppContent (login -> logout ->
+  // login de OTRO usuario en la misma pestaña, Fase 11 -- "se cambia de
+  // usuario"/"otro usuario inicia sesión en el mismo navegador"). Si la
+  // vista actual ya no está autorizada para el usuario (nuevo o
+  // reautenticado) realmente activo, se redirige a la primera autorizada.
   useEffect(() => {
     if (!isAuthenticated) return;
-    const requiredPermission = VIEW_PERMISSIONS[currentView];
-    if (requiredPermission && !hasPermission(requiredPermission as any)) {
-      setCurrentView('dashboard');
+    if (!isViewAuthorized(currentView, hasPermission)) {
+      setCurrentView(pickFirstAuthorizedView(hasPermission) || 'dashboard');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAuthenticated, currentUser?.id]);
@@ -171,14 +206,20 @@ const MainAppContent: React.FC = () => {
   // cuántas veces se repita el ciclo logout/login dentro de la misma
   // pestaña), se fuerza el Dashboard como destino -- la última vista
   // jamás tiene prioridad sobre un login exitoso.
+  // AUDITORÍA (Fase 11): el destino preferido tras un login sigue siendo
+  // Dashboard (nunca la última vista, ver comentario de arriba) -- pero
+  // ahora solo si el usuario recién autenticado de verdad tiene
+  // vista.dashboard. Un CAJERO/VENDEDOR sin Dashboard cae a POS (su vista
+  // operativa principal, Fase 10), nunca a una vista prohibida.
   const wasAuthenticatedRef = useRef(isAuthenticated);
   useEffect(() => {
     const wasAuthenticated = wasAuthenticatedRef.current;
     wasAuthenticatedRef.current = isAuthenticated;
     if (!wasAuthenticated && isAuthenticated) {
-      setCurrentView('dashboard');
+      setCurrentView(pickFirstAuthorizedView(hasPermission) || 'dashboard');
       setNavigationFilter(undefined);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAuthenticated]);
 
   // Persiste la vista activa en cada cambio, para que un F5 posterior la
@@ -222,6 +263,22 @@ const MainAppContent: React.FC = () => {
     };
 
     const target = viewMap[view.toLowerCase()] || (view as AppView);
+
+    // AUDITORÍA (Fase 10 -- protección centralizada de navegación):
+    // "ocultar el botón no es suficiente". Este es el ÚNICO punto por el
+    // que pasa toda navegación real (Sidebar, Navbar, atajo F2, accesos
+    // directos de DashboardView/CreditsView/NotificationBell) -- si el
+    // usuario autenticado no tiene vista.<target>, se ignora el destino
+    // solicitado (así haya llegado por un clic real o por código que
+    // manipule `currentView` indirectamente) y se redirige a la primera
+    // vista que sí tiene autorizada, sin llegar nunca a renderizar la
+    // prohibida.
+    if (isAuthenticated && !isViewAuthorized(target, hasPermission)) {
+      setNavigationFilter(undefined);
+      setCurrentView(pickFirstAuthorizedView(hasPermission) || 'dashboard');
+      return;
+    }
+
     setNavigationFilter(filter);
     setCurrentView(target);
   };
@@ -247,7 +304,33 @@ const MainAppContent: React.FC = () => {
   }
 
   const renderCurrentView = () => {
-    switch (currentView) {
+    // AUDITORÍA (Fase 10, capa de defensa final): `currentView` solo
+    // debería poder llegar aquí ya autorizado -- el inicializador de
+    // estado y los tres puntos de cambio de arriba (efecto de cambio de
+    // usuario, efecto de post-login, handleNavigate) ya lo garantizan --
+    // pero se revalida explícitamente antes de renderizar CUALQUIER
+    // componente, en vez de asumir que esa invariante nunca podría
+    // romperse en el futuro. Si por algo llegara a fallar, se renderiza la
+    // primera vista autorizada en su lugar (nunca la solicitada), sin
+    // pedir sus datos ni montar el componente prohibido ni una sola vez.
+    const effectiveView = isViewAuthorized(currentView, hasPermission)
+      ? currentView
+      : pickFirstAuthorizedView(hasPermission);
+
+    if (!effectiveView) {
+      return (
+        <div className="flex-1 flex items-center justify-center p-10 text-center">
+          <div className="max-w-sm space-y-2">
+            <p className="font-serif font-bold text-lg text-[#2F2A25]">Sin acceso a ningún módulo</p>
+            <p className="text-sm text-[#756E65]">
+              Su usuario no tiene ninguna vista habilitada todavía. Contacte a un administrador para que le asigne acceso desde Configuración → Roles y Permisos.
+            </p>
+          </div>
+        </div>
+      );
+    }
+
+    switch (effectiveView) {
       case 'dashboard':
         return <DashboardView onNavigate={handleNavigate} />;
       case 'pos':

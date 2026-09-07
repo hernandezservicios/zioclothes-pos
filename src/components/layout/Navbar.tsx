@@ -29,7 +29,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   // storageService.getActiveCashSession(), que desde que CashView migró a
   // cashApi nunca vuelve a escribirse localmente y siempre mostraría
   // "cerrada" aunque hubiera una caja real abierta.
-  const { currentUser, logout, settings, hasPermission, activeCashSession } = useAuth();
+  const { currentUser, logout, settings, canView, activeCashSession } = useAuth();
   const activeCash = activeCashSession;
 
   return (
@@ -100,8 +100,12 @@ export const Navbar: React.FC<NavbarProps> = ({
           </span>
         </button>
 
-        {/* Quick Launch POS Button */}
-        {hasPermission('pos.acceso') && (
+        {/* Quick Launch POS Button.
+            TAREA -- SISTEMA DE PERMISOS DE VISTAS POR ROL: antes usaba
+            'pos.acceso', un código que nunca existió en ningún rol real
+            del backend -- este botón quedaba invisible para TODOS los
+            roles reales (incluido CAJERO) en una sesión real. */}
+        {canView('pos') && (
           <button
             type="button"
             onClick={() => onNavigate('pos')}

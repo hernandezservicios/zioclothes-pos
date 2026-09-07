@@ -144,8 +144,76 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
 
 export const ALL_PERMISSIONS: PermissionCode[] = PERMISSION_GROUPS.flatMap((g) => g.permisos.map((p) => p.codigo));
 
+/**
+ * TAREA -- SISTEMA DE PERMISOS DE VISTAS POR ROL.
+ *
+ * Catálogo de las 16 vistas reales del sistema (idénticas a `AppView` /
+ * `VALID_VIEWS` en App.tsx -- ninguna inventada) para la pantalla
+ * "Roles y Permisos -> Acceso a Vistas". `id` es el mismo valor que ya
+ * usa `AppView`/`Sidebar` (también usado por `canView(id)` en
+ * AuthContext, que arma el código real como `vista.<id>`).
+ */
+export interface ViewAccessDef {
+  id: string;
+  label: string;
+}
+
+export const VIEW_ACCESS_CATALOG: ViewAccessDef[] = [
+  { id: 'dashboard', label: 'Panel Principal' },
+  { id: 'pos', label: 'Caja & Mostrador POS' },
+  { id: 'sales', label: 'Historial de Ventas' },
+  { id: 'returns', label: 'Devoluciones' },
+  { id: 'products', label: 'Productos' },
+  { id: 'inventory', label: 'Inventario / Kardex' },
+  { id: 'purchases', label: 'Órdenes de Compra' },
+  { id: 'credits', label: 'Cuentas por Cobrar' },
+  { id: 'installments', label: 'Abonos Recibidos' },
+  { id: 'creditNotes', label: 'Notas de Crédito' },
+  { id: 'storeCredits', label: 'Créditos a Favor / Vales' },
+  { id: 'cash', label: 'Caja & Cuadres de Turno' },
+  { id: 'customers', label: 'Clientes' },
+  { id: 'expenses', label: 'Gastos Operativos' },
+  { id: 'reports', label: 'Reportes & Margen' },
+  { id: 'settings', label: 'Configuración' },
+];
+
+export const ALL_VIEW_PERMISSIONS: PermissionCode[] = VIEW_ACCESS_CATALOG.map(
+  (v) => `vista.${v.id}` as PermissionCode
+);
+
+/**
+ * Roles editables desde "Acceso a Vistas" -- ADMIN queda deliberadamente
+ * fuera (Fase 17): `hasPermission` ya le da acceso total sin mirar
+ * `permisos_json`, así que mostrarlo como editable no tendría ningún
+ * efecto real y solo podría hacer creer a quien lo edite que restringió
+ * al administrador.
+ */
+export const EDITABLE_ROLES: UserRole[] = ['GERENTE', 'SUPERVISOR', 'CAJERO', 'VENDEDOR'];
+
+/**
+ * Defaults de vista.* por rol -- exactamente los mismos que
+ * `VIEW_PERMISSIONS_BY_ROLE` en SeedSetup.gs/migrateViewPermissions
+ * (backend, fuente de verdad real). Se duplican aquí únicamente como
+ * fallback local (mismo criterio que el resto de este archivo, usado por
+ * AuthContext.hasPermission solo antes de que exista una sesión real).
+ */
+const DEFAULT_VIEW_PERMISSIONS: Record<UserRole, PermissionCode[]> = {
+  ADMIN: [...ALL_VIEW_PERMISSIONS],
+  GERENTE: [...ALL_VIEW_PERMISSIONS],
+  SUPERVISOR: [
+    'vista.pos', 'vista.sales', 'vista.returns', 'vista.products', 'vista.inventory', 'vista.purchases',
+    'vista.credits', 'vista.installments', 'vista.creditNotes', 'vista.storeCredits', 'vista.cash',
+    'vista.customers', 'vista.expenses', 'vista.reports',
+  ],
+  CAJERO: [
+    'vista.pos', 'vista.sales', 'vista.returns', 'vista.products', 'vista.credits', 'vista.installments',
+    'vista.creditNotes', 'vista.storeCredits', 'vista.cash', 'vista.customers',
+  ],
+  VENDEDOR: ['vista.pos', 'vista.sales', 'vista.products', 'vista.creditNotes', 'vista.storeCredits', 'vista.customers'],
+};
+
 export const DEFAULT_ROLE_PERMISSIONS: Record<UserRole, PermissionCode[]> = {
-  ADMIN: [...ALL_PERMISSIONS],
+  ADMIN: [...ALL_PERMISSIONS, ...DEFAULT_VIEW_PERMISSIONS.ADMIN],
   CAJERO: [
     'ventas.ver',
     'ventas.crear',
@@ -176,6 +244,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<UserRole, PermissionCode[]> = {
     'devoluciones.ver',
     'devoluciones.crear',
     'reportes.dashboard',
+    ...DEFAULT_VIEW_PERMISSIONS.CAJERO,
   ],
   SUPERVISOR: [
     'ventas.ver',
@@ -221,6 +290,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<UserRole, PermissionCode[]> = {
     'reportes.inventario',
     'reportes.creditos',
     'reportes.caja',
+    ...DEFAULT_VIEW_PERMISSIONS.SUPERVISOR,
   ],
   VENDEDOR: [
     'ventas.ver',
@@ -235,8 +305,10 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<UserRole, PermissionCode[]> = {
     // ver/aplicar créditos a favor en el POS, no emitirlos ni anularlos.
     'creditos_favor.ver',
     'creditos_favor.aplicar',
+    ...DEFAULT_VIEW_PERMISSIONS.VENDEDOR,
   ],
   GERENTE: [
     ...ALL_PERMISSIONS.filter((p) => p !== 'admin.configuracion' && p !== 'admin.roles'),
+    ...DEFAULT_VIEW_PERMISSIONS.GERENTE,
   ],
 };

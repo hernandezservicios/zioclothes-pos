@@ -1,6 +1,6 @@
 import React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, cleanup, within } from '@testing-library/react';
 import { SettingsView } from './SettingsView';
 import { storageService } from '../../services/storageService';
 import { apiService } from '../../services/apiService';
@@ -67,6 +67,29 @@ vi.mock('../../services/authApi', () => ({
   authApi: {
     listUsers: vi.fn().mockResolvedValue({ success: true, data: [] }),
     saveUser: vi.fn(),
+  },
+}));
+
+// TAREA -- SISTEMA DE PERMISOS DE VISTAS POR ROL -- "Roles y Permisos".
+// Por defecto, 4 roles editables con solo `vista.pos` marcado (fixture
+// mínima real, nunca vacía) -- cada test que necesite otra combinación
+// sobreescribe el mock puntualmente.
+const rolesListMock = vi.fn().mockResolvedValue({
+  success: true,
+  data: [
+    { rol: 'GERENTE', nombre: 'Gerente de Tienda', descripcion: '', permisos: ['ventas.ver', 'vista.pos'] },
+    { rol: 'SUPERVISOR', nombre: 'Supervisor de Turno', descripcion: '', permisos: ['ventas.ver', 'vista.pos'] },
+    { rol: 'CAJERO', nombre: 'Cajero / POS', descripcion: '', permisos: ['ventas.ver', 'vista.pos'] },
+    { rol: 'VENDEDOR', nombre: 'Asesor de Ventas', descripcion: '', permisos: ['ventas.ver', 'vista.pos'] },
+  ],
+});
+const rolesUpdateViewPermissionsMock = vi.fn().mockResolvedValue({ success: true, message: 'OK', data: { permisos: [] } });
+const rolesApplyViewDefaultsMock = vi.fn().mockResolvedValue({ success: true, data: { rolesUpdated: [], rolesUnchanged: [] } });
+vi.mock('../../services/rolesApi', () => ({
+  rolesApi: {
+    list: (...args: unknown[]) => rolesListMock(...args),
+    updateViewPermissions: (...args: unknown[]) => rolesUpdateViewPermissionsMock(...args),
+    applyViewPermissionDefaults: (...args: unknown[]) => rolesApplyViewDefaultsMock(...args),
   },
 }));
 
@@ -605,5 +628,98 @@ describe('SettingsView -- Conexión del Sistema', () => {
     hasPermissionMock = (perm) => perm !== 'admin.configuracion';
     renderOnSheetsTab();
     expect(screen.queryByRole('button', { name: /Cambiar Servidor/i })).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * TAREA -- SISTEMA DE PERMISOS DE VISTAS POR ROL -- pestaña "Roles y
+ * Permisos" / "Acceso a Vistas". Ejercita SettingsView.tsx TAL COMO ES
+ * contra rolesApi mockeado (mismo criterio que authApi/restoreApi
+ * arriba) -- nunca contra Roles_Permisos real.
+ */
+describe('SettingsView -- Roles y Permisos (Acceso a Vistas)', () => {
+  function renderOnRolesTab() {
+    render(<SettingsView />);
+    fireEvent.click(screen.getByRole('button', { name: 'Roles y Permisos' }));
+  }
+
+  beforeEach(() => {
+    hasPermissionMock = () => true;
+    rolesListMock.mockClear();
+    rolesUpdateViewPermissionsMock.mockClear();
+    rolesApplyViewDefaultsMock.mockClear();
+    showToastMock.mockClear();
+  });
+  afterEach(() => cleanup());
+
+  it('sin permiso admin.roles: la pestaña "Roles y Permisos" no aparece', () => {
+    hasPermissionMock = (perm) => perm !== 'admin.roles';
+    render(<SettingsView />);
+    expect(screen.queryByRole('button', { name: 'Roles y Permisos' })).not.toBeInTheDocument();
+  });
+
+  it('lista los 4 roles editables reales, con ADMIN mostrado como no editable', async () => {
+    renderOnRolesTab();
+    await waitFor(() => expect(rolesListMock).toHaveBeenCalledTimes(1));
+
+    ['GERENTE', 'SUPERVISOR', 'CAJERO', 'VENDEDOR'].forEach((rol) => expect(screen.getByText(rol)).toBeInTheDocument());
+    // ADMIN nunca aparece como TARJETA editable (con su propio botón de
+    // guardar) -- solo se menciona en el aviso informativo de solo lectura.
+    // Exactamente 4 tarjetas editables (GERENTE/SUPERVISOR/CAJERO/VENDEDOR).
+    expect(screen.getAllByRole('button', { name: /Sin Cambios|Guardar Cambios/i })).toHaveLength(4);
+    // "ADMIN" vive en un <strong> separado del resto del texto del aviso
+    // -- se busca solo la parte de texto plano que sí es un único nodo.
+    expect(screen.getByText(/siempre tiene acceso completo/i)).toBeInTheDocument();
+  });
+
+  it('marcar/desmarcar un checkbox de vista habilita "Guardar Cambios"; guardarlo llama roles.updatePermissions con el arreglo completo deseado', async () => {
+    renderOnRolesTab();
+    await waitFor(() => expect(screen.getByText('CAJERO')).toBeInTheDocument());
+
+    // Fixture: CAJERO empieza con solo 'vista.pos' marcado.
+    const cajeroSection = screen.getByText('CAJERO').closest('div')!.parentElement!.parentElement!;
+    const saveButtons = screen.getAllByRole('button', { name: /Sin Cambios|Guardar Cambios/i });
+    expect(saveButtons.length).toBeGreaterThan(0);
+
+    const customersCheckbox = within(cajeroSection).getByLabelText('Clientes') as HTMLInputElement;
+    expect(customersCheckbox.checked).toBe(false);
+    fireEvent.click(customersCheckbox);
+
+    const saveButton = within(cajeroSection).getByRole('button', { name: 'Guardar Cambios' });
+    fireEvent.click(saveButton);
+
+    await waitFor(() => expect(rolesUpdateViewPermissionsMock).toHaveBeenCalledTimes(1));
+    const [rolArg, vistasArg] = rolesUpdateViewPermissionsMock.mock.calls[0];
+    assertArrayContainsSorted(rolArg, vistasArg);
+  });
+
+  function assertArrayContainsSorted(rolArg: string, vistasArg: string[]) {
+    expect(rolArg).toBe('CAJERO');
+    expect(vistasArg.sort()).toEqual(['vista.customers', 'vista.pos'].sort());
+  }
+
+  it('"Aplicar Valores Predeterminados" llama a la migración real y recarga la lista', async () => {
+    renderOnRolesTab();
+    await waitFor(() => expect(rolesListMock).toHaveBeenCalledTimes(1));
+
+    rolesApplyViewDefaultsMock.mockResolvedValueOnce({
+      success: true,
+      data: { rolesUpdated: [{ rol: 'CAJERO', permisosAgregados: ['vista.cash'] }], rolesUnchanged: ['VENDEDOR'] },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /Aplicar Valores Predeterminados/i }));
+
+    await waitFor(() => expect(rolesApplyViewDefaultsMock).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(rolesListMock).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(showToastMock).toHaveBeenCalledWith('Valores Predeterminados Aplicados', expect.stringContaining('1 rol'), 'exito'));
+  });
+
+  it('si el backend rechaza roles.list, muestra el error real y permite reintentar', async () => {
+    rolesListMock.mockResolvedValueOnce({ success: false, message: 'FORBIDDEN: No tiene el permiso requerido admin.roles.' });
+    renderOnRolesTab();
+
+    await waitFor(() => expect(screen.getByText(/FORBIDDEN/)).toBeInTheDocument());
+    rolesListMock.mockResolvedValueOnce({ success: true, data: [] });
+    fireEvent.click(screen.getByRole('button', { name: 'Reintentar' }));
+    await waitFor(() => expect(rolesListMock).toHaveBeenCalledTimes(2));
   });
 });

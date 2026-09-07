@@ -70,6 +70,21 @@ vi.mock('./context/AuthContext', () => {
   // se muestra el login" (app recién cargada / sesión cerrada).
   let initialAuthenticated = false;
   let initialUser: any = null;
+  // TAREA -- SISTEMA DE PERMISOS DE VISTAS POR ROL: `null` = "todo
+  // permitido" (comportamiento EXACTO de antes de esta tarea -- ninguna
+  // de las pruebas de login/redirección ya existentes debía verse
+  // afectada). Un Set concreto activa un CAJERO/rol restringido real
+  // para las pruebas nuevas de esta fase, vía __setGrantedViews o al
+  // autenticar con las credenciales de prueba 'cajero'/'vendedor' de abajo.
+  let grantedViews: Set<string> | null = null;
+
+  // Matrices reales (idénticas a VIEW_PERMISSIONS_BY_ROLE en
+  // SeedSetup.gs/DEFAULT_VIEW_PERMISSIONS en permissionsCatalog.ts) --
+  // usadas solo por las credenciales de prueba 'cajero'/'vendedor' de
+  // abajo, para reproducir un login real de esos roles sin mockear el
+  // sistema de permisos en sí.
+  const CAJERO_VIEWS = ['pos', 'sales', 'returns', 'products', 'credits', 'installments', 'creditNotes', 'storeCredits', 'cash', 'customers'];
+  const VENDEDOR_VIEWS = ['pos', 'sales', 'products', 'creditNotes', 'storeCredits', 'customers'];
 
   const MockAuthContext = createContext<any>(null);
 
@@ -78,9 +93,22 @@ vi.mock('./context/AuthContext', () => {
     const [currentUser, setCurrentUser] = useState<any>(initialUser);
 
     const login = async (username: string, password: string): Promise<boolean> => {
-      // Credencial fija de prueba -- nunca toca un backend real.
+      // Credenciales fijas de prueba -- nunca tocan un backend real.
       if (username === 'admin' && password === 'admin123') {
+        grantedViews = null;
         setCurrentUser({ id: 'USR-T01', nombre: 'Test', apellido: 'User', rol: 'ADMIN' });
+        setIsAuthenticated(true);
+        return true;
+      }
+      if (username === 'cajero' && password === 'cajero123') {
+        grantedViews = new Set(CAJERO_VIEWS);
+        setCurrentUser({ id: 'USR-T02', nombre: 'Cajero', apellido: 'Test', rol: 'CAJERO' });
+        setIsAuthenticated(true);
+        return true;
+      }
+      if (username === 'vendedor' && password === 'vendedor123') {
+        grantedViews = new Set(VENDEDOR_VIEWS);
+        setCurrentUser({ id: 'USR-T03', nombre: 'Vendedor', apellido: 'Test', rol: 'VENDEDOR' });
         setIsAuthenticated(true);
         return true;
       }
@@ -92,12 +120,23 @@ vi.mock('./context/AuthContext', () => {
       setCurrentUser(null);
     };
 
+    const hasPermission = (perm: string) => {
+      if (grantedViews === null) return true;
+      if (perm.indexOf('vista.') === 0) return grantedViews.has(perm.slice('vista.'.length));
+      return true; // permisos funcionales -- no es el objeto de estas pruebas de vistas.
+    };
+
     const value = {
       isAuthenticated,
       currentUser,
       login,
       logout,
-      hasPermission: () => true,
+      hasPermission,
+      // TAREA -- SISTEMA DE PERMISOS DE VISTAS POR ROL: mismo criterio que
+      // hasPermission -- reutiliza la MISMA variable de cierre, nunca un
+      // catálogo aparte (igual que el AuthContext.canView real, que
+      // también delega en hasPermission).
+      canView: (viewId: string) => hasPermission(`vista.${viewId}`),
       settings: { logoUrl: '', nombreNegocio: 'ZIO CLOTHES', simboloMoneda: 'RD$' },
       activeCashSession: null,
     };
@@ -111,6 +150,9 @@ vi.mock('./context/AuthContext', () => {
     __setInitialAuth: (authenticated: boolean, user: any) => {
       initialAuthenticated = authenticated;
       initialUser = user;
+    },
+    __setGrantedViews: (views: string[] | null) => {
+      grantedViews = views ? new Set(views) : null;
     },
   };
 });
@@ -142,6 +184,7 @@ vi.mock('./components/settings/SettingsView', () => ({ SettingsView: () => <div>
 
 const authContextMock = await import('./context/AuthContext');
 const setInitialAuth = (authContextMock as any).__setInitialAuth as (authenticated: boolean, user: any) => void;
+const setGrantedViews = (authContextMock as any).__setGrantedViews as (views: string[] | null) => void;
 const mockedStorageService = storageService as unknown as {
   getCurrentView: ReturnType<typeof vi.fn>;
   saveCurrentView: ReturnType<typeof vi.fn>;
@@ -172,6 +215,7 @@ beforeEach(() => {
   // "sin URL" la sobrescriben explícitamente a ''.
   mockedStorageService.getGoogleAppsScriptUrl.mockReturnValue(CONFIGURED_URL);
   setInitialAuth(false, null);
+  setGrantedViews(null);
 });
 afterEach(() => {
   cleanup();
@@ -331,5 +375,143 @@ describe('App -- configuración inicial del backend antes del Login', () => {
     expect(mockedStorageService.setGoogleAppsScriptUrl).toHaveBeenCalledWith(CONFIGURED_URL);
     expect(screen.getByText('Iniciar Sesión')).toBeInTheDocument();
     expect(screen.queryByText('Configuración Inicial')).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * TAREA -- SISTEMA DE PERMISOS DE VISTAS POR ROL (Fase 18).
+ *
+ * Ejercita App.tsx/Sidebar.tsx/Navbar.tsx REALES contra `hasPermission`/
+ * `canView` controlados vía `__setGrantedViews` (mismas matrices reales
+ * de VIEW_PERMISSIONS_BY_ROLE en SeedSetup.gs) -- nunca compara contra
+ * `currentUser.rol` en ningún punto del código bajo prueba.
+ */
+describe('TAREA -- permisos de vista por rol: Sidebar (Fase 18)', () => {
+  const ALL_VIEW_LABELS = [
+    'Panel Principal', 'Caja & Mostrador POS', 'Historial de Ventas', 'Devoluciones', 'Notas de Crédito',
+    'Clientes', 'Productos', 'Inventario / Kardex', 'Órdenes de Compra', 'Cuentas por Cobrar',
+    'Abonos Recibidos', 'Créditos a Favor / Vales', 'Caja & Cuadres de Turno', 'Gastos Operativos',
+    'Reportes & Margen', 'Configuración',
+  ];
+
+  it('ADMIN -> todas las vistas permitidas (bypass total real de AuthContext.hasPermission)', () => {
+    setGrantedViews(null);
+    setInitialAuth(true, TEST_USER);
+    render(<App />);
+    ALL_VIEW_LABELS.forEach((label) => expect(screen.getByRole('button', { name: label })).toBeInTheDocument());
+  });
+
+  it('GERENTE -> coincide con su matriz real (todas las vistas, igual que ADMIN)', () => {
+    setGrantedViews(['dashboard', 'pos', 'sales', 'returns', 'products', 'inventory', 'purchases', 'credits', 'installments', 'creditNotes', 'storeCredits', 'cash', 'customers', 'expenses', 'reports', 'settings']);
+    setInitialAuth(true, { id: 'USR-T04', nombre: 'Gerente', apellido: 'Test', rol: 'GERENTE' });
+    render(<App />);
+    ALL_VIEW_LABELS.forEach((label) => expect(screen.getByRole('button', { name: label })).toBeInTheDocument());
+  });
+
+  it('SUPERVISOR -> coincide con su matriz real (sin Dashboard ni Configuración; con Inventario/Compras/Gastos/Reportes)', () => {
+    setGrantedViews(['pos', 'sales', 'returns', 'products', 'inventory', 'purchases', 'credits', 'installments', 'creditNotes', 'storeCredits', 'cash', 'customers', 'expenses', 'reports']);
+    setInitialAuth(true, { id: 'USR-T05', nombre: 'Supervisor', apellido: 'Test', rol: 'SUPERVISOR' });
+    render(<App />);
+    expect(screen.queryByRole('button', { name: 'Panel Principal' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Configuración' })).not.toBeInTheDocument();
+    ['Caja & Mostrador POS', 'Inventario / Kardex', 'Órdenes de Compra', 'Gastos Operativos', 'Reportes & Margen'].forEach((label) =>
+      expect(screen.getByRole('button', { name: label })).toBeInTheDocument()
+    );
+  });
+
+  it('CAJERO -> POS permitido; Dashboard/Reportes/Configuración bloqueados (Usuarios y Roles y Permisos viven dentro de Configuración, también bloqueados)', () => {
+    setGrantedViews(['pos', 'sales', 'returns', 'products', 'credits', 'installments', 'creditNotes', 'storeCredits', 'cash', 'customers']);
+    setInitialAuth(true, { id: 'USR-T02', nombre: 'Cajero', apellido: 'Test', rol: 'CAJERO' });
+    render(<App />);
+
+    // Mínimo operativo explícito de la Fase 8.
+    ['Caja & Mostrador POS', 'Clientes', 'Devoluciones', 'Caja & Cuadres de Turno'].forEach((label) =>
+      expect(screen.getByRole('button', { name: label })).toBeInTheDocument()
+    );
+    // Bloqueado por defecto (Fase 8, explícito).
+    expect(screen.queryByRole('button', { name: 'Panel Principal' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Reportes & Margen' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Configuración' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Inventario / Kardex' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Órdenes de Compra' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Gastos Operativos' })).not.toBeInTheDocument();
+  });
+
+  it('VENDEDOR -> POS permitido; vistas administrativas y operativas avanzadas bloqueadas', () => {
+    setGrantedViews(['pos', 'sales', 'products', 'creditNotes', 'storeCredits', 'customers']);
+    setInitialAuth(true, { id: 'USR-T03', nombre: 'Vendedor', apellido: 'Test', rol: 'VENDEDOR' });
+    render(<App />);
+
+    expect(screen.getByRole('button', { name: 'Caja & Mostrador POS' })).toBeInTheDocument();
+    ['Panel Principal', 'Configuración', 'Cuentas por Cobrar', 'Caja & Cuadres de Turno', 'Inventario / Kardex', 'Reportes & Margen'].forEach((label) =>
+      expect(screen.queryByRole('button', { name: label })).not.toBeInTheDocument()
+    );
+  });
+});
+
+describe('TAREA -- protección centralizada de navegación (Fase 10/18)', () => {
+  it('currentView=dashboard persistido + usuario CAJERO (sin vista.dashboard) -> nunca renderiza Dashboard, redirige a una vista autorizada', () => {
+    mockedStorageService.getCurrentView.mockReturnValue('dashboard');
+    setGrantedViews(['pos', 'sales', 'returns', 'products', 'credits', 'installments', 'creditNotes', 'storeCredits', 'cash', 'customers']);
+    setInitialAuth(true, { id: 'USR-T02', nombre: 'Cajero', apellido: 'Test', rol: 'CAJERO' });
+    render(<App />);
+
+    expect(screen.queryByText('MOCK_DASHBOARD_VIEW')).not.toBeInTheDocument();
+    // POS es la primera vista autorizada según el orden de preferencia (Fase 10).
+    expect(screen.getByText('MOCK_POS_VIEW')).toBeInTheDocument();
+  });
+
+  it('currentView=reports persistido + usuario CAJERO -> nunca renderiza Reportes, resultado = bloqueo/redirección', () => {
+    mockedStorageService.getCurrentView.mockReturnValue('reports');
+    setGrantedViews(['pos', 'sales', 'returns', 'products', 'credits', 'installments', 'creditNotes', 'storeCredits', 'cash', 'customers']);
+    setInitialAuth(true, { id: 'USR-T02', nombre: 'Cajero', apellido: 'Test', rol: 'CAJERO' });
+    render(<App />);
+
+    expect(screen.queryByText('MOCK_REPORTS_VIEW')).not.toBeInTheDocument();
+    expect(screen.getByText('MOCK_POS_VIEW')).toBeInTheDocument();
+  });
+
+  it('un disparador de navegación que NO está gateado individualmente (logo de Navbar -> dashboard) igual queda bloqueado por el despachador central de handleNavigate', () => {
+    // El logo/marca de Navbar dispara onNavigate('dashboard') sin ningún
+    // hasPermission/canView propio (a diferencia del botón "Punto de
+    // Venta", que sí tiene su propio canView('pos')) -- justo el caso que
+    // Fase 10 pide cubrir: "ocultar el botón no es suficiente".
+    setGrantedViews(['pos', 'sales', 'returns', 'products', 'credits', 'installments', 'creditNotes', 'storeCredits', 'cash', 'customers']);
+    setInitialAuth(true, { id: 'USR-T02', nombre: 'Cajero', apellido: 'Test', rol: 'CAJERO' });
+    render(<App />);
+
+    // "ZIO CLOTHES" aparece dos veces (marca de Navbar Y de Sidebar) --
+    // la primera en el árbol es la de Navbar (el logo clicable real).
+    fireEvent.click(screen.getAllByText('ZIO CLOTHES')[0]);
+    expect(screen.queryByText('MOCK_DASHBOARD_VIEW')).not.toBeInTheDocument();
+    expect(screen.getByText('MOCK_POS_VIEW')).toBeInTheDocument();
+  });
+
+  it('una navegación real a una vista SÍ autorizada sigue funcionando con normalidad (el guard no rompe la navegación legítima)', () => {
+    setGrantedViews(['pos', 'sales', 'returns', 'products', 'credits', 'installments', 'creditNotes', 'storeCredits', 'cash', 'customers']);
+    setInitialAuth(true, { id: 'USR-T02', nombre: 'Cajero', apellido: 'Test', rol: 'CAJERO' });
+    render(<App />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clientes' }));
+    expect(screen.getByText('MOCK_CUSTOMERS_VIEW')).toBeInTheDocument();
+  });
+});
+
+describe('TAREA -- persistencia entre usuarios distintos en el mismo navegador (Fase 11/18)', () => {
+  it('usuario A (ADMIN, en Configuración) hace logout; usuario B (CAJERO) inicia sesión -> currentView anterior no autorizado, resultado = primera vista autorizada', async () => {
+    setInitialAuth(true, TEST_USER);
+    setGrantedViews(null);
+    render(<App />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Configuración' }));
+    expect(screen.getByText('MOCK_SETTINGS_VIEW')).toBeInTheDocument();
+
+    logout();
+    expect(screen.getByText('Iniciar Sesión')).toBeInTheDocument();
+
+    await loginAs('cajero', 'cajero123');
+
+    expect(screen.queryByText('MOCK_SETTINGS_VIEW')).not.toBeInTheDocument();
+    expect(screen.getByText('MOCK_POS_VIEW')).toBeInTheDocument();
   });
 });

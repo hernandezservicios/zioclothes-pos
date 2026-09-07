@@ -128,9 +128,15 @@ function seedInitialData() {
       'admin.usuarios', 'admin.roles', 'admin.configuracion', 'auditoria.ver'
     ];
 
+    // TAREA -- SISTEMA DE PERMISOS DE VISTAS POR ROL: una instalación
+    // NUEVA recibe los permisos `vista.*` ya incluidos desde el primer
+    // sembrado (VIEW_PERMISSIONS_BY_ROLE, definido más abajo en este mismo
+    // archivo -- ver `migrateViewPermissions` para la migración equivalente
+    // en instalaciones YA EXISTENTES). Se concatenan al final de cada
+    // arreglo funcional real, nunca reemplazan nada.
     const roleDefinitions = [
-      { rol: 'ADMIN', nombre: 'Administrador General', descripcion: 'Acceso total y configuración del sistema', permisos_json: JSON.stringify(allPermissions) },
-      { rol: 'GERENTE', nombre: 'Gerente de Tienda', descripcion: 'Supervisión operativa, reportes y anulación controlada', permisos_json: JSON.stringify(allPermissions.filter(p => !p.startsWith('admin.'))) },
+      { rol: 'ADMIN', nombre: 'Administrador General', descripcion: 'Acceso total y configuración del sistema', permisos_json: JSON.stringify(allPermissions.concat(VIEW_PERMISSIONS_BY_ROLE.ADMIN)) },
+      { rol: 'GERENTE', nombre: 'Gerente de Tienda', descripcion: 'Supervisión operativa, reportes y anulación controlada', permisos_json: JSON.stringify(allPermissions.filter(p => !p.startsWith('admin.')).concat(VIEW_PERMISSIONS_BY_ROLE.GERENTE)) },
       // FASE 6: SUPERVISOR obtiene creditos_favor.ver/crear/aplicar (ya
       // procesa devoluciones.crear, de donde se emiten) pero NO
       // creditos_favor.anular -- mismo criterio restrictivo ya usado para
@@ -139,9 +145,9 @@ function seedInitialData() {
       // creditos_favor.ver/aplicar (pueden aplicar un crédito ya emitido
       // durante una venta), no .crear (no procesan devoluciones hoy) ni
       // .anular.
-      { rol: 'SUPERVISOR', nombre: 'Supervisor de Turno', descripcion: 'Gestión de caja, arqueos, descuentos e inventario', permisos_json: JSON.stringify(['ventas.crear', 'ventas.ver', 'ventas.anular', 'ventas.descuento', 'caja.abrir', 'caja.cerrar', 'caja.movimientos', 'caja.ver', 'productos.ver', 'inventario.ver', 'inventario.ajustar', 'clientes.ver', 'clientes.crear', 'creditos.ver', 'abonos.crear', 'creditos_favor.ver', 'creditos_favor.crear', 'creditos_favor.aplicar', 'gastos.ver', 'gastos.crear', 'devoluciones.ver', 'devoluciones.crear', 'reportes.ventas', 'reportes.caja']) },
-      { rol: 'CAJERO', nombre: 'Cajero / POS', descripcion: 'Cobro de ventas, recepción de abonos y cuadre de turno', permisos_json: JSON.stringify(['ventas.crear', 'ventas.ver', 'caja.abrir', 'caja.cerrar', 'caja.movimientos', 'caja.ver', 'productos.ver', 'clientes.ver', 'clientes.crear', 'creditos.ver', 'abonos.crear', 'creditos_favor.ver', 'creditos_favor.aplicar']) },
-      { rol: 'VENDEDOR', nombre: 'Asesor de Ventas', descripcion: 'Consulta de catálogo y registro de ventas', permisos_json: JSON.stringify(['ventas.crear', 'ventas.ver', 'productos.ver', 'clientes.ver', 'clientes.crear', 'creditos_favor.ver', 'creditos_favor.aplicar']) }
+      { rol: 'SUPERVISOR', nombre: 'Supervisor de Turno', descripcion: 'Gestión de caja, arqueos, descuentos e inventario', permisos_json: JSON.stringify(['ventas.crear', 'ventas.ver', 'ventas.anular', 'ventas.descuento', 'caja.abrir', 'caja.cerrar', 'caja.movimientos', 'caja.ver', 'productos.ver', 'inventario.ver', 'inventario.ajustar', 'clientes.ver', 'clientes.crear', 'creditos.ver', 'abonos.crear', 'creditos_favor.ver', 'creditos_favor.crear', 'creditos_favor.aplicar', 'gastos.ver', 'gastos.crear', 'devoluciones.ver', 'devoluciones.crear', 'reportes.ventas', 'reportes.caja'].concat(VIEW_PERMISSIONS_BY_ROLE.SUPERVISOR)) },
+      { rol: 'CAJERO', nombre: 'Cajero / POS', descripcion: 'Cobro de ventas, recepción de abonos y cuadre de turno', permisos_json: JSON.stringify(['ventas.crear', 'ventas.ver', 'caja.abrir', 'caja.cerrar', 'caja.movimientos', 'caja.ver', 'productos.ver', 'clientes.ver', 'clientes.crear', 'creditos.ver', 'abonos.crear', 'creditos_favor.ver', 'creditos_favor.aplicar'].concat(VIEW_PERMISSIONS_BY_ROLE.CAJERO)) },
+      { rol: 'VENDEDOR', nombre: 'Asesor de Ventas', descripcion: 'Consulta de catálogo y registro de ventas', permisos_json: JSON.stringify(['ventas.crear', 'ventas.ver', 'productos.ver', 'clientes.ver', 'clientes.crear', 'creditos_favor.ver', 'creditos_favor.aplicar'].concat(VIEW_PERMISSIONS_BY_ROLE.VENDEDOR)) }
     ];
 
     DbHelper.insertRows('Roles_Permisos', roleDefinitions);
@@ -412,6 +418,119 @@ function migrateCreditosFavorPermissions() {
   }
 
   Logger.log(`[FASE 8] Migración creditos_favor.* -- actualizados: ${JSON.stringify(rolesUpdated)}; sin cambios: ${JSON.stringify(rolesUnchanged)}; roles no reconocidos (intactos): ${JSON.stringify(rolesSkippedUnknown)}; permisos_json inválido (intacto): ${JSON.stringify(rolesSkippedInvalidJson)}`);
+
+  return {
+    success: true,
+    message: `Migración completada. Roles actualizados: ${rolesUpdated.length}. Sin cambios: ${rolesUnchanged.length}.`,
+    rolesUpdated: rolesUpdated,
+    rolesUnchanged: rolesUnchanged,
+    rolesSkippedUnknown: rolesSkippedUnknown,
+    rolesSkippedInvalidJson: rolesSkippedInvalidJson
+  };
+}
+
+/**
+ * TAREA — SISTEMA DE PERMISOS DE VISTAS POR ROL.
+ *
+ * Migración IDEMPOTENTE de los nuevos permisos `vista.<id>` para
+ * instalaciones YA EXISTENTES -- mismo patrón exacto que
+ * `migrateCreditosFavorPermissions` de arriba (misma limitación de
+ * `Roles_Permisos` sin columna `id`, mismas garantías de no duplicar/no
+ * quitar/no sobrescribir personalización existente), reutilizando ahora
+ * `DbHelper.updateRowByKey` (agregado en esta misma fase) en vez de
+ * repetir por segunda vez la lectura/escritura manual de fila.
+ *
+ * `id` de cada vista = el `AppView` real usado por App.tsx/Sidebar.tsx
+ * (dashboard, pos, sales, returns, products, inventory, purchases,
+ * credits, installments, creditNotes, storeCredits, cash, customers,
+ * expenses, reports, settings) -- ninguno inventado, verificados contra
+ * `VALID_VIEWS` en App.tsx antes de escribir esta lista.
+ *
+ * Igual que la migración de créditos a favor:
+ *  - Solo AGREGA las cadenas `vista.*` que falten para cada rol -- nunca
+ *    quita ni reemplaza el arreglo completo (los permisos funcionales ya
+ *    existentes en `permisos_json` quedan intactos).
+ *  - Nunca duplica: compara contra el arreglo actual antes de agregar.
+ *  - Un rol ya personalizado por un ADMIN (algún `vista.*` ya presente,
+ *    aunque sea distinto al default) nunca se sobrescribe -- solo se
+ *    completan los códigos que falten por completo.
+ *  - Roles fuera de los 5 estándar se dejan intactos.
+ *  - Una fila con `permisos_json` inválido nunca se sobreescribe.
+ *  - Ejecutarla dos o más veces produce el mismo resultado que una vez.
+ */
+const VIEW_PERMISSIONS_BY_ROLE = {
+  ADMIN: ['vista.dashboard', 'vista.pos', 'vista.sales', 'vista.returns', 'vista.products', 'vista.inventory', 'vista.purchases', 'vista.credits', 'vista.installments', 'vista.creditNotes', 'vista.storeCredits', 'vista.cash', 'vista.customers', 'vista.expenses', 'vista.reports', 'vista.settings'],
+  GERENTE: ['vista.dashboard', 'vista.pos', 'vista.sales', 'vista.returns', 'vista.products', 'vista.inventory', 'vista.purchases', 'vista.credits', 'vista.installments', 'vista.creditNotes', 'vista.storeCredits', 'vista.cash', 'vista.customers', 'vista.expenses', 'vista.reports', 'vista.settings'],
+  // SUPERVISOR: sin Dashboard ni Configuración (no tiene admin.* real);
+  // el resto coincide con su huella de permisos funcionales real
+  // (inventario.ajustar, compras.ver, gastos.crear, reportes.ventas/caja).
+  SUPERVISOR: ['vista.pos', 'vista.sales', 'vista.returns', 'vista.products', 'vista.inventory', 'vista.purchases', 'vista.credits', 'vista.installments', 'vista.creditNotes', 'vista.storeCredits', 'vista.cash', 'vista.customers', 'vista.expenses', 'vista.reports'],
+  // CAJERO: mínimo operativo explícito de la fase (POS/Clientes/
+  // Devoluciones/Caja) + el resto de vistas donde ya tiene permisos
+  // funcionales reales (ventas.ver, creditos.ver, abonos.crear,
+  // creditos_favor.*) -- nunca Dashboard/Inventario/Compras/Gastos/
+  // Reportes/Configuración, que tampoco tiene funcionalmente.
+  CAJERO: ['vista.pos', 'vista.sales', 'vista.returns', 'vista.products', 'vista.credits', 'vista.installments', 'vista.creditNotes', 'vista.storeCredits', 'vista.cash', 'vista.customers'],
+  // VENDEDOR: el más restringido -- ni caja ni cuentas por cobrar (no
+  // tiene creditos.ver/caja.* funcional), pero sí Créditos a Favor/Vales
+  // porque su rol real SÍ incluye creditos_favor.ver/aplicar (puede
+  // aplicarlos en una venta).
+  VENDEDOR: ['vista.pos', 'vista.sales', 'vista.products', 'vista.creditNotes', 'vista.storeCredits', 'vista.customers']
+};
+
+function migrateViewPermissions() {
+  const sheet = DbHelper.getSheet('Roles_Permisos');
+  const data = sheet.getDataRange().getValues();
+
+  if (data.length <= 1) {
+    return {
+      success: true,
+      message: 'Roles_Permisos está vacía -- nada que migrar (seedInitialData la sembrará ya con estos permisos incluidos).',
+      rolesUpdated: [], rolesUnchanged: [], rolesSkippedUnknown: [], rolesSkippedInvalidJson: []
+    };
+  }
+
+  const headers = data[0].map(h => String(h).trim());
+  const rolColIdx = headers.indexOf('rol');
+  const jsonColIdx = headers.indexOf('permisos_json');
+  if (rolColIdx === -1 || jsonColIdx === -1) {
+    throw new Error("MIGRATION_UNSAFE: La hoja 'Roles_Permisos' no tiene las columnas esperadas ('rol'/'permisos_json') -- no se ejecuta ninguna escritura para evitar corromper datos.");
+  }
+
+  const rolesUpdated = [];
+  const rolesUnchanged = [];
+  const rolesSkippedUnknown = [];
+  const rolesSkippedInvalidJson = [];
+
+  for (let i = 1; i < data.length; i++) {
+    const rol = String(data[i][rolColIdx] || '').trim();
+    const target = VIEW_PERMISSIONS_BY_ROLE[rol];
+    if (!target) {
+      if (rol) rolesSkippedUnknown.push(rol);
+      continue;
+    }
+
+    let current;
+    try {
+      current = JSON.parse(data[i][jsonColIdx] || '[]');
+      if (!Array.isArray(current)) throw new Error('permisos_json no es un arreglo');
+    } catch (e) {
+      rolesSkippedInvalidJson.push(rol);
+      continue;
+    }
+
+    const missing = target.filter(p => current.indexOf(p) === -1);
+    if (missing.length === 0) {
+      rolesUnchanged.push(rol);
+      continue;
+    }
+
+    const merged = current.concat(missing);
+    DbHelper.updateRowByKey('Roles_Permisos', 'rol', rol, { permisos_json: JSON.stringify(merged) });
+    rolesUpdated.push({ rol: rol, permisosAgregados: missing });
+  }
+
+  Logger.log(`[Permisos de Vista] Migración vista.* -- actualizados: ${JSON.stringify(rolesUpdated)}; sin cambios: ${JSON.stringify(rolesUnchanged)}; roles no reconocidos (intactos): ${JSON.stringify(rolesSkippedUnknown)}; permisos_json inválido (intacto): ${JSON.stringify(rolesSkippedInvalidJson)}`);
 
   return {
     success: true,
