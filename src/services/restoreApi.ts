@@ -38,6 +38,22 @@ export interface RestoreExecutionResult {
   sequencesRecalculated: { prefix: string; before: number; after: number; changed: boolean }[];
 }
 
+/**
+ * AUDITORÍA (Objetivo B) — un registro real de la hoja `Auditoria`
+ * (nunca inventado) para la acción 'RESTORE_BACKUP'/'RESTORE_BACKUP_FAILED'
+ * que RestoreController.gs ya escribe hoy. `txId` viene de `detalle`
+ * (serializado como JSON string por AuditController.log) -- se parsea
+ * defensivamente porque otros tipos de registro de auditoría no lo tienen.
+ */
+export interface RestoreAuditEntry {
+  id: string;
+  fecha: string;
+  accion: string;
+  resultado: string;
+  descripcion: string;
+  txId?: string;
+}
+
 class RestoreApi {
   private token(): string | null {
     return storageService.getSessionToken();
@@ -94,6 +110,56 @@ class RestoreApi {
         totalRecords: Number(raw.totalRecords) || 0,
         entities: Array.isArray(raw.entities) ? raw.entities : [],
         sequencesRecalculated: Array.isArray(raw.sequencesRecalculated) ? raw.sequencesRecalculated : [],
+      },
+    };
+  }
+
+  /**
+   * AUDITORÍA (Objetivo B) — "¿qué pasó REALMENTE con la última
+   * restauración?", de solo lectura. Reutiliza `audit.list` (ya existente
+   * en Main.gs/AuditController.gs, sin acción nueva) filtrando por
+   * `entidad: 'Backup'` -- la única entidad que RestoreController.gs usa
+   * al auditar `RESTORE_BACKUP`/`RESTORE_BACKUP_FAILED` -- y devuelve el
+   * registro MÁS RECIENTE (el backend ya ordena descendente por fecha).
+   *
+   * Este método por sí solo NO afirma si una restauración concreta tuvo
+   * éxito: el llamador (SettingsView) debe comparar el `id` devuelto
+   * contra un `id` "base" capturado ANTES de intentar la restauración,
+   * para distinguir un registro NUEVO (resultado real de ese intento) de
+   * uno viejo que ya existía. `LockServiceHelper` serializa toda escritura
+   * vía `getScriptLock()`, así que ninguna otra restauración real puede
+   * producir un registro 'Backup' mientras la nuestra está en curso.
+   */
+  public async getLastBackupAuditEntry(): Promise<ApiResponse<RestoreAuditEntry | null>> {
+    const token = this.token();
+    if (!token) return { success: false, message: 'No hay una sesión activa.', errorCode: 'AUTH_REQUIRED' };
+
+    const res = await apiService.syncWithGoogleAppsScript('audit.list', { entidad: 'Backup', limit: 1 }, token);
+    if (!res.success) return { success: false, message: res.message, errorCode: res.errorCode };
+
+    const logs = res.data && Array.isArray(res.data.logs) ? res.data.logs : [];
+    if (logs.length === 0) return { success: true, message: 'OK', data: null };
+
+    const raw = logs[0];
+    let txId: string | undefined;
+    try {
+      const parsed = typeof raw.detalle === 'string' && raw.detalle ? JSON.parse(raw.detalle) : null;
+      if (parsed && typeof parsed.txId === 'string') txId = parsed.txId;
+    } catch {
+      // `detalle` no es JSON parseable en este registro -- txId queda
+      // indefinido, nunca se inventa un valor.
+    }
+
+    return {
+      success: true,
+      message: 'OK',
+      data: {
+        id: String(raw.id || ''),
+        fecha: String(raw.fecha || ''),
+        accion: String(raw.accion || ''),
+        resultado: String(raw.resultado || ''),
+        descripcion: String(raw.descripcion || ''),
+        txId,
       },
     };
   }

@@ -124,10 +124,15 @@ vi.mock('../../context/DataStoreContext', () => ({
 // necesite el caso contrario sobreescribe el mock puntualmente.
 const restorePreviewMock = vi.fn().mockResolvedValue({ success: true, data: { valid: true, totalRecords: 2, entities: [], warnings: [], errors: [] } });
 const restoreExecuteMock = vi.fn().mockResolvedValue({ success: true, data: { totalRecords: 2, entities: [], sequencesRecalculated: [] } });
+// AUDITORÍA (Objetivo B) -- por defecto "sin registro previo" (data: null)
+// para no bloquear las pruebas que no ejercitan específicamente el flujo
+// de verificación post-timeout; esas pruebas sobreescriben el mock.
+const getLastBackupAuditEntryMock = vi.fn().mockResolvedValue({ success: true, message: 'OK', data: null });
 vi.mock('../../services/restoreApi', () => ({
   restoreApi: {
     preview: (...args: unknown[]) => restorePreviewMock(...args),
     restore: (...args: unknown[]) => restoreExecuteMock(...args),
+    getLastBackupAuditEntry: (...args: unknown[]) => getLastBackupAuditEntryMock(...args),
   },
 }));
 
@@ -174,6 +179,7 @@ describe('SettingsView -- Copia de Seguridad', () => {
     showToastMock.mockClear();
     restorePreviewMock.mockClear();
     restoreExecuteMock.mockClear();
+    getLastBackupAuditEntryMock.mockClear();
     clearDataStoreMock.mockClear();
     [refreshProductsMock, refreshCustomersMock, refreshSalesMock, refreshCreditsMock, refreshCreditNotesMock, refreshExpensesMock, refreshReturnsMock].forEach((m) => m.mockClear());
   });
@@ -373,6 +379,129 @@ describe('SettingsView -- Copia de Seguridad', () => {
 
     await waitFor(() => expect(showToastMock).toHaveBeenCalledWith('ERROR CRÍTICO — Requiere Intervención Manual', expect.stringContaining('intervención manual'), 'error'));
     expect(clearDataStoreMock).not.toHaveBeenCalled();
+  });
+
+  /**
+   * AUDITORÍA (Objetivo A/B/C) — un TIMEOUT_ERROR/NETWORK_ERROR del
+   * transporte durante `system.restoreBackup` NUNCA debe mostrarse como
+   * "Restauración Fallida" confirmada: Apps Script pudo seguir
+   * ejecutándose después de que el navegador dejó de esperar. Estas
+   * pruebas ejercitan SettingsView.tsx TAL COMO ES contra las mismas
+   * formas de respuesta reales de `apiService`/`restoreApi` (`success:
+   * false`, `errorCode: 'TIMEOUT_ERROR'|'NETWORK_ERROR'`).
+   */
+  async function openConfirmModalAndClickConfirm() {
+    const input = await renderOnBackupTab();
+    fireEvent.change(input, { target: { files: [jsonFile(validBackupJson())] } });
+    await waitFor(() => expect(screen.getByText(/Backup reconocido/)).toBeInTheDocument());
+    fireEvent.click(screen.getByText('Restaurar Backup').closest('button')!);
+    await waitFor(() => expect(screen.getByText('Restaurar Copia de Seguridad')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('Confirmar Restauración'));
+  }
+
+  it('TIMEOUT_ERROR durante restore: NUNCA dice "Restauración Fallida" -- muestra "Tiempo de Espera Agotado" y bloquea un nuevo intento', async () => {
+    restoreExecuteMock.mockResolvedValueOnce({
+      success: false,
+      message: 'El servidor tardó demasiado en responder. Intente de nuevo en unos segundos.',
+      errorCode: 'TIMEOUT_ERROR',
+    });
+    await openConfirmModalAndClickConfirm();
+
+    await waitFor(() =>
+      expect(showToastMock).toHaveBeenCalledWith(
+        'Tiempo de Espera Agotado',
+        expect.stringContaining('No vuelva a ejecutar la restauración todavía'),
+        'error'
+      )
+    );
+    expect(showToastMock).not.toHaveBeenCalledWith('Restauración Fallida', expect.anything(), expect.anything());
+    expect(clearDataStoreMock).not.toHaveBeenCalled();
+
+    // Objetivo C: bloquea un nuevo intento hasta verificar.
+    expect(screen.getByText('Verificar Estado Real')).toBeInTheDocument();
+    expect(screen.getByText('Restaurar Backup').closest('button')).toBeDisabled();
+  });
+
+  it('NETWORK_ERROR durante restore: se trata como resultado potencialmente desconocido, nunca como fallo confirmado', async () => {
+    restoreExecuteMock.mockResolvedValueOnce({
+      success: false,
+      message: 'No se pudo conectar con el servidor. Verifique su conexión a internet e intente de nuevo.',
+      errorCode: 'NETWORK_ERROR',
+    });
+    await openConfirmModalAndClickConfirm();
+
+    await waitFor(() =>
+      expect(showToastMock).toHaveBeenCalledWith(
+        'Conexión Perdida — Resultado Desconocido',
+        expect.stringContaining('No vuelva a ejecutar la restauración todavía'),
+        'error'
+      )
+    );
+    expect(showToastMock).not.toHaveBeenCalledWith('Restauración Fallida', expect.anything(), expect.anything());
+    expect(screen.getByText('Restaurar Backup').closest('button')).toBeDisabled();
+  });
+
+  it('no hay reintento automático de restore tras TIMEOUT_ERROR/NETWORK_ERROR (restoreApi.restore se llama exactamente una vez)', async () => {
+    restoreExecuteMock.mockResolvedValueOnce({ success: false, message: 'timeout', errorCode: 'TIMEOUT_ERROR' });
+    await openConfirmModalAndClickConfirm();
+    await waitFor(() => expect(showToastMock).toHaveBeenCalledWith('Tiempo de Espera Agotado', expect.anything(), 'error'));
+    expect(restoreExecuteMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('"Verificar Estado Real": si el backend aún no registró nada nuevo, informa honestamente que sigue sin confirmarse y mantiene el bloqueo', async () => {
+    getLastBackupAuditEntryMock.mockResolvedValueOnce({ success: true, message: 'OK', data: { id: 'AUD-BASELINE', fecha: '2026-09-06 10:00:00', accion: 'CUSTOMER_UPDATED', resultado: 'EXITO', descripcion: '' } });
+    restoreExecuteMock.mockResolvedValueOnce({ success: false, message: 'timeout', errorCode: 'TIMEOUT_ERROR' });
+    await openConfirmModalAndClickConfirm();
+    await waitFor(() => expect(screen.getByText('Verificar Estado Real')).toBeInTheDocument());
+
+    // El backend todavía devuelve el MISMO registro (ningún registro nuevo de tipo Backup).
+    getLastBackupAuditEntryMock.mockResolvedValueOnce({ success: true, message: 'OK', data: { id: 'AUD-BASELINE', fecha: '2026-09-06 10:00:00', accion: 'CUSTOMER_UPDATED', resultado: 'EXITO', descripcion: '' } });
+    fireEvent.click(screen.getByText('Verificar Estado Real'));
+
+    await waitFor(() => expect(showToastMock).toHaveBeenCalledWith('Aún Sin Confirmación', expect.stringContaining('Puede seguir procesándose'), 'error'));
+    expect(screen.getByText('Verificar Estado Real')).toBeInTheDocument(); // el bloqueo se mantiene
+    expect(screen.getByText('Restaurar Backup').closest('button')).toBeDisabled();
+    expect(clearDataStoreMock).not.toHaveBeenCalled();
+  });
+
+  it('"Verificar Estado Real": un registro NUEVO con resultado EXITO confirma la restauración, refresca el DataStore y desbloquea', async () => {
+    getLastBackupAuditEntryMock.mockResolvedValueOnce({ success: true, message: 'OK', data: { id: 'AUD-BASELINE', fecha: '2026-09-06 10:00:00', accion: 'CUSTOMER_UPDATED', resultado: 'EXITO', descripcion: '' } });
+    restoreExecuteMock.mockResolvedValueOnce({ success: false, message: 'timeout', errorCode: 'TIMEOUT_ERROR' });
+    await openConfirmModalAndClickConfirm();
+    await waitFor(() => expect(screen.getByText('Verificar Estado Real')).toBeInTheDocument());
+
+    getLastBackupAuditEntryMock.mockResolvedValueOnce({
+      success: true,
+      message: 'OK',
+      data: { id: 'AUD-NUEVO-EXITO', fecha: '2026-09-06 10:05:00', accion: 'RESTORE_BACKUP', resultado: 'EXITO', descripcion: 'Backup restaurado exitosamente (2 registros en 1 entidades).' },
+    });
+    fireEvent.click(screen.getByText('Verificar Estado Real'));
+
+    await waitFor(() => expect(showToastMock).toHaveBeenCalledWith('Restauración Confirmada', expect.stringContaining('Backup restaurado exitosamente'), 'exito'));
+    await waitFor(() => expect(clearDataStoreMock).toHaveBeenCalledTimes(1));
+    expect(refreshProductsMock).toHaveBeenCalledWith({ force: true });
+    expect(screen.queryByText('Verificar Estado Real')).not.toBeInTheDocument();
+    expect(screen.getByText('Restaurar Backup').closest('button')).toBeDisabled(); // deshabilitado ahora por falta de archivo, no por el bloqueo
+  });
+
+  it('"Verificar Estado Real": un registro NUEVO con resultado FALLO confirma el fallo real y desbloquea para reintentar', async () => {
+    getLastBackupAuditEntryMock.mockResolvedValueOnce({ success: true, message: 'OK', data: null });
+    restoreExecuteMock.mockResolvedValueOnce({ success: false, message: 'timeout', errorCode: 'TIMEOUT_ERROR' });
+    await openConfirmModalAndClickConfirm();
+    await waitFor(() => expect(screen.getByText('Verificar Estado Real')).toBeInTheDocument());
+
+    getLastBackupAuditEntryMock.mockResolvedValueOnce({
+      success: true,
+      message: 'OK',
+      data: { id: 'AUD-NUEVO-FALLO', fecha: '2026-09-06 10:05:00', accion: 'RESTORE_BACKUP_FAILED', resultado: 'FALLO', descripcion: 'Restauración falló durante la escritura -- rollback completo aplicado.' },
+    });
+    fireEvent.click(screen.getByText('Verificar Estado Real'));
+
+    await waitFor(() =>
+      expect(showToastMock).toHaveBeenCalledWith('Restauración Fallida (Confirmado por Auditoría)', expect.stringContaining('rollback completo aplicado'), 'error')
+    );
+    expect(clearDataStoreMock).not.toHaveBeenCalled();
+    expect(screen.queryByText('Verificar Estado Real')).not.toBeInTheDocument();
   });
 });
 

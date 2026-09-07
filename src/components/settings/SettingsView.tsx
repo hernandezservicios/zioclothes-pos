@@ -1071,6 +1071,24 @@ export const SettingsView: React.FC = () => {
   const [restoreProgress, setRestoreProgress] = useState<string>('');
   const restoreFileInputRef = useRef<HTMLInputElement>(null);
 
+  /**
+   * AUDITORÍA (Objetivo A/B/C) — un `TIMEOUT_ERROR`/`NETWORK_ERROR` del
+   * transporte NO significa que la restauración haya fallado: el
+   * navegador dejó de esperar, pero Apps Script pudo seguir ejecutando
+   * RestoreController.gs. `baselineAuditId` es el `id` del último
+   * registro de auditoría real (entidad 'Backup') capturado JUSTO ANTES
+   * de intentar esta restauración -- se usa para distinguir después un
+   * registro NUEVO (resultado real de este intento) de uno viejo. Nunca
+   * se persiste en storageService: vive solo mientras dure esta pantalla,
+   * y su único propósito es bloquear un reintento peligroso hasta que se
+   * verifique el resultado real contra el backend.
+   */
+  const [restorePendingVerification, setRestorePendingVerification] = useState<{
+    baselineAuditId: string | null;
+    reason: 'TIMEOUT_ERROR' | 'NETWORK_ERROR';
+  } | null>(null);
+  const [verifyingRestoreOutcome, setVerifyingRestoreOutcome] = useState(false);
+
   const handleRestoreFileSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files && e.target.files[0];
     if (!file) {
@@ -1143,20 +1161,73 @@ export const SettingsView: React.FC = () => {
     }
   };
 
+  // Requerimiento (INVALIDACIÓN DATASTORE): nunca confiar en el estado
+  // React viejo -- se limpia el DataStore central y se vuelve a pedir
+  // TODO al backend real, la misma arquitectura que ya usan
+  // Dashboard/POS/Clientes/Ventas. Compartido entre el camino de éxito
+  // inmediato (`handleConfirmRestore`) y el de éxito confirmado
+  // tardíamente vía auditoría real (`handleVerifyRestoreOutcome`).
+  const applyConfirmedRestoreSuccess = async () => {
+    setRestoreProgress('Finalizando...');
+    clearDataStore();
+    await Promise.all([
+      refreshProducts({ force: true }),
+      refreshCustomers({ force: true }),
+      refreshSales({ force: true }),
+      refreshCredits({ force: true }),
+      refreshCreditNotes({ force: true }),
+      refreshExpenses({ force: true }),
+      refreshReturns({ force: true }),
+    ]);
+    setRestoreProgress('Restauración completada.');
+    setRestoreConfirmOpen(false);
+    handleClearRestoreFile();
+  };
+
   // FASE B: restauración REAL. "Restaurando datos..." es el único estado
   // de progreso posible dentro de una sola llamada síncrona a doPost --
   // Apps Script no soporta streaming/progreso real, así que no se
   // inventa uno (ver auditoría al inicio del archivo). Protegido contra
   // doble ejecución con `restoring` (deshabilita el botón mientras dura).
+  //
+  // AUDITORÍA (Objetivo A/B/C): un `TIMEOUT_ERROR`/`NETWORK_ERROR` del
+  // transporte NUNCA se muestra como "Restauración Fallida" -- el
+  // navegador dejó de esperar, pero Apps Script pudo seguir ejecutando
+  // RestoreController.gs de forma completamente independiente. Antes de
+  // intentar la restauración se captura el último registro de auditoría
+  // real (entidad 'Backup') como "baseline"; si el resultado es
+  // desconocido, ese baseline es lo único que permite después distinguir
+  // -- contra el backend real, nunca por suposición -- un registro NUEVO
+  // (el resultado real de este intento) de uno viejo.
   const handleConfirmRestore = async () => {
-    if (!restoreParsedBackup || restoring) return;
+    if (!restoreParsedBackup || restoring || restorePendingVerification) return;
     setRestoring(true);
     setRestoreProgress('Restaurando datos...');
+
+    let baselineAuditId: string | null = null;
+    try {
+      const baselineRes = await restoreApi.getLastBackupAuditEntry();
+      baselineAuditId = baselineRes.success && baselineRes.data ? baselineRes.data.id : null;
+    } catch {
+      baselineAuditId = null;
+    }
+
     try {
       const res = await restoreApi.restore(restoreParsedBackup);
 
       if (!res.success || !res.data) {
         setRestoreConfirmOpen(false);
+
+        if (res.errorCode === 'TIMEOUT_ERROR' || res.errorCode === 'NETWORK_ERROR') {
+          setRestorePendingVerification({ baselineAuditId, reason: res.errorCode });
+          showToast(
+            res.errorCode === 'TIMEOUT_ERROR' ? 'Tiempo de Espera Agotado' : 'Conexión Perdida — Resultado Desconocido',
+            'El servidor puede continuar procesando la restauración. No vuelva a ejecutar la restauración todavía. Verifique el estado antes de intentarlo nuevamente.',
+            'error'
+          );
+          return;
+        }
+
         const critical = /ERROR CRÍTICO/i.test(res.message || '');
         showToast(
           critical ? 'ERROR CRÍTICO — Requiere Intervención Manual' : 'Restauración Fallida',
@@ -1168,26 +1239,8 @@ export const SettingsView: React.FC = () => {
 
       setRestoreProgress('Verificando integridad...');
       const { totalRecords, entities } = res.data;
-
-      setRestoreProgress('Finalizando...');
-      // Requerimiento (INVALIDACIÓN DATASTORE): nunca confiar en el
-      // estado React viejo -- se limpia el DataStore central y se vuelve
-      // a pedir TODO al backend real, la misma arquitectura que ya usan
-      // Dashboard/POS/Clientes/Ventas.
-      clearDataStore();
-      await Promise.all([
-        refreshProducts({ force: true }),
-        refreshCustomers({ force: true }),
-        refreshSales({ force: true }),
-        refreshCredits({ force: true }),
-        refreshCreditNotes({ force: true }),
-        refreshExpenses({ force: true }),
-        refreshReturns({ force: true }),
-      ]);
-
-      setRestoreProgress('Restauración completada.');
-      setRestoreConfirmOpen(false);
-      handleClearRestoreFile();
+      setRestorePendingVerification(null);
+      await applyConfirmedRestoreSuccess();
       showToast('Backup Restaurado Correctamente', `${totalRecords} registro(s) en ${entities.length} entidad(es). El Dashboard, POS y demás pantallas ya reflejan el estado restaurado.`, 'exito');
     } catch (e) {
       setRestoreConfirmOpen(false);
@@ -1195,6 +1248,50 @@ export const SettingsView: React.FC = () => {
     } finally {
       setRestoring(false);
       setRestoreProgress('');
+    }
+  };
+
+  // AUDITORÍA (Objetivo B/C) — de solo lectura: reconsulta el mismo
+  // registro de auditoría real (`entidad: 'Backup'`) contra el backend y
+  // lo compara con el `baselineAuditId` capturado antes del intento sin
+  // confirmar. `LockServiceHelper` serializa toda escritura mediante
+  // `getScriptLock()`, así que ningún otro restore real puede producir un
+  // registro 'Backup' mientras el nuestro está en curso -- un `id` NUEVO
+  // solo puede ser el resultado real de ESTE intento. Nunca se inventa un
+  // estado que el backend no pueda demostrar: si no hay ningún registro
+  // nuevo todavía, se informa honestamente que sigue sin confirmarse.
+  const handleVerifyRestoreOutcome = async () => {
+    if (!restorePendingVerification || verifyingRestoreOutcome) return;
+    setVerifyingRestoreOutcome(true);
+    try {
+      const res = await restoreApi.getLastBackupAuditEntry();
+      if (!res.success) {
+        showToast('No se Pudo Verificar', res.message || 'No se pudo consultar el registro de auditoría real. Intente de nuevo.', 'error');
+        return;
+      }
+
+      const entry = res.data;
+      const isNewEntry = !!entry && entry.id !== restorePendingVerification.baselineAuditId;
+
+      if (!isNewEntry) {
+        showToast(
+          'Aún Sin Confirmación',
+          'El backend todavía no registró ningún resultado para esta restauración. Puede seguir procesándose -- intente verificar de nuevo en unos segundos.',
+          'error'
+        );
+        return;
+      }
+
+      if (entry!.resultado === 'EXITO') {
+        setRestorePendingVerification(null);
+        await applyConfirmedRestoreSuccess();
+        showToast('Restauración Confirmada', `El registro de auditoría real del backend confirma que la restauración se completó: ${entry!.descripcion}`, 'exito');
+      } else {
+        setRestorePendingVerification(null);
+        showToast('Restauración Fallida (Confirmado por Auditoría)', entry!.descripcion || 'El backend registró un fallo para este intento.', 'error');
+      }
+    } finally {
+      setVerifyingRestoreOutcome(false);
     }
   };
 
@@ -2079,6 +2176,37 @@ export const SettingsView: React.FC = () => {
                 Restaure los datos del sistema desde una copia de seguridad JSON previamente descargada.
               </p>
 
+              {/* AUDITORÍA (Objetivo A/C): un timeout/error de red del
+                  navegador durante la restauración NO confirma que haya
+                  fallado -- Apps Script pudo seguir ejecutándose. Mientras
+                  el resultado real no se verifique contra el backend, se
+                  bloquea un nuevo intento para no arriesgar una segunda
+                  restauración sobre una que quizás ya se aplicó. */}
+              {restorePendingVerification && (
+                <div className="p-3 rounded-xl border border-amber-400 bg-amber-100 space-y-2">
+                  <p className="text-xs font-bold text-amber-900 flex items-center gap-1.5">
+                    <AlertTriangle className="w-4 h-4 shrink-0" />
+                    Resultado de la restauración anterior sin confirmar
+                  </p>
+                  <p className="text-xs text-amber-900">
+                    {restorePendingVerification.reason === 'TIMEOUT_ERROR'
+                      ? 'El servidor tardó demasiado en responder y el navegador dejó de esperar,'
+                      : 'Se perdió la conexión con el servidor,'}{' '}
+                    pero Google Apps Script pudo haber continuado procesando la restauración. No inicie una
+                    nueva restauración hasta verificar el resultado real.
+                  </p>
+                  <button
+                    type="button"
+                    disabled={verifyingRestoreOutcome}
+                    onClick={handleVerifyRestoreOutcome}
+                    className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-xl bg-amber-900 text-white text-xs font-bold hover:bg-amber-950 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {verifyingRestoreOutcome ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+                    <span>{verifyingRestoreOutcome ? 'Verificando...' : 'Verificar Estado Real'}</span>
+                  </button>
+                </div>
+              )}
+
               <input
                 ref={restoreFileInputRef}
                 type="file"
@@ -2147,7 +2275,7 @@ export const SettingsView: React.FC = () => {
 
               <button
                 type="button"
-                disabled={!restoreIsRestorableFormat || previewingRestore || !hasPermission('admin.configuracion')}
+                disabled={!restoreIsRestorableFormat || previewingRestore || !hasPermission('admin.configuracion') || !!restorePendingVerification}
                 onClick={handleClickRestoreButton}
                 className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-xl bg-rose-700 text-white text-xs font-bold hover:bg-rose-800 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-rose-700"
               >

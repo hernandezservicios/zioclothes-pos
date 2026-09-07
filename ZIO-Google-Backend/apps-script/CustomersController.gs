@@ -88,13 +88,21 @@ const CustomersController = {
         limite_credito: data.limiteCredito !== undefined ? Number(data.limiteCredito) : 0,
         dias_credito_por_defecto: data.diasCreditoPorDefecto ? Number(data.diasCreditoPorDefecto) : 15,
         notas: (data.notas || '').trim(),
-        estado: data.estado || 'ACTIVO',
-        creado_en: data.creadoEn || getNowFormatted()
+        estado: data.estado || 'ACTIVO'
       };
 
       if (isUpdate) {
+        // AUDITORÍA (Objetivo D): `creado_en` NUNCA se incluye aquí a
+        // propósito -- el frontend no lo envía en una edición, y antes
+        // esto hacía que `data.creadoEn || getNowFormatted()` reescribiera
+        // la fecha de creación original del cliente en CADA edición.
+        // `DbHelper.updateRowById` ya conserva el valor existente de
+        // cualquier columna ausente en `updatesObj` (ver su lógica:
+        // `updatesObj[header] !== undefined ? ... : currentRow[j]`), así
+        // que omitir la columna es suficiente para preservarla intacta.
         DbHelper.updateRowById('Clientes', customerId, record);
       } else {
+        record.creado_en = data.creadoEn || getNowFormatted();
         DbHelper.insertRow('Clientes', record);
       }
 

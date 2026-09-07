@@ -4757,6 +4757,51 @@ test('CUSTOMERS_SAVE_EDITS_EXISTING_CUSTOMER', () => {
   assertEqual(Number(cliente.limite_credito), 2000);
 });
 
+/* ================================================================
+   AUDITORÍA (Objetivo D) -- CustomersController.gs sobrescribía
+   `creado_en` en CADA edición porque usaba
+   `data.creadoEn || getNowFormatted()` también en el camino de UPDATE, y
+   el frontend nunca envía `creadoEn` al editar (ver customersApi.ts). Se
+   corrigió para que UPDATE conserve exactamente el valor ya existente.
+   ================================================================ */
+
+test('CUSTOMERS_SAVE_CREATE_SETS_CREADO_EN', () => {
+  const res = doPostRaw('customers.save', { nombre: 'Cliente', apellido: 'Fecha Creacion', telefono: '809-222-3333' }, adminToken);
+  assert(res.success === true, JSON.stringify(res));
+  const cliente = runInContext(`DbHelper.findById('Clientes', '${res.customerId}')`);
+  assert(!!cliente.creado_en, 'un cliente nuevo debe tener creado_en asignado automáticamente en CREATE');
+});
+
+test('CUSTOMERS_SAVE_UPDATE_NEVER_OVERWRITES_CREADO_EN', () => {
+  const createRes = doPostRaw('customers.save', { nombre: 'Cliente', apellido: 'Fecha Original', telefono: '809-444-5555' }, adminToken);
+  assert(createRes.success === true, JSON.stringify(createRes));
+  const customerId = createRes.customerId;
+  const before = runInContext(`DbHelper.findById('Clientes', '${customerId}')`);
+  const creadoEnOriginal = before.creado_en;
+  assert(!!creadoEnOriginal, 'precondición: el cliente recién creado debe tener creado_en');
+
+  // El payload de edición, igual que el que envía customersApi.ts real,
+  // nunca incluye `creadoEn` -- si el bug reapareciera,
+  // `data.creadoEn || getNowFormatted()` produciría aquí un valor nuevo.
+  const editRes = doPostRaw('customers.save', { id: customerId, nombre: 'Cliente', apellido: 'Fecha Editada', telefono: '809-444-5555' }, adminToken);
+  assert(editRes.success === true, JSON.stringify(editRes));
+
+  const after = runInContext(`DbHelper.findById('Clientes', '${customerId}')`);
+  assertEqual(after.creado_en, creadoEnOriginal, 'UPDATE nunca debe alterar creado_en de la fila existente');
+  assertEqual(after.apellido, 'Fecha Editada', 'la edición real sí debe aplicarse a los demás campos');
+});
+
+test('CUSTOMERS_SAVE_UPDATE_WITHOUT_ID_STILL_SETS_CREADO_EN_ON_LATER_CREATE', () => {
+  // Regresión de diseño: el `if (isUpdate) {...} else { record.creado_en = ...}`
+  // solo debe activar la rama CREATE cuando de verdad no hay `id` -- una
+  // segunda creación independiente debe seguir recibiendo su propio
+  // creado_en real, nunca quedar vacío por un efecto colateral del fix.
+  const res = doPostRaw('customers.save', { nombre: 'Otro', apellido: 'Cliente Nuevo', telefono: '809-666-7777' }, adminToken);
+  assert(res.success === true, JSON.stringify(res));
+  const cliente = runInContext(`DbHelper.findById('Clientes', '${res.customerId}')`);
+  assert(!!cliente.creado_en, 'una segunda creación independiente también debe tener creado_en asignado');
+});
+
 test('CUSTOMERS_SAVE_REJECTS_MISSING_REQUIRED_FIELDS', () => {
   const res = doPostRaw('customers.save', { apellido: 'Sin Nombre Ni Telefono' }, adminToken);
   assert(res.success === false, 'nombre y teléfono son obligatorios');
@@ -5297,6 +5342,59 @@ test('RESTORE_AUDIT_LOGS_SUCCESS_AND_FAILURE', () => {
   doPostRaw('system.restoreBackup', { backup: badBackup }, adminToken);
   const failureLogs = runInContext(`DbHelper.findRows('Auditoria', a => a.accion === 'RESTORE_BACKUP_FAILED')`);
   assert(failureLogs.length > 0, 'debe existir al menos un registro de auditoría RESTORE_BACKUP_FAILED');
+});
+
+/* ================================================================
+   AUDITORÍA (Objetivo B) -- mecanismo real, de solo lectura, para que el
+   frontend pueda comprobar tras un timeout del navegador si una
+   restauración realmente se completó. Reutiliza `audit.list`
+   (AuditController.handleList) con el filtro opcional `entidad`/`modulo`
+   agregado en esta misma fase -- sin acción nueva, sin endpoint nuevo.
+   ================================================================ */
+
+test('AUDIT_LIST_WITHOUT_FILTER_IS_UNCHANGED_BACKWARD_COMPATIBLE', () => {
+  const res = doPostRaw('audit.list', { limit: 5 }, adminToken);
+  assert(res.success === true, JSON.stringify(res));
+  assert(Array.isArray(res.logs), 'sin filtro, el comportamiento debe ser idéntico al de antes de esta fase');
+});
+
+test('AUDIT_LIST_FILTERS_BY_ENTIDAD_LETS_FRONTEND_DETECT_A_NEW_RESTORE_OUTCOME', () => {
+  const backup = buildValidRestoreBackup_();
+  backup.data.customers[0].id = 'CLI-AUDITLIST-TEST';
+  backup.data.sales[0].clienteId = 'CLI-AUDITLIST-TEST';
+  backup.data.credits[0].clienteId = 'CLI-AUDITLIST-TEST';
+  backup.data.returns[0].clienteId = 'CLI-AUDITLIST-TEST';
+  backup.data.creditNotes[0].clienteId = 'CLI-AUDITLIST-TEST';
+
+  // Baseline: lo que restoreApi.getLastBackupAuditEntry() capturaría ANTES
+  // de intentar la restauración.
+  const before = doPostRaw('audit.list', { entidad: 'Backup', limit: 1 }, adminToken);
+  assert(before.success === true, JSON.stringify(before));
+  const baselineId = before.logs.length > 0 ? before.logs[0].id : null;
+
+  const res = doPostRaw('system.restoreBackup', { backup: backup }, adminToken);
+  assert(res.success === true, JSON.stringify(res));
+
+  const after = doPostRaw('audit.list', { entidad: 'Backup', limit: 1 }, adminToken);
+  assert(after.success === true, JSON.stringify(after));
+  assert(after.logs.length > 0, 'debe existir al menos un registro con entidad Backup tras una restauración real');
+  assert(after.logs[0].id !== baselineId, 'debe aparecer un registro NUEVO, distinguible del baseline capturado antes de restaurar');
+  assertEqual(after.logs[0].accion, 'RESTORE_BACKUP');
+  assertEqual(after.logs[0].resultado, 'EXITO');
+  assertEqual(after.logs[0].entidad, 'Backup');
+  assert(after.logs[0].detalle.indexOf('"txId"') !== -1, 'el detalle del registro de éxito debe incluir el txId real de RestoreController.gs');
+
+  // El filtro por entidad nunca debe devolver registros de otro tipo
+  // (ventas, clientes, etc. intercalados en la misma hoja Auditoria).
+  const onlyBackup = doPostRaw('audit.list', { entidad: 'Backup', limit: 50 }, adminToken);
+  assert(onlyBackup.success === true, JSON.stringify(onlyBackup));
+  onlyBackup.logs.forEach((l) => assertEqual(l.entidad, 'Backup', 'el filtro por entidad nunca debe devolver otro tipo de registro'));
+});
+
+test('AUDIT_LIST_FILTERS_BY_MODULO', () => {
+  const res = doPostRaw('audit.list', { modulo: 'CLIENTES', limit: 50 }, adminToken);
+  assert(res.success === true, JSON.stringify(res));
+  res.logs.forEach((l) => assertEqual(l.modulo, 'CLIENTES', 'el filtro por modulo nunca debe devolver otro módulo'));
 });
 
 test('RESTORE_NEVER_INCLUDES_USERS_PASSWORDS_OR_SECRETS_IN_WRITTEN_SHEETS', () => {

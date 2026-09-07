@@ -43,17 +43,49 @@ const AuditController = {
 
   /**
    * Action handler: list audit logs.
-   * @param {Object} data - { limit, modulo, usuarioId }
+   *
+   * AUDITORÍA (restauración -- Objetivo B): `entidad`/`modulo` son
+   * filtros opcionales y aditivos -- si se omiten, el comportamiento es
+   * IDÉNTICO al de antes (100% retrocompatible con cualquier llamador
+   * existente). Se agregan para permitir consultar de forma barata y
+   * segura (misma acción `audit.list`, sin endpoint nuevo) solo los
+   * registros de un tipo concreto -- p.ej. `entidad: 'Backup'`, la única
+   * entidad que RestoreController.gs usa al auditar restauraciones --
+   * sin depender de que estén entre los últimos `limit` registros
+   * globales de TODA la auditoría (ventas, clientes, etc. intercalados).
+   * @param {Object} data - { limit, modulo, entidad, usuarioId }
    * @param {Object} user
    * @returns {Object} { logs: Array }
    */
   handleList(data, user) {
     Security.requirePermission(user, 'auditoria.ver');
     const limit = (data && data.limit) ? Number(data.limit) : 200;
-    const all = DbHelper.getAllRows('Auditoria');
+    let all = DbHelper.getAllRows('Auditoria');
 
-    // Sort descending by fecha
-    all.sort((a, b) => String(b.fecha || '').localeCompare(String(a.fecha || '')));
+    if (data && data.entidad) {
+      const entidadFilter = String(data.entidad).trim();
+      all = all.filter(r => String(r.entidad || '').trim() === entidadFilter);
+    }
+    if (data && data.modulo) {
+      const moduloFilter = String(data.modulo).trim();
+      all = all.filter(r => String(r.modulo || '').trim() === moduloFilter);
+    }
+
+    // Orden descendente por fecha y, ante fechas idénticas (misma
+    // resolución de segundo de `getNowFormatted()`, perfectamente posible
+    // si dos acciones se auditan en el mismo segundo -- p.ej. una
+    // restauración cuya recalculación de Secuencias falla registra dos
+    // veces 'RESTORE_BACKUP' seguidas), por orden real de inserción en la
+    // hoja (`Auditoria` siempre se escribe con `appendRow`/`insertRow`,
+    // así que `_rowNumber` ya es cronológico). Sin este desempate, un
+    // `Array.sort` estable con fechas iguales dejaría el registro MÁS
+    // VIEJO primero en vez del más reciente -- justo el caso que
+    // `restoreApi.getLastBackupAuditEntry()` necesita distinguir.
+    all.sort((a, b) => {
+      const byFecha = String(b.fecha || '').localeCompare(String(a.fecha || ''));
+      if (byFecha !== 0) return byFecha;
+      return (Number(b._rowNumber) || 0) - (Number(a._rowNumber) || 0);
+    });
     const paged = all.slice(0, limit);
 
     return {
