@@ -333,14 +333,62 @@ const ReturnsController = {
         DbHelper.insertRow('Devoluciones', returnRecord);
         DbHelper.recordInsert(tx, 'Devoluciones', returnId);
 
-        // Update Sale Status to DEVUELTA_PARCIAL or DEVUELTA_TOTAL --
-        // comparado contra el total real de la venta, acumulando también
-        // devoluciones previas (no solo esta).
-        const totalDevueltoAcumulado = roundMoney(
-          DbHelper.findRows('Devoluciones', r => r.venta_id === sale.id)
-            .reduce((sum, r) => sum + (Number(r.monto_devuelto) || 0), 0) + computed.totalRefund
-        );
-        const nuevoEstadoVenta = totalDevueltoAcumulado >= Number(sale.total) ? 'DEVUELTA_TOTAL' : 'DEVUELTA_PARCIAL';
+        // FIX (DEVUELTA_TOTAL incorrecto al devolver solo UNA línea de una
+        // factura con varias): la comparación anterior determinaba el
+        // estado sumando MONTOS, y tenía DOS problemas:
+        //
+        // 1) Doble conteo real: `DbHelper.insertRow('Devoluciones', ...)`
+        //    de arriba ya escribe la fila en el Sheet -- un `findRows`
+        //    posterior en la MISMA ejecución la ve de inmediato (DbHelper
+        //    no cachea, lee el Sheet en vivo). El código anterior sumaba
+        //    `findRows('Devoluciones', ...).reduce(...)` (que YA incluía
+        //    esta devolución) y ADEMÁS `+ computed.totalRefund` -- el
+        //    monto de esta misma devolución se contaba dos veces. Ejemplo
+        //    exacto del reporte: venta de RD$640 con 2 prendas de RD$320
+        //    c/u, se devuelve solo la primera (RD$320) -> el código viejo
+        //    calculaba 320 (de la fila ya insertada) + 320
+        //    (computed.totalRefund) = 640 >= sale.total(640) ->
+        //    DEVUELTA_TOTAL, con la segunda prenda todavía sin devolver.
+        //
+        // 2) Frágil incluso sin el doble conteo: `Venta_Items.total` por
+        //    línea nunca incluye el prorrateo de un descuento GLOBAL de la
+        //    venta (solo el descuento por línea; ver
+        //    SalesController.recalculateSaleAuthoritatively,
+        //    descuentoGlobalAplicado nunca se distribuye a las líneas),
+        //    así que la suma de los totales de línea puede exceder
+        //    sale.total y disparar DEVUELTA_TOTAL antes de tiempo.
+        //
+        // Ahora el estado se determina por CANTIDADES, línea por línea:
+        // DEVUELTA_TOTAL únicamente cuando, para CADA línea real de
+        // Venta_Items, la cantidad devuelta acumulada (todas las
+        // devoluciones reales de esta venta, incluida la que se acaba de
+        // insertar arriba) alcanza la cantidad facturada de esa línea.
+        // Si queda una sola unidad pendiente en cualquier línea, el
+        // resultado es DEVUELTA_PARCIAL. Reutiliza el mismo patrón de
+        // acumulación por variante que recalculateReturnAuthoritatively ya
+        // usa para validar cantidades (alreadyReturnedByVariant), nunca
+        // una segunda fórmula distinta.
+        const allVentaItemsDeVenta = DbHelper.findRows('Venta_Items', vi => vi.venta_id === sale.id);
+        const devolucionesDeVenta = DbHelper.findRows('Devoluciones', r => r.venta_id === sale.id);
+        const cantidadDevueltaPorVariante = {};
+        devolucionesDeVenta.forEach(r => {
+          let prevItems = [];
+          try {
+            prevItems = r.items_json ? JSON.parse(r.items_json) : [];
+          } catch (e) {
+            prevItems = [];
+          }
+          prevItems.forEach(pi => {
+            const vId = String(pi.varianteId || '').trim();
+            cantidadDevueltaPorVariante[vId] = (cantidadDevueltaPorVariante[vId] || 0) + (Number(pi.cantidad) || 0);
+          });
+        });
+        const todasLasLineasCompletamenteDevueltas = allVentaItemsDeVenta.length > 0 && allVentaItemsDeVenta.every(vi => {
+          const vendida = Number(vi.cantidad) || 0;
+          const devuelta = cantidadDevueltaPorVariante[String(vi.variante_id).trim()] || 0;
+          return devuelta >= vendida;
+        });
+        const nuevoEstadoVenta = todasLasLineasCompletamenteDevueltas ? 'DEVUELTA_TOTAL' : 'DEVUELTA_PARCIAL';
         DbHelper.recordUpdate(tx, 'Ventas', sale.id, { estado: sale.estado });
         DbHelper.updateRowById('Ventas', sale.id, { estado: nuevoEstadoVenta });
 

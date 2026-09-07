@@ -8,6 +8,8 @@ import { InitialSetupView } from './components/setup/InitialSetupView';
 import { LoginView } from './components/auth/LoginView';
 import { Navbar } from './components/layout/Navbar';
 import { Sidebar } from './components/layout/Sidebar';
+import { ScrollEdgeArrows } from './components/layout/ScrollEdgeArrows';
+import { useScrollEdgeIndicators } from './hooks/useScrollEdgeIndicators';
 import { POSView } from './components/pos/POSView';
 import { DashboardView } from './components/dashboard/DashboardView';
 import { SalesView } from './components/sales/SalesView';
@@ -170,6 +172,15 @@ const MainAppContent: React.FC = () => {
   });
   const [navigationFilter, setNavigationFilter] = useState<string | undefined>(undefined);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  // AJUSTE VISUAL -- scrollbar nativo oculto + flechas discretas ↑/↓ en el
+  // panel de contenido principal (ver useScrollEdgeIndicators.ts /
+  // ScrollEdgeArrows.tsx / .no-native-scrollbar en index.css). `mainRef`
+  // apunta al MISMO <main> que ya tenía `overflow-y-auto` -- no se crea un
+  // segundo contenedor de scroll.
+  const mainRef = useRef<HTMLElement>(null);
+  const { canScrollUp: mainCanScrollUp, canScrollDown: mainCanScrollDown, scrollStep: mainScrollStep } =
+    useScrollEdgeIndicators(mainRef);
 
   // Cubre el caso que el inicializador de arriba NO puede cubrir: un
   // cambio de usuario SIN desmontar MainAppContent (login -> logout ->
@@ -336,9 +347,14 @@ const MainAppContent: React.FC = () => {
       case 'pos':
         return <POSView onComplete={() => {}} />;
       case 'sales':
-        return <SalesView onNavigateToReturns={() => handleNavigate('returns')} />;
+        // MEJORA POS (devolución directa desde Historial de Ventas): el
+        // número de venta viaja por el mismo canal `navigationFilter` que
+        // ya usan credits/inventory para su filtro inicial (ver más abajo)
+        // -- handleNavigate('returns', numeroVenta) lo guarda, y el case
+        // 'returns' de aquí abajo se lo entrega a ReturnsView.
+        return <SalesView onNavigateToReturns={(numeroVenta) => handleNavigate('returns', numeroVenta)} />;
       case 'returns':
-        return <ReturnsView />;
+        return <ReturnsView initialSaleNumber={navigationFilter} />;
       case 'products':
         return <ProductsView />;
       case 'inventory':
@@ -390,15 +406,34 @@ const MainAppContent: React.FC = () => {
     }
   };
 
+  // CORRECCIÓN DE LAYOUT -- Sidebar fijo e independiente del scroll del
+  // contenido: el contenedor raíz usaba `min-h-screen` (solo un PISO de
+  // 100vh, sin techo). Sin una altura máxima real, cuando el contenido de
+  // <main> crecía (cientos de filas/tarjetas), el propio documento crecía
+  // más allá del viewport y era la PÁGINA (body) la que terminaba
+  // scrolleando -- arrastrando al Sidebar con ella, aunque visualmente
+  // pareciera "fijo" en pantallas cortas. `h-screen overflow-hidden` fija
+  // la altura del documento EXACTAMENTE a 100vh y prohíbe que el propio
+  // root scrollee. `min-h-0` en la fila Sidebar+main deshace el otro
+  // problema clásico de Flexbox (el tamaño mínimo automático basado en
+  // contenido de un ítem flex en el eje principal de su contenedor,
+  // aquí el eje vertical de la columna raíz), que de otro modo seguiría
+  // dejando que esa fila creciera para caber todo el contenido en vez de
+  // respetar el espacio restante bajo el Navbar. Con esto, <main> es el
+  // ÚNICO elemento con `overflow-y-auto` real (nunca un contenedor único
+  // que englobe Sidebar + contenido) y el Sidebar (con `shrink-0` para
+  // que tampoco se comprima en ancho si el contenido de la derecha se
+  // desborda horizontalmente) permanece anclado, ocupando siempre la
+  // altura completa disponible bajo el Navbar.
   return (
-    <div className="min-h-screen bg-[#FAF8F4] text-[#2F2A25] flex flex-col font-sans selection:bg-[#2F2A25] selection:text-white">
+    <div className="h-screen overflow-hidden bg-[#FAF8F4] text-[#2F2A25] flex flex-col font-sans selection:bg-[#2F2A25] selection:text-white">
       <Navbar
         onToggleSidebar={() => setSidebarOpen(!sidebarOpen)}
         activeView={currentView}
         onNavigate={(view) => handleNavigate(view)}
       />
 
-      <div className="flex-1 flex overflow-hidden">
+      <div className="flex-1 min-h-0 flex overflow-hidden">
         <Sidebar
           isOpen={sidebarOpen}
           onClose={() => setSidebarOpen(false)}
@@ -406,7 +441,27 @@ const MainAppContent: React.FC = () => {
           onNavigate={(view) => handleNavigate(view)}
         />
 
-        <main className="flex-1 overflow-y-auto">{renderCurrentView()}</main>
+        {/* AJUSTE VISUAL: el <main> real (mismo overflow-y-auto, mismo
+            flex-1/min-h-0 de la corrección de layout de arriba) se
+            envuelve en un div `relative` -- las flechas de
+            ScrollEdgeArrows quedan ancladas al panel (no se desplazan con
+            el contenido ni restan espacio), sin alterar el tamaño real
+            del área de contenido. `.no-native-scrollbar` solo oculta la
+            representación visual nativa del scrollbar -- el scroll real
+            sigue intacto. */}
+        <div className="relative flex-1 min-h-0">
+          <main ref={mainRef} className="h-full overflow-y-auto no-native-scrollbar">
+            {renderCurrentView()}
+          </main>
+          <ScrollEdgeArrows
+            canScrollUp={mainCanScrollUp}
+            canScrollDown={mainCanScrollDown}
+            onScrollUp={() => mainScrollStep('up')}
+            onScrollDown={() => mainScrollStep('down')}
+            labelUp="Ver contenido anterior"
+            labelDown="Ver más contenido abajo"
+          />
+        </div>
       </div>
     </div>
   );

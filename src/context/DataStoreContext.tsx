@@ -138,6 +138,14 @@ interface DataStoreContextType {
    */
   getProducts: () => Product[];
   getCustomers: () => CustomerWithCredit[];
+  /**
+   * MEJORA POS (devolución directa desde Historial de Ventas): mismo
+   * mecanismo que getCustomers() -- ReturnsView, al llegar con una venta
+   * ya identificada desde el Historial, necesita `await refreshSales()`
+   * seguido de una lectura inmediata y confiable del arreglo recién
+   * traído, sin depender del timing de un useEffect de otro componente.
+   */
+  getSales: () => Sale[];
 }
 
 const DataStoreContext = createContext<DataStoreContextType | undefined>(undefined);
@@ -199,14 +207,19 @@ export const DataStoreProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   // Espejo imperativo de products/customers -- ver getProducts()/getCustomers().
   const productsRef = useRef<Product[]>(products);
   const customersRef = useRef<CustomerWithCredit[]>(customers);
+  const salesRef = useRef<Sale[]>(sales);
   useEffect(() => {
     productsRef.current = products;
   }, [products]);
   useEffect(() => {
     customersRef.current = customers;
   }, [customers]);
+  useEffect(() => {
+    salesRef.current = sales;
+  }, [sales]);
   const getProducts = useCallback(() => productsRef.current, []);
   const getCustomers = useCallback(() => customersRef.current, []);
+  const getSales = useCallback(() => salesRef.current, []);
 
   const refreshProducts = useCallback(async (opts?: RefreshOptions): Promise<boolean> => {
     const now = Date.now();
@@ -304,7 +317,15 @@ export const DataStoreProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       return false;
     }
 
-    setSales(res.data || []);
+    const newSales = res.data || [];
+    setSales(newSales);
+    // FIX (mismo patrón que refreshCustomers -- ver comentario ahí):
+    // sincroniza salesRef.current de forma síncrona en vez de depender
+    // únicamente del useEffect([sales]) de arriba, que solo corre en un
+    // render posterior. Necesario para que getSales() sea confiable
+    // inmediatamente después de `await refreshSales(...)` (ver
+    // ReturnsView -- devolución directa desde Historial de Ventas).
+    salesRef.current = newSales;
     setSalesError(null);
     setSalesStale(false);
     salesLastFetch.current = now;
@@ -550,6 +571,7 @@ export const DataStoreProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         clear,
         getProducts,
         getCustomers,
+        getSales,
       }}
     >
       {children}

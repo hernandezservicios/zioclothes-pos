@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { Sale } from '../../types';
+import { Sale, ReturnRecord } from '../../types';
 import { salesApi } from '../../services/salesApi';
 import { useAuth } from '../../context/AuthContext';
 import { useDataStore } from '../../context/DataStoreContext';
@@ -20,9 +20,24 @@ import {
   X,
   CheckCircle2,
   RefreshCcw,
+  RotateCcw,
 } from 'lucide-react';
 
-export const SalesView: React.FC = () => {
+interface SalesViewProps {
+  /**
+   * MEJORA POS (devolución directa desde Historial de Ventas): navega al
+   * módulo de Devoluciones con la venta ya identificada -- reutiliza
+   * EXACTAMENTE el mismo mecanismo de navegación con parámetro que ya usa
+   * el resto de la app (ver App.tsx handleNavigate/navigationFilter,
+   * mismo canal que CreditsView/InventoryView usan para su filtro
+   * inicial). Nunca ejecuta la devolución -- solo entrega el número de
+   * venta para que Devoluciones ejecute su propia búsqueda/validación
+   * real, sin cambios.
+   */
+  onNavigateToReturns?: (numeroVenta: string) => void;
+}
+
+export const SalesView: React.FC<SalesViewProps> = ({ onNavigateToReturns }) => {
   const { settings, hasPermission } = useAuth();
   const { showToast } = useToast();
 
@@ -41,6 +56,13 @@ export const SalesView: React.FC = () => {
     refreshProducts,
     refreshCredits,
     refreshCustomers,
+    // FASE -- Historial de Movimientos dentro del Detalle de Venta:
+    // `returns` ya es un dominio compartido real del DataStore (returns.list
+    // -> ReturnsController.handleListReturns), la MISMA colección que ya
+    // consume ReturnsView -- nunca una segunda fuente ni datos inventados.
+    // SalesView simplemente no la leía todavía.
+    returns,
+    refreshReturns,
   } = useDataStore();
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'TODOS' | 'COMPLETADA' | 'ANULADA'>('TODOS');
@@ -53,9 +75,40 @@ export const SalesView: React.FC = () => {
   const [voidReason, setVoidReason] = useState('');
   const [loadingVoid, setLoadingVoid] = useState(false);
 
+  // MEJORA POS (devolución directa desde Historial de Ventas): doble
+  // confirmación EXCLUSIVA de esta acción -- Ver/Imprimir/Anular no se
+  // tocan ni ganan ninguna confirmación nueva. `returnConfirmStep` sigue
+  // siendo 1 mientras se muestra la primera alerta; pasar a 2 muestra la
+  // segunda, independiente, con su propio Cancelar. Solo al confirmar la
+  // segunda se navega -- nunca se procesa ninguna devolución desde aquí,
+  // solo se entrega el número de venta al módulo real de Devoluciones.
+  const [returnConfirmSale, setReturnConfirmSale] = useState<Sale | null>(null);
+  const [returnConfirmStep, setReturnConfirmStep] = useState<1 | 2>(1);
+
+  const handleStartReturn = (sale: Sale) => {
+    setReturnConfirmSale(sale);
+    setReturnConfirmStep(1);
+  };
+  const handleCancelReturnConfirm = () => {
+    setReturnConfirmSale(null);
+    setReturnConfirmStep(1);
+  };
+  const handleContinueReturnConfirm = () => {
+    setReturnConfirmStep(2);
+  };
+  const handleConfirmReturn = () => {
+    const sale = returnConfirmSale;
+    setReturnConfirmSale(null);
+    setReturnConfirmStep(1);
+    if (sale && onNavigateToReturns) {
+      onNavigateToReturns(sale.numeroVenta);
+    }
+  };
+
   useEffect(() => {
     refreshSales();
-  }, [refreshSales]);
+    refreshReturns();
+  }, [refreshSales, refreshReturns]);
 
   const filteredSales = useMemo(() => {
     return (sales || []).filter((s) => {
@@ -73,6 +126,51 @@ export const SalesView: React.FC = () => {
       return matchesStatus && matchesPayment && matchesSearch;
     });
   }, [sales, statusFilter, paymentFilter, searchQuery]);
+
+  // FASE -- Historial de Movimientos dentro del Detalle de Venta: una
+  // operación posterior solo pertenece a esta venta si existe una
+  // relación REAL con su ID (r.ventaId === selectedSaleDetail.id, el
+  // mismo campo que ReturnsController.gs ya escribe/lee en
+  // Devoluciones.venta_id -- nunca Kardex, que es un movimiento técnico
+  // de inventario, no la operación de negocio). La anulación no es una
+  // fila aparte -- ya vive en la propia venta (motivoAnulacion/anuladaPor/
+  // fechaAnulacion, ya expuestos por sales.list), se representa aquí como
+  // un movimiento más para que ambas operaciones compartan la misma
+  // lista/orden cronológico.
+  type SaleMovement =
+    | { tipo: 'DEVOLUCION'; fecha: string; devolucion: ReturnRecord }
+    | { tipo: 'ANULACION'; fecha: string };
+
+  const saleMovements = useMemo((): SaleMovement[] => {
+    if (!selectedSaleDetail) return [];
+
+    const relatedReturns: SaleMovement[] = (returns || [])
+      .filter((r) => r.ventaId === selectedSaleDetail.id)
+      .map((r) => ({ tipo: 'DEVOLUCION' as const, fecha: r.fecha, devolucion: r }));
+
+    const anulacion: SaleMovement[] =
+      selectedSaleDetail.estado === 'ANULADA'
+        ? [{ tipo: 'ANULACION' as const, fecha: selectedSaleDetail.fechaAnulacion || selectedSaleDetail.fecha }]
+        : [];
+
+    // Más reciente primero -- mismo criterio de orden que ya usa el
+    // historial principal (línea ~85 de arriba: enriched.sort descendente
+    // por fecha).
+    return [...relatedReturns, ...anulacion].sort((a, b) => String(b.fecha || '').localeCompare(String(a.fecha || '')));
+  }, [returns, selectedSaleDetail]);
+
+  // Autoritativo: suma real de Devoluciones.monto_devuelto (backend) --
+  // nunca inventado. "Total neto" es una resta simple de dos valores ya
+  // autoritativos (total original de la venta, ya registrado, menos lo
+  // realmente devuelto) -- el total histórico original de la venta
+  // (selectedSaleDetail.total) nunca se modifica.
+  const totalDevueltoSaleDetail = useMemo(
+    () =>
+      saleMovements
+        .filter((m): m is Extract<SaleMovement, { tipo: 'DEVOLUCION' }> => m.tipo === 'DEVOLUCION')
+        .reduce((sum, m) => sum + (m.devolucion.montoDevuelto || 0), 0),
+    [saleMovements]
+  );
 
   const handleExportCSV = () => {
     const rows = (filteredSales || []).map((s) => ({
@@ -308,6 +406,25 @@ export const SalesView: React.FC = () => {
                       >
                         <Printer className="w-4 h-4" />
                       </button>
+                      {/* MEJORA POS (devolución directa desde Historial):
+                          misma condición de elegibilidad que "Anular venta"
+                          (nunca sobre una venta ya ANULADA) + el permiso
+                          real que ya exige el módulo de Devoluciones
+                          (devoluciones.crear) -- si el flujo destino además
+                          rechaza la venta por otra regla (ya devuelta por
+                          completo, etc.), ese rechazo lo muestra el propio
+                          módulo de Devoluciones, sin duplicarlo aquí. */}
+                      {sale.estado !== 'ANULADA' && hasPermission('devoluciones.crear') && onNavigateToReturns && (
+                        <button
+                          type="button"
+                          onClick={() => handleStartReturn(sale)}
+                          className="p-1.5 rounded-lg text-[#756E65] hover:text-[#2F2A25] hover:bg-[#F6F1E8] transition"
+                          title="Procesar devolución"
+                          aria-label="Procesar devolución"
+                        >
+                          <RotateCcw className="w-4 h-4" />
+                        </button>
+                      )}
                       {sale.estado !== 'ANULADA' && hasPermission('ventas.anular') && (
                         <button
                           type="button"
@@ -430,6 +547,76 @@ export const SalesView: React.FC = () => {
                   <span>{formatCurrency(selectedSaleDetail.total, settings.simboloMoneda)}</span>
                 </div>
               </div>
+
+              {/* FASE -- Historial de Movimientos: operaciones REALES
+                  posteriores a esta venta (devoluciones + anulación),
+                  nunca Kardex ni datos inventados. Mismos estilos ya
+                  usados arriba en este mismo modal -- no se rediseña nada
+                  existente, solo se agrega esta sección debajo. */}
+              <div className="space-y-2">
+                <span className="font-bold text-[#2F2A25] uppercase text-[10px]">Movimientos de esta Venta:</span>
+
+                {saleMovements.length === 0 ? (
+                  <p className="text-[11px] text-[#756E65] italic px-1">Sin movimientos posteriores</p>
+                ) : (
+                  <div className="space-y-2">
+                    {totalDevueltoSaleDetail > 0 && (
+                      <div className="p-3 bg-[#F6F1E8] rounded-2xl space-y-1 font-mono text-[11px]">
+                        <div className="flex justify-between">
+                          <span>Total original:</span>
+                          <span>{formatCurrency(selectedSaleDetail.total, settings.simboloMoneda)}</span>
+                        </div>
+                        <div className="flex justify-between text-rose-700">
+                          <span>Total devuelto:</span>
+                          <span>-{formatCurrency(totalDevueltoSaleDetail, settings.simboloMoneda)}</span>
+                        </div>
+                        <div className="flex justify-between font-bold text-[#2F2A25] pt-1 border-t border-[#E4DDD2]">
+                          <span>Total neto:</span>
+                          <span>{formatCurrency(selectedSaleDetail.total - totalDevueltoSaleDetail, settings.simboloMoneda)}</span>
+                        </div>
+                      </div>
+                    )}
+
+                    {saleMovements.map((mov, idx) =>
+                      mov.tipo === 'DEVOLUCION' ? (
+                        <div key={`dev-${mov.devolucion.id}-${idx}`} className="p-2.5 bg-white border border-[#E4DDD2] rounded-xl space-y-1.5">
+                          <div className="flex items-center justify-between">
+                            <span className="font-bold text-[#2F2A25]">
+                              Devolución {mov.devolucion.numeroDevolucion || mov.devolucion.id}
+                            </span>
+                            <span className="font-bold text-rose-700">
+                              -{formatCurrency(mov.devolucion.montoDevuelto, settings.simboloMoneda)}
+                            </span>
+                          </div>
+                          <p className="text-[10px] text-[#756E65]">{formatDateTime(mov.devolucion.fecha)}</p>
+                          {(mov.devolucion.items || []).map((it, itIdx) => (
+                            <p key={itIdx} className="text-[10px] text-[#756E65]">
+                              • {it.nombreProducto} (Talla {it.talla} / {it.color}) x {it.cantidad}
+                            </p>
+                          ))}
+                          <p className="text-[10px] text-[#756E65]">Motivo: {mov.devolucion.motivo}</p>
+                          <p className="text-[10px] text-[#756E65]">Reembolso: {mov.devolucion.tipoReembolso}</p>
+                          {mov.devolucion.usuarioNombre && (
+                            <p className="text-[10px] text-[#756E65]">Registrado por: {mov.devolucion.usuarioNombre}</p>
+                          )}
+                        </div>
+                      ) : (
+                        <div key={`anulacion-${idx}`} className="p-2.5 bg-rose-50 border border-rose-200 rounded-xl text-rose-800 space-y-1">
+                          <div className="flex items-center justify-between">
+                            <span className="font-bold">Anulación de Venta</span>
+                            <span className="font-bold">-{formatCurrency(selectedSaleDetail.total, settings.simboloMoneda)}</span>
+                          </div>
+                          <p className="text-[10px]">{formatDateTime(mov.fecha)}</p>
+                          <p className="text-[10px]">Motivo: {selectedSaleDetail.motivoAnulacion}</p>
+                          {selectedSaleDetail.anuladaPor && (
+                            <p className="text-[10px]">Por: {selectedSaleDetail.anuladaPor}</p>
+                          )}
+                        </div>
+                      )
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
 
             <div className="flex gap-2 pt-2">
@@ -499,6 +686,103 @@ export const SalesView: React.FC = () => {
                 className="flex-1 py-2 rounded-xl bg-rose-700 hover:bg-rose-800 text-xs font-bold text-white transition disabled:bg-zinc-300"
               >
                 {loadingVoid ? 'Anulando...' : 'Confirmar Anulación'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MEJORA POS -- Devolución directa desde Historial: Confirmación 1
+          de 2. Real, independiente, con su propio Cancelar -- nunca un
+          solo diálogo con dos preguntas ni una confirmación únicamente
+          visual. Cancelar no hace nada; Continuar muestra la Confirmación
+          2 (nunca navega ni procesa nada todavía). */}
+      {returnConfirmSale && returnConfirmStep === 1 && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-xs z-50 flex items-center justify-center p-4">
+          <div className="bg-[#FAF8F4] border border-[#E4DDD2] rounded-3xl max-w-md w-full p-5 space-y-4 shadow-2xl">
+            <div className="flex items-center gap-2.5 border-b border-[#E4DDD2] pb-3">
+              <div className="w-9 h-9 rounded-xl bg-[#F6F1E8] text-[#756E65] flex items-center justify-center shrink-0">
+                <RotateCcw className="w-5 h-5" />
+              </div>
+              <h3 className="text-sm font-bold text-[#2F2A25]">
+                ¿Deseas iniciar una devolución para la venta {returnConfirmSale.numeroVenta}?
+              </h3>
+            </div>
+
+            <div className="text-xs text-[#756E65] space-y-1">
+              <p>
+                Cliente: <span className="font-bold text-[#2F2A25]">{returnConfirmSale.clienteNombre}</span>
+              </p>
+              <p>
+                Total de venta:{' '}
+                <span className="font-bold text-[#2F2A25]">
+                  {formatCurrency(returnConfirmSale.total, settings.simboloMoneda)}
+                </span>
+              </p>
+              <p className="pt-1">La venta será cargada en el módulo de Devoluciones.</p>
+            </div>
+
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={handleCancelReturnConfirm}
+                className="flex-1 py-2 rounded-xl bg-white border border-[#E4DDD2] text-xs font-semibold text-[#756E65]"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={handleContinueReturnConfirm}
+                className="flex-1 py-2 rounded-xl bg-[#2F2A25] hover:bg-[#403932] text-xs font-bold text-white transition"
+              >
+                Continuar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MEJORA POS -- Devolución directa desde Historial: Confirmación 2
+          de 2, independiente de la primera. Cancelar no navega ni
+          modifica nada (la venta ya no se recuerda como confirmada);
+          "Sí, continuar" es el ÚNICO punto que llama a onNavigateToReturns
+          -- nunca se procesa ninguna devolución aquí, solo se entrega el
+          número de venta al módulo real de Devoluciones. */}
+      {returnConfirmSale && returnConfirmStep === 2 && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-xs z-50 flex items-center justify-center p-4">
+          <div className="bg-[#FAF8F4] border border-[#E4DDD2] rounded-3xl max-w-md w-full p-5 space-y-4 shadow-2xl">
+            <div className="flex items-center gap-2.5 border-b border-[#E4DDD2] pb-3">
+              <div className="w-9 h-9 rounded-xl bg-amber-100 text-amber-700 flex items-center justify-center shrink-0">
+                <AlertCircle className="w-5 h-5" />
+              </div>
+              <h3 className="text-sm font-bold text-[#2F2A25] uppercase tracking-wide">
+                ⚠️ Confirmación de Devolución
+              </h3>
+            </div>
+
+            <div className="text-xs text-[#756E65] space-y-2">
+              <p>
+                Estás a punto de iniciar el proceso de devolución de la venta{' '}
+                <span className="font-bold text-[#2F2A25]">{returnConfirmSale.numeroVenta}</span>.
+              </p>
+              <p>Verifica que la venta y el cliente sean correctos antes de continuar.</p>
+              <p className="font-semibold text-[#2F2A25]">¿Deseas continuar?</p>
+            </div>
+
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={handleCancelReturnConfirm}
+                className="flex-1 py-2 rounded-xl bg-white border border-[#E4DDD2] text-xs font-semibold text-[#756E65]"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmReturn}
+                className="flex-1 py-2 rounded-xl bg-[#2F2A25] hover:bg-[#403932] text-xs font-bold text-white transition"
+              >
+                Sí, continuar
               </button>
             </div>
           </div>

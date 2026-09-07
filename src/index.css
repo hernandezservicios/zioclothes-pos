@@ -5,6 +5,35 @@
   margin: 0mm;
 }
 
+/* AJUSTE VISUAL -- ocultar el scrollbar nativo, ÚNICAMENTE en los dos
+   paneles con scroll real y visible de la app: el <nav
+   className="... overflow-y-auto"> del Sidebar
+   (src/components/layout/Sidebar.tsx) y el <main className="...
+   overflow-y-auto"> de contenido principal (src/App.tsx). Ambos ya tenían
+   antes un scrollbar nativo grueso y visible -- este bloque reemplaza al
+   anterior ajuste de "scrollbar delgado" (`.sidebar-nav-scroll`) porque
+   ahora el scrollbar se oculta por completo y se sustituye por flechas
+   flotantes (ver ScrollEdgeArrows.tsx + useScrollEdgeIndicators.ts), no
+   solo se afina visualmente.
+
+   IMPORTANTE: esto NUNCA quita el scroll real -- `overflow-y: auto` (o el
+   que ya tuviera cada contenedor) permanece intacto en el propio
+   elemento; solo se oculta la representación visual nativa del
+   scrollbar, con rueda del mouse/trackpad/touch/teclado funcionando
+   exactamente igual que antes. `.no-native-scrollbar` es una clase
+   compartida por ambos paneles (misma necesidad exacta en los dos, sin
+   duplicar la regla) -- NINGÚN otro scrollbar de la aplicación la usa, así
+   que ninguno más se ve afectado (deliberadamente no es una regla global
+   `* { scrollbar-width: none }`). */
+.no-native-scrollbar {
+  scrollbar-width: none; /* Firefox */
+}
+
+.no-native-scrollbar::-webkit-scrollbar {
+  width: 0;
+  height: 0; /* Chrome/Edge/Safari (WebKit/Blink) */
+}
+
 @media print {
   /* FIX (impresión de recibos/facturas): las reglas de abajo ya ocultaban
      el Navbar/Sidebar (nav, aside, #sidebar, #navbar) y reseteaban el

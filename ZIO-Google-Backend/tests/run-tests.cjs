@@ -7237,6 +7237,483 @@ test('SALE_CREDIT_DAYS_NEVER_CHANGES_CREDIT_LIMIT_OR_AVAILABLE_CREDIT_CALCULATIO
   assertEqual(Number(after.limite_credito), limiteAntes, 'el límite de crédito del cliente no debe cambiar por el plazo elegido en una venta');
 });
 
+/* ==================================================================
+   DEVOLUCIÓN PARCIAL/MÚLTIPLE DE PRODUCTOS DE UNA MISMA FACTURA
+
+   Regresión: una venta de RD$640 con DOS prendas de RD$320 c/u, al
+   devolver solo la primera (RD$320), el backend marcaba la venta
+   DEVUELTA_TOTAL en vez de DEVUELTA_PARCIAL. Causa raíz (ver
+   ReturnsController.gs -- comentario "FIX" en handleCreateReturn): el
+   cálculo anterior comparaba MONTOS acumulados contra sale.total, y
+   `DbHelper.findRows('Devoluciones', ...)` ya veía la fila recién
+   insertada (DbHelper lee el Sheet en vivo, sin caché) -- el código sumaba
+   esa fila Y ADEMÁS `computed.totalRefund` por separado, contando el
+   monto de la propia devolución dos veces. Fixture dedicada
+   (PRD-RET1/2/3, VAR-RET1/2/3) para no interferir con el stock/crédito
+   acumulado que usan las secciones anteriores.
+   ================================================================== */
+
+runInContext(`
+  DbHelper.insertRow('Productos', {
+    id: 'PRD-RET1', sku: 'SKU-RET1', codigo_barras: '7460000000010', nombre: 'Vestido Casual Test',
+    descripcion: '', categoria_id: 'CAT-T01', categoria_nombre: 'Categoria Test', marca: 'ZIO',
+    proveedor_id: '', costo: 150, precio: 320, precio_especial: '', impuesto: 0,
+    descuento_maximo: 20, stock_minimo: 2, estado: 'ACTIVO', imagen_url: '', creado_en: getNowFormatted()
+  });
+  DbHelper.insertRow('Variantes', {
+    id: 'VAR-RET1', producto_id: 'PRD-RET1', sku: 'SKU-RET1-M', codigo_barras: '7460000000011',
+    color: 'Blanco Perla', talla: 'M', costo: 150, precio: 320, stock: 20, estado: 'ACTIVO'
+  });
+  // Misma nombre/precio que PRD-RET1/VAR-RET1 a propósito (TEST 21): dos
+  // líneas de una factura pueden llamarse igual y distinguirse SOLO por
+  // varianteId, nunca por nombre.
+  DbHelper.insertRow('Productos', {
+    id: 'PRD-RET2', sku: 'SKU-RET2', codigo_barras: '7460000000012', nombre: 'Vestido Casual Test',
+    descripcion: '', categoria_id: 'CAT-T01', categoria_nombre: 'Categoria Test', marca: 'ZIO',
+    proveedor_id: '', costo: 150, precio: 320, precio_especial: '', impuesto: 0,
+    descuento_maximo: 20, stock_minimo: 2, estado: 'ACTIVO', imagen_url: '', creado_en: getNowFormatted()
+  });
+  DbHelper.insertRow('Variantes', {
+    id: 'VAR-RET2', producto_id: 'PRD-RET2', sku: 'SKU-RET2-36', codigo_barras: '7460000000013',
+    color: 'Blanco Perla', talla: '36', costo: 150, precio: 320, stock: 20, estado: 'ACTIVO'
+  });
+  // Precio bajo, cantidades múltiples (TEST 7/8/9/10 -- factura de 5 uds).
+  DbHelper.insertRow('Productos', {
+    id: 'PRD-RET3', sku: 'SKU-RET3', codigo_barras: '7460000000014', nombre: 'Camisa Básica Test',
+    descripcion: '', categoria_id: 'CAT-T01', categoria_nombre: 'Categoria Test', marca: 'ZIO',
+    proveedor_id: '', costo: 40, precio: 100, precio_especial: '', impuesto: 0,
+    descuento_maximo: 20, stock_minimo: 2, estado: 'ACTIVO', imagen_url: '', creado_en: getNowFormatted()
+  });
+  DbHelper.insertRow('Variantes', {
+    id: 'VAR-RET3', producto_id: 'PRD-RET3', sku: 'SKU-RET3-U', codigo_barras: '7460000000015',
+    color: 'Azul', talla: 'U', costo: 40, precio: 100, stock: 50, estado: 'ACTIVO'
+  });
+  // Con descuento por línea + ITBIS (TEST 22) -- dedicada en vez de
+  // reutilizar VAR-T01/PRD-T01: para cuando esta prueba corre, algunas
+  // pruebas de restauración de backup ya reemplazaron el contenido
+  // completo del Spreadsheet simulado (staging/swap real de
+  // RestoreController.gs) y VAR-T01 ya no existe -- exactamente el mismo
+  // motivo por el que TODA esta sección usa fixtures propias (PRD-RET1/2/3)
+  // en vez de las históricas.
+  DbHelper.insertRow('Productos', {
+    id: 'PRD-RET4', sku: 'SKU-RET4', codigo_barras: '7460000000016', nombre: 'Abrigo Premium Test',
+    descripcion: '', categoria_id: 'CAT-T01', categoria_nombre: 'Categoria Test', marca: 'ZIO',
+    proveedor_id: '', costo: 500, precio: 1000, precio_especial: '', impuesto: 18,
+    descuento_maximo: 20, stock_minimo: 2, estado: 'ACTIVO', imagen_url: '', creado_en: getNowFormatted()
+  });
+  DbHelper.insertRow('Variantes', {
+    id: 'VAR-RET4', producto_id: 'PRD-RET4', sku: 'SKU-RET4-U', codigo_barras: '7460000000017',
+    color: 'Negro', talla: 'U', costo: 500, precio: 1000, stock: 10, estado: 'ACTIVO'
+  });
+  // Par dedicado para el escenario secuencial A-luego-B (auditoría final):
+  // aislado de VAR-RET1/VAR-RET2 (compartidas por varias pruebas de esta
+  // sección) para que sus aserciones de stock puedan compararse contra un
+  // valor absoluto simple, sin depender de rastrear el efecto acumulado de
+  // otras pruebas sobre la misma variante.
+  DbHelper.insertRow('Productos', {
+    id: 'PRD-SEQA', sku: 'SKU-SEQA', codigo_barras: '7460000000018', nombre: 'Vestido Secuencial Test',
+    descripcion: '', categoria_id: 'CAT-T01', categoria_nombre: 'Categoria Test', marca: 'ZIO',
+    proveedor_id: '', costo: 150, precio: 320, precio_especial: '', impuesto: 0,
+    descuento_maximo: 20, stock_minimo: 2, estado: 'ACTIVO', imagen_url: '', creado_en: getNowFormatted()
+  });
+  DbHelper.insertRow('Variantes', {
+    id: 'VAR-SEQA', producto_id: 'PRD-SEQA', sku: 'SKU-SEQA-M', codigo_barras: '7460000000019',
+    color: 'Blanco Perla', talla: 'M', costo: 150, precio: 320, stock: 20, estado: 'ACTIVO'
+  });
+  DbHelper.insertRow('Productos', {
+    id: 'PRD-SEQB', sku: 'SKU-SEQB', codigo_barras: '7460000000020', nombre: 'Vestido Secuencial Test',
+    descripcion: '', categoria_id: 'CAT-T01', categoria_nombre: 'Categoria Test', marca: 'ZIO',
+    proveedor_id: '', costo: 150, precio: 320, precio_especial: '', impuesto: 0,
+    descuento_maximo: 20, stock_minimo: 2, estado: 'ACTIVO', imagen_url: '', creado_en: getNowFormatted()
+  });
+  DbHelper.insertRow('Variantes', {
+    id: 'VAR-SEQB', producto_id: 'PRD-SEQB', sku: 'SKU-SEQB-36', codigo_barras: '7460000000021',
+    color: 'Blanco Perla', talla: '36', costo: 150, precio: 320, stock: 20, estado: 'ACTIVO'
+  });
+`);
+
+function buildTwoLineSaleData(overrides) {
+  // Reproduce EXACTAMENTE el ejemplo del reporte: RD$640 = 2 prendas de
+  // RD$320, sin descuento ni ITBIS (para aislar el bug de doble conteo de
+  // cualquier prorrateo de descuento/impuesto).
+  const base = {
+    clienteId: '', clienteNombre: 'Consumidor Final', cajaSesionId: '',
+    subtotal: 640, descuentoTotal: 0, impuestoTotal: 0, total: 640, costoTotal: 300,
+    metodoPago: 'EFECTIVO', pagos: [{ metodo: 'EFECTIVO', monto: 640 }],
+    esCredito: false, aplicarImpuesto: false,
+    items: [
+      {
+        productoId: 'PRD-RET1', varianteId: 'VAR-RET1', nombreProducto: 'Vestido Casual Test', sku: 'SKU-RET1-M',
+        talla: 'M', color: 'Blanco Perla', cantidad: 1, costoUnitario: 150, precioUnitario: 320,
+        descuentoPorcentaje: 0, descuentoMonto: 0, subtotal: 320, impuestoMonto: 0, total: 320
+      },
+      {
+        productoId: 'PRD-RET2', varianteId: 'VAR-RET2', nombreProducto: 'Vestido Casual Test', sku: 'SKU-RET2-36',
+        talla: '36', color: 'Blanco Perla', cantidad: 1, costoUnitario: 150, precioUnitario: 320,
+        descuentoPorcentaje: 0, descuentoMonto: 0, subtotal: 320, impuestoMonto: 0, total: 320
+      }
+    ]
+  };
+  return Object.assign({}, base, overrides || {});
+}
+
+function buildQtyFiveSaleData(overrides) {
+  // 5 unidades de una sola línea (VAR-RET3, RD$100 c/u) -> total RD$500,
+  // sin descuento ni ITBIS.
+  const base = {
+    clienteId: '', clienteNombre: 'Consumidor Final', cajaSesionId: '',
+    subtotal: 500, descuentoTotal: 0, impuestoTotal: 0, total: 500, costoTotal: 200,
+    metodoPago: 'EFECTIVO', pagos: [{ metodo: 'EFECTIVO', monto: 500 }],
+    esCredito: false, aplicarImpuesto: false,
+    items: [{
+      productoId: 'PRD-RET3', varianteId: 'VAR-RET3', nombreProducto: 'Camisa Básica Test', sku: 'SKU-RET3-U',
+      talla: 'U', color: 'Azul', cantidad: 5, costoUnitario: 40, precioUnitario: 100,
+      descuentoPorcentaje: 0, descuentoMonto: 0, subtotal: 500, impuestoMonto: 0, total: 500
+    }]
+  };
+  return Object.assign({}, base, overrides || {});
+}
+
+// TEST 5 -- regresión exacta del reporte.
+test('RETURN_PARTIAL_ONE_OF_TWO_LINES_MARKS_VENTA_DEVUELTA_PARCIAL_NOT_TOTAL', () => {
+  const saleRes = doPostRaw('sales.create', buildTwoLineSaleData(), adminToken);
+  assert(saleRes.success === true, JSON.stringify(saleRes));
+
+  const returnRes = doPostRaw('returns.create', {
+    ventaId: saleRes.saleId, motivo: 'Solo la primera prenda', tipoReembolso: 'EFECTIVO',
+    items: [{ varianteId: 'VAR-RET1', cantidad: 1 }]
+  }, adminToken);
+  assert(returnRes.success === true, JSON.stringify(returnRes));
+  assertEqual(returnRes.montoDevuelto, 320, 'el monto devuelto debe corresponder únicamente a la línea devuelta');
+
+  const venta = runInContext(`DbHelper.findById('Ventas', '${saleRes.saleId}')`);
+  assertEqual(venta.estado, 'DEVUELTA_PARCIAL', 'devolver solo 1 de 2 líneas debe dejar la venta PARCIAL, nunca TOTAL');
+
+  // VAR-RET2 no se devolvió en esta prueba: la propia venta le descontó 1
+  // unidad (era la primera prueba en tocar esta variante, stock inicial de
+  // fixture = 20) y esa unidad nunca reingresa -- se queda en 19, no en el
+  // valor original de fixture (20), que sería el error real que esta
+  // aserción debe detectar si el backend reingresara algo que no debía.
+  const variant2 = runInContext("DbHelper.findById('Variantes', 'VAR-RET2')");
+  assertEqual(Number(variant2.stock), 19, 'la prenda NO devuelta no debe reingresar al inventario (se queda en 19: 20 de fixture - 1 vendida en esta prueba)');
+});
+
+// TEST 6
+test('RETURN_BOTH_LINES_OF_TWO_LINE_INVOICE_MARKS_VENTA_DEVUELTA_TOTAL', () => {
+  const saleRes = doPostRaw('sales.create', buildTwoLineSaleData(), adminToken);
+  assert(saleRes.success === true, JSON.stringify(saleRes));
+
+  const returnRes = doPostRaw('returns.create', {
+    ventaId: saleRes.saleId, motivo: 'Devolución completa', tipoReembolso: 'EFECTIVO',
+    items: [{ varianteId: 'VAR-RET1', cantidad: 1 }, { varianteId: 'VAR-RET2', cantidad: 1 }]
+  }, adminToken);
+  assert(returnRes.success === true, JSON.stringify(returnRes));
+  assertEqual(returnRes.montoDevuelto, 640, 'el monto devuelto debe ser la suma de ambas líneas');
+
+  const venta = runInContext(`DbHelper.findById('Ventas', '${saleRes.saleId}')`);
+  assertEqual(venta.estado, 'DEVUELTA_TOTAL', 'devolver ambas líneas debe dejar la venta TOTAL');
+});
+
+// Escenarios A y B de la auditoría final -- exactamente dos LLAMADAS
+// SEPARADAS de returns.create sobre la MISMA venta a lo largo del tiempo
+// (no una sola petición con ambas líneas, ya cubierta arriba): primero
+// solo el producto 1, después -- por separado -- el producto 2.
+test('RETURN_SEQUENTIAL_A_THEN_B_ON_SAME_SALE_TRANSITIONS_PARCIAL_TO_TOTAL_WITH_CORRECT_RESTOCK', () => {
+  // Fixture DEDICADA (VAR-SEQA/VAR-SEQB, nunca tocada por ninguna otra
+  // prueba) -- así las aserciones de stock pueden ser absolutas y no
+  // dependen de rastrear el efecto acumulado de otras pruebas sobre
+  // VAR-RET1/VAR-RET2, compartidas por el resto de esta sección.
+  const saleRes = doPostRaw('sales.create', {
+    clienteId: '', clienteNombre: 'Consumidor Final', cajaSesionId: '',
+    subtotal: 640, descuentoTotal: 0, impuestoTotal: 0, total: 640, costoTotal: 300,
+    metodoPago: 'EFECTIVO', pagos: [{ metodo: 'EFECTIVO', monto: 640 }],
+    esCredito: false, aplicarImpuesto: false,
+    items: [
+      {
+        productoId: 'PRD-SEQA', varianteId: 'VAR-SEQA', nombreProducto: 'Vestido Secuencial Test', sku: 'SKU-SEQA-M',
+        talla: 'M', color: 'Blanco Perla', cantidad: 1, costoUnitario: 150, precioUnitario: 320,
+        descuentoPorcentaje: 0, descuentoMonto: 0, subtotal: 320, impuestoMonto: 0, total: 320
+      },
+      {
+        productoId: 'PRD-SEQB', varianteId: 'VAR-SEQB', nombreProducto: 'Vestido Secuencial Test', sku: 'SKU-SEQB-36',
+        talla: '36', color: 'Blanco Perla', cantidad: 1, costoUnitario: 150, precioUnitario: 320,
+        descuentoPorcentaje: 0, descuentoMonto: 0, subtotal: 320, impuestoMonto: 0, total: 320
+      }
+    ]
+  }, adminToken);
+  assert(saleRes.success === true, JSON.stringify(saleRes));
+
+  // Fixture recién creada, exclusiva de esta prueba -> stock inicial real
+  // conocido (20) menos la unidad que la propia venta acaba de descontar.
+  assertEqual(Number(runInContext("DbHelper.findById('Variantes', 'VAR-SEQA')").stock), 19);
+  assertEqual(Number(runInContext("DbHelper.findById('Variantes', 'VAR-SEQB')").stock), 19);
+
+  // Escenario A: solo el producto 1.
+  const returnA = doPostRaw('returns.create', {
+    ventaId: saleRes.saleId, motivo: 'Escenario A -- solo producto 1', tipoReembolso: 'EFECTIVO',
+    items: [{ varianteId: 'VAR-SEQA', cantidad: 1 }]
+  }, adminToken);
+  assert(returnA.success === true, JSON.stringify(returnA));
+  assertEqual(returnA.montoDevuelto, 320, 'Escenario A: el monto devuelto debe ser RD$320, nunca los RD$640 completos');
+
+  let venta = runInContext(`DbHelper.findById('Ventas', '${saleRes.saleId}')`);
+  assertEqual(venta.estado, 'DEVUELTA_PARCIAL', 'Escenario A: devolver solo el producto 1 debe dejar la venta PARCIAL');
+
+  assertEqual(Number(runInContext("DbHelper.findById('Variantes', 'VAR-SEQA')").stock), 20, 'Escenario A: el producto 1 SÍ debe reingresar (stock vuelve a 20)');
+  assertEqual(Number(runInContext("DbHelper.findById('Variantes', 'VAR-SEQB')").stock), 19, 'Escenario A: el producto 2 (pendiente, no devuelto) NO debe reingresar (sigue en 19)');
+
+  // Escenario B: por separado, más tarde, el producto 2.
+  const returnB = doPostRaw('returns.create', {
+    ventaId: saleRes.saleId, motivo: 'Escenario B -- ahora el producto 2', tipoReembolso: 'EFECTIVO',
+    items: [{ varianteId: 'VAR-SEQB', cantidad: 1 }]
+  }, adminToken);
+  assert(returnB.success === true, JSON.stringify(returnB));
+  assertEqual(returnB.montoDevuelto, 320, 'Escenario B: el monto de ESTA devolución es RD$320 (solo el producto 2), no acumulado');
+
+  venta = runInContext(`DbHelper.findById('Ventas', '${saleRes.saleId}')`);
+  assertEqual(venta.estado, 'DEVUELTA_TOTAL', 'Escenario B: con ambos productos ya devueltos, la venta debe quedar TOTAL');
+
+  assertEqual(Number(runInContext("DbHelper.findById('Variantes', 'VAR-SEQB')").stock), 20, 'Escenario B: el producto 2 ahora también debe reingresar (stock vuelve a 20)');
+});
+
+// TEST 7/8 -- cantidad 5, devolución parcial dentro de una sola línea.
+test('RETURN_PARTIAL_QUANTITY_WITHIN_A_SINGLE_LINE_OF_FIVE_UNITS', () => {
+  const saleRes = doPostRaw('sales.create', buildQtyFiveSaleData(), adminToken);
+  assert(saleRes.success === true, JSON.stringify(saleRes));
+
+  const returnRes = doPostRaw('returns.create', {
+    ventaId: saleRes.saleId, motivo: 'Devuelve 2 de 5', tipoReembolso: 'EFECTIVO',
+    items: [{ varianteId: 'VAR-RET3', cantidad: 2 }]
+  }, adminToken);
+  assert(returnRes.success === true, JSON.stringify(returnRes));
+  assertEqual(returnRes.montoDevuelto, 200, '2 unidades de RD$100 = RD$200');
+
+  const venta = runInContext(`DbHelper.findById('Ventas', '${saleRes.saleId}')`);
+  assertEqual(venta.estado, 'DEVUELTA_PARCIAL', '2 de 5 unidades devueltas debe ser PARCIAL');
+
+  // TEST 8 -- después de devolver 2 de 5, solo quedan 3 disponibles.
+  const excede = doPostRaw('returns.create', {
+    ventaId: saleRes.saleId, motivo: 'Intenta devolver 4 más (solo quedan 3)', tipoReembolso: 'EFECTIVO',
+    items: [{ varianteId: 'VAR-RET3', cantidad: 4 }]
+  }, adminToken);
+  assert(excede.success === false, 'no deben poder devolverse 4 más cuando solo quedan 3 disponibles de 5');
+  assert(String(excede.error || '').indexOf('DEVOLUCION_EXCEDE_CANTIDAD') === 0, excede.error);
+
+  const permiteTres = doPostRaw('returns.create', {
+    ventaId: saleRes.saleId, motivo: 'Devuelve las 3 restantes', tipoReembolso: 'EFECTIVO',
+    items: [{ varianteId: 'VAR-RET3', cantidad: 3 }]
+  }, adminToken);
+  assert(permiteTres.success === true, 'devolver exactamente las 3 unidades restantes debe aceptarse: ' + JSON.stringify(permiteTres));
+});
+
+// TEST 9 -- nunca permitir devolver más de lo pendiente (backend, no solo frontend).
+test('RETURN_BACKEND_REVALIDATES_PENDING_QUANTITY_EVEN_IF_FRONTEND_WOULD_HAVE_ALLOWED_IT', () => {
+  const saleRes = doPostRaw('sales.create', buildQtyFiveSaleData(), adminToken);
+  assert(saleRes.success === true, JSON.stringify(saleRes));
+
+  const rechazo = doPostRaw('returns.create', {
+    ventaId: saleRes.saleId, motivo: 'Intenta devolver 6 de 5 vendidas', tipoReembolso: 'EFECTIVO',
+    items: [{ varianteId: 'VAR-RET3', cantidad: 6 }]
+  }, adminToken);
+  assert(rechazo.success === false, 'nunca debe permitirse devolver más unidades de las vendidas');
+  assert(String(rechazo.error || '').indexOf('DEVOLUCION_EXCEDE_CANTIDAD') === 0, rechazo.error);
+});
+
+// TEST 10 -- ejemplo exacto del reporte: 2 + 2 + 1 sobre una línea de 5.
+test('RETURN_REPEATED_PARTIALS_UNTIL_COMPLETE_TRANSITIONS_FROM_PARCIAL_TO_TOTAL', () => {
+  const saleRes = doPostRaw('sales.create', buildQtyFiveSaleData(), adminToken);
+  assert(saleRes.success === true, JSON.stringify(saleRes));
+
+  const r1 = doPostRaw('returns.create', {
+    ventaId: saleRes.saleId, motivo: 'Primera devolución (2)', tipoReembolso: 'EFECTIVO',
+    items: [{ varianteId: 'VAR-RET3', cantidad: 2 }]
+  }, adminToken);
+  assert(r1.success === true, JSON.stringify(r1));
+  assertEqual(runInContext(`DbHelper.findById('Ventas', '${saleRes.saleId}')`).estado, 'DEVUELTA_PARCIAL');
+
+  const r2 = doPostRaw('returns.create', {
+    ventaId: saleRes.saleId, motivo: 'Segunda devolución (2 más = 4/5)', tipoReembolso: 'EFECTIVO',
+    items: [{ varianteId: 'VAR-RET3', cantidad: 2 }]
+  }, adminToken);
+  assert(r2.success === true, JSON.stringify(r2));
+  assertEqual(runInContext(`DbHelper.findById('Ventas', '${saleRes.saleId}')`).estado, 'DEVUELTA_PARCIAL', 'con 4/5 devueltas sigue PARCIAL');
+
+  const r3 = doPostRaw('returns.create', {
+    ventaId: saleRes.saleId, motivo: 'Tercera devolución (1 más = 5/5)', tipoReembolso: 'EFECTIVO',
+    items: [{ varianteId: 'VAR-RET3', cantidad: 1 }]
+  }, adminToken);
+  assert(r3.success === true, JSON.stringify(r3));
+  assertEqual(runInContext(`DbHelper.findById('Ventas', '${saleRes.saleId}')`).estado, 'DEVUELTA_TOTAL', 'con 5/5 devueltas debe pasar a TOTAL');
+
+  // TEST 20 -- una venta ya DEVUELTA_TOTAL no permite devolver más.
+  const masAlla = doPostRaw('returns.create', {
+    ventaId: saleRes.saleId, motivo: 'Intenta devolver 1 más sobre una venta ya completa', tipoReembolso: 'EFECTIVO',
+    items: [{ varianteId: 'VAR-RET3', cantidad: 1 }]
+  }, adminToken);
+  assert(masAlla.success === false, 'una venta ya DEVUELTA_TOTAL no debe admitir devoluciones adicionales');
+  assert(String(masAlla.error || '').indexOf('DEVOLUCION_EXCEDE_CANTIDAD') === 0, masAlla.error);
+});
+
+// TEST 13 -- crédito parcial: reduce SOLO el monto correspondiente.
+test('RETURN_PARTIAL_ON_CREDIT_SALE_REDUCES_ONLY_THE_CORRESPONDING_AMOUNT', () => {
+  const saleRes = doPostRaw('sales.create', buildTwoLineSaleData({
+    clienteId: 'CLI-T03', clienteNombre: 'Cliente Plazo', metodoPago: 'CREDITO',
+    pagos: [{ metodo: 'CREDITO', monto: 640 }], esCredito: true, montoFinanciado: 640
+  }), adminToken);
+  assert(saleRes.success === true, JSON.stringify(saleRes));
+  assert(!!saleRes.cuentaCobrarId, 'la venta a crédito debe generar una cuenta por cobrar real');
+
+  const creditoAntes = runInContext(`DbHelper.findById('Creditos', '${saleRes.cuentaCobrarId}')`);
+  assertEqual(Number(creditoAntes.saldo_pendiente), 640);
+
+  const returnRes = doPostRaw('returns.create', {
+    ventaId: saleRes.saleId, motivo: 'Devuelve solo la primera prenda (a crédito)', tipoReembolso: 'EFECTIVO',
+    items: [{ varianteId: 'VAR-RET1', cantidad: 1 }]
+  }, adminToken);
+  assert(returnRes.success === true, JSON.stringify(returnRes));
+
+  const creditoDespues = runInContext(`DbHelper.findById('Creditos', '${saleRes.cuentaCobrarId}')`);
+  assertEqual(Number(creditoDespues.saldo_pendiente), 320, 'el saldo pendiente debe reducirse SOLO por el monto devuelto (320), no por los 640 completos');
+  assertEqual(creditoDespues.estado, 'PENDIENTE', 'con 320 todavía pendientes, la cuenta no debe marcarse PAGADA');
+});
+
+// TEST 14 -- vale a tienda parcial genera únicamente el monto devuelto.
+test('RETURN_PARTIAL_VALE_TIENDA_ISSUES_ONLY_THE_RETURNED_AMOUNT', () => {
+  const saleRes = doPostRaw('sales.create', buildTwoLineSaleData({ clienteId: 'CLI-T01', clienteNombre: 'Cliente Test' }), adminToken);
+  assert(saleRes.success === true, JSON.stringify(saleRes));
+
+  const returnRes = doPostRaw('returns.create', {
+    ventaId: saleRes.saleId, motivo: 'Vale parcial', tipoReembolso: 'VALE_TIENDA',
+    items: [{ varianteId: 'VAR-RET1', cantidad: 1 }]
+  }, adminToken);
+  assert(returnRes.success === true, JSON.stringify(returnRes));
+  assertEqual(returnRes.creditoFavorEmitido.montoOriginal, 320, 'el vale debe emitirse SOLO por el monto de la línea devuelta (320), nunca los 640 completos');
+});
+
+// TEST 15 -- nota de crédito parcial genera únicamente el monto devuelto.
+test('RETURN_PARTIAL_NOTA_CREDITO_ISSUES_ONLY_THE_RETURNED_AMOUNT', () => {
+  const saleRes = doPostRaw('sales.create', buildTwoLineSaleData({ clienteId: 'CLI-T01', clienteNombre: 'Cliente Test' }), adminToken);
+  assert(saleRes.success === true, JSON.stringify(saleRes));
+
+  const returnRes = doPostRaw('returns.create', {
+    ventaId: saleRes.saleId, motivo: 'Nota parcial', tipoReembolso: 'NOTA_CREDITO',
+    items: [{ varianteId: 'VAR-RET2', cantidad: 1 }]
+  }, adminToken);
+  assert(returnRes.success === true, JSON.stringify(returnRes));
+  assertEqual(returnRes.creditoFavorEmitido.montoOriginal, 320, 'la nota de crédito debe emitirse SOLO por el monto de la línea devuelta (320)');
+});
+
+// Escenario D de la auditoría final -- CREDITO_CUENTA (valor histórico,
+// tratado como NOTA_CREDITO -- ver RETURN_WITH_LEGACY_CREDITO_CUENTA_
+// VALUE_STILL_ISSUES_NOTA_CREDITO más arriba) probado también en una
+// devolución PARCIAL, no solo en una devolución completa.
+test('RETURN_PARTIAL_CREDITO_CUENTA_LEGACY_VALUE_ISSUES_ONLY_THE_RETURNED_AMOUNT', () => {
+  const saleRes = doPostRaw('sales.create', buildTwoLineSaleData({ clienteId: 'CLI-T01', clienteNombre: 'Cliente Test' }), adminToken);
+  assert(saleRes.success === true, JSON.stringify(saleRes));
+
+  const returnRes = doPostRaw('returns.create', {
+    ventaId: saleRes.saleId, motivo: 'Crédito a cuenta parcial (valor histórico)', tipoReembolso: 'CREDITO_CUENTA',
+    items: [{ varianteId: 'VAR-RET1', cantidad: 1 }]
+  }, adminToken);
+  assert(returnRes.success === true, JSON.stringify(returnRes));
+  assertEqual(returnRes.creditoFavorEmitido.tipo, 'NOTA_CREDITO', 'CREDITO_CUENTA (histórico) debe tratarse como NOTA_CREDITO también en una devolución parcial');
+  assertEqual(returnRes.creditoFavorEmitido.montoOriginal, 320, 'CREDITO_CUENTA parcial debe emitir SOLO el monto de la línea devuelta (320), nunca los 640 completos');
+
+  const venta = runInContext(`DbHelper.findById('Ventas', '${saleRes.saleId}')`);
+  assertEqual(venta.estado, 'DEVUELTA_PARCIAL', 'con solo 1 de 2 líneas devuelta, la venta debe quedar PARCIAL sin importar la forma de reembolso');
+});
+
+// TEST 16 -- efectivo parcial devuelve únicamente el monto seleccionado.
+test('RETURN_PARTIAL_EFECTIVO_REFUNDS_ONLY_THE_SELECTED_AMOUNT', () => {
+  const openRes = doPostRaw('cash.open', { montoInicial: 1000 }, adminToken);
+  assert(openRes.success === true, JSON.stringify(openRes));
+  const cajaId = openRes.session.id;
+
+  const saleRes = doPostRaw('sales.create', buildTwoLineSaleData({ cajaSesionId: cajaId }), adminToken);
+  assert(saleRes.success === true, JSON.stringify(saleRes));
+
+  const returnRes = doPostRaw('returns.create', {
+    ventaId: saleRes.saleId, motivo: 'Reembolso efectivo parcial', tipoReembolso: 'EFECTIVO',
+    items: [{ varianteId: 'VAR-RET2', cantidad: 1 }]
+  }, adminToken);
+  assert(returnRes.success === true, JSON.stringify(returnRes));
+
+  const caja = runInContext(`DbHelper.findById('Cajas', '${cajaId}')`);
+  assertEqual(Number(caja.devoluciones_efectivo), 320, 'la caja solo debe reflejar el monto realmente reembolsado (320), no los 640 completos');
+
+  doPostRaw('cash.close', { efectivoRealContado: 1000 }, adminToken);
+});
+
+// TEST 21 -- dos líneas con el mismo nombre pero distinta variante se
+// distinguen correctamente (nunca por nombre).
+test('RETURN_DISTINGUISHES_SAME_NAME_DIFFERENT_VARIANT_LINES_BY_ID', () => {
+  // Stock ANTES de esta prueba (no un valor absoluto adivinado -- otras
+  // pruebas de esta misma sección ya vendieron/devolvieron unidades reales
+  // de VAR-RET1/VAR-RET2 antes de llegar aquí, así que se compara contra
+  // el estado real inmediatamente anterior, no contra 20).
+  const stockAntes1 = Number(runInContext("DbHelper.findById('Variantes', 'VAR-RET1')").stock);
+  const stockAntes2 = Number(runInContext("DbHelper.findById('Variantes', 'VAR-RET2')").stock);
+
+  const saleRes = doPostRaw('sales.create', buildTwoLineSaleData(), adminToken);
+  assert(saleRes.success === true, JSON.stringify(saleRes));
+
+  // Ambas líneas se llaman "Vestido Casual Test" -- se devuelve
+  // específicamente VAR-RET2 (talla 36), nunca VAR-RET1 (talla M).
+  const returnRes = doPostRaw('returns.create', {
+    ventaId: saleRes.saleId, motivo: 'Solo la talla 36', tipoReembolso: 'EFECTIVO',
+    items: [{ varianteId: 'VAR-RET2', cantidad: 1 }]
+  }, adminToken);
+  assert(returnRes.success === true, JSON.stringify(returnRes));
+
+  const variant1 = runInContext("DbHelper.findById('Variantes', 'VAR-RET1')");
+  const variant2 = runInContext("DbHelper.findById('Variantes', 'VAR-RET2')");
+  // VAR-RET1 (talla M, mismo nombre): esta venta le vendió 1 unidad y
+  // NUNCA se devolvió -- debe quedar 1 unidad por debajo de su stock
+  // previo, nunca intacta en el valor absoluto de otra prueba.
+  assertEqual(Number(variant1.stock), stockAntes1 - 1, 'VAR-RET1 (talla M, mismo nombre) se vendió pero no se devolvió -- debe quedar 1 unidad por debajo');
+  // VAR-RET2 (talla 36): esta venta le vendió 1 y esta misma prueba la
+  // devolvió -- debe quedar EXACTAMENTE en su stock previo (venta y
+  // devolución se cancelan entre sí).
+  assertEqual(Number(variant2.stock), stockAntes2, 'VAR-RET2 (talla 36) se vendió y se devolvió en esta misma prueba -- el stock debe quedar igual que antes');
+
+  const devolucion = runInContext(`DbHelper.findById('Devoluciones', '${returnRes.devolucionId}')`);
+  const items = JSON.parse(devolucion.items_json);
+  assertEqual(items.length, 1);
+  assertEqual(items[0].varianteId, 'VAR-RET2', 'la fila de Devoluciones debe registrar el ID de variante real, nunca el nombre');
+});
+
+// TEST 22 -- descuento/ITBIS por línea calculados correctamente en una
+// devolución parcial (reutiliza el mecanismo YA existente de
+// recalculateReturnAuthoritatively, no una fórmula nueva).
+test('RETURN_PARTIAL_RESPECTS_PER_LINE_DISCOUNT_AND_TAX_FROM_THE_ORIGINAL_SALE', () => {
+  // VAR-RET4 (fixture dedicada de esta sección): precio 1000, 10%
+  // descuento -> 900 base, 18% ITBIS -> 1062.
+  const saleRes = doPostRaw('sales.create', {
+    clienteId: '', clienteNombre: 'Consumidor Final', cajaSesionId: '',
+    subtotal: 1000, descuentoTotal: 100, impuestoTotal: 162, total: 1062, costoTotal: 500,
+    metodoPago: 'EFECTIVO', pagos: [{ metodo: 'EFECTIVO', monto: 1062 }],
+    esCredito: false, aplicarImpuesto: true,
+    items: [{
+      productoId: 'PRD-RET4', varianteId: 'VAR-RET4', nombreProducto: 'Abrigo Premium Test', sku: 'SKU-RET4-U',
+      talla: 'U', color: 'Negro', cantidad: 1, costoUnitario: 500, precioUnitario: 1000,
+      descuentoPorcentaje: 10, descuentoMonto: 100, subtotal: 1000, impuestoMonto: 162, total: 1062
+    }]
+  }, adminToken);
+  assert(saleRes.success === true, JSON.stringify(saleRes));
+
+  const returnRes = doPostRaw('returns.create', {
+    ventaId: saleRes.saleId, motivo: 'Devolución con descuento e ITBIS de línea', tipoReembolso: 'EFECTIVO',
+    items: [{ varianteId: 'VAR-RET4', cantidad: 1 }]
+  }, adminToken);
+  assert(returnRes.success === true, JSON.stringify(returnRes));
+  assertEqual(returnRes.montoDevuelto, 1062, 'el monto devuelto debe reflejar el descuento (10%) y el ITBIS (18%) reales de esa línea, no el precio bruto (1000)');
+
+  const devolucion = runInContext(`DbHelper.findById('Devoluciones', '${returnRes.devolucionId}')`);
+  const items = JSON.parse(devolucion.items_json);
+  assertEqual(Number(items[0].descuentoMonto), 100);
+  assertEqual(Number(items[0].impuestoMonto), 162);
+});
+
 /* ------------------------------------------------------------
    REPORTE
    ------------------------------------------------------------ */

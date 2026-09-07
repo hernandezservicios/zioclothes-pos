@@ -1,6 +1,8 @@
-import React from 'react';
+import React, { useRef } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { toDisplayableImageUrl } from '../../utils/imageUrl';
+import { useScrollEdgeIndicators } from '../../hooks/useScrollEdgeIndicators';
+import { ScrollEdgeArrows } from './ScrollEdgeArrows';
 import {
   LayoutDashboard,
   ShoppingBag,
@@ -50,6 +52,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
   // falta guardar un campo `permission` aparte por ítem: una sola llamada
   // centralizada decide, sin ninguna regla por rol hardcodeada aquí.
   const { canView, settings } = useAuth();
+
+  // AJUSTE VISUAL -- scrollbar nativo oculto + flechas discretas ↑/↓ (ver
+  // useScrollEdgeIndicators.ts / ScrollEdgeArrows.tsx / .no-native-scrollbar
+  // en index.css). `navRef` apunta al MISMO <nav> que ya tenía
+  // `overflow-y-auto` -- no se crea un segundo contenedor de scroll.
+  const navRef = useRef<HTMLElement>(null);
+  const { canScrollUp, canScrollDown, scrollStep } = useScrollEdgeIndicators(navRef);
 
   const sections: { title: string; items: MenuItem[] }[] = [
     {
@@ -121,12 +130,22 @@ export const Sidebar: React.FC<SidebarProps> = ({
         />
       )}
 
-      {/* Drawer */}
+      {/* Drawer.
+          CORRECCIÓN DE LAYOUT: en `lg:` (donde pasa a `lg:static`, ya
+          dentro del flujo normal de la fila Sidebar+main de App.tsx) se
+          agrega `lg:h-full` -- ahora que esa fila tiene una altura real y
+          acotada (ver App.tsx), esto expresa explícitamente que el Sidebar
+          ocupa toda la altura disponible bajo el Navbar, sin depender
+          únicamente del stretch por defecto de flexbox -- y `lg:shrink-0`
+          para que su ancho (w-72) nunca se comprima si el contenido de la
+          derecha se desborda horizontalmente. En mobile (`fixed`), el
+          propio `top-0 bottom-0` ya lo fija a la altura completa del
+          viewport, independiente de este cambio. */}
       <aside
         id="sidebar"
         className={`no-print fixed top-0 bottom-0 left-0 z-50 w-72 bg-[#FAF8F4] border-r border-[#E4DDD2] flex flex-col transition-transform duration-300 ease-in-out ${
           isOpen ? 'translate-x-0' : '-translate-x-full'
-        } lg:translate-x-0 lg:static lg:z-0 shadow-xl lg:shadow-none`}
+        } lg:translate-x-0 lg:static lg:z-0 lg:h-full lg:shrink-0 shadow-xl lg:shadow-none`}
       >
         {/* Sidebar Header */}
         <div className="p-4 border-b border-[#E4DDD2] flex items-center justify-between">
@@ -161,8 +180,19 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </button>
         </div>
 
-        {/* Menu Navigation Scrollable */}
-        <nav className="flex-1 overflow-y-auto p-3 space-y-5">
+        {/* Menu Navigation Scrollable.
+            AJUSTE VISUAL: el <nav> real (mismo overflow-y-auto, mismo
+            padding/espaciado, mismo comportamiento de scroll de siempre)
+            se envuelve en un div `relative` que absorbe el `flex-1` que
+            antes tenía el propio <nav> -- así las flechas de
+            ScrollEdgeArrows, posicionadas `absolute` dentro de ese div,
+            quedan ancladas al panel (no se desplazan con el contenido ni
+            restan espacio) sin alterar el tamaño real de la zona
+            scrolleable. `.no-native-scrollbar` (index.css) solo oculta la
+            representación visual nativa del scrollbar -- el scroll real
+            (rueda, trackpad, touch, teclado) sigue intacto. */}
+        <div className="relative flex-1 min-h-0">
+          <nav ref={navRef} className="h-full overflow-y-auto p-3 space-y-5 no-native-scrollbar">
           {sections.map((section, sIdx) => {
             const visibleItems = section.items.filter((item) => canView(item.id));
 
@@ -210,7 +240,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
               </div>
             );
           })}
-        </nav>
+          </nav>
+          <ScrollEdgeArrows
+            canScrollUp={canScrollUp}
+            canScrollDown={canScrollDown}
+            onScrollUp={() => scrollStep('up')}
+            onScrollDown={() => scrollStep('down')}
+            labelUp="Ver secciones anteriores del menú"
+            labelDown="Ver más secciones del menú"
+          />
+        </div>
 
         {/* Sidebar Footer */}
         <div className="p-3 border-t border-[#E4DDD2] bg-[#F6F1E8]/50">
