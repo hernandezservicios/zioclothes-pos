@@ -8,6 +8,60 @@ export function formatCurrency(amount: number | undefined | null, symbol = 'RD$'
   })}`;
 }
 
+/**
+ * Redondea un monto a 2 decimales de forma segura, evitando errores de
+ * coma flotante de JavaScript (ej. 0.1 + 0.2 === 0.30000000000000004).
+ * Mismo mecanismo que ya usa el backend (roundMoney en Config.gs) --
+ * replicado aquí para que el frontend compare/muestre dinero con la misma
+ * garantía antes de que cualquier UI lo redondee "a ojo" para pantalla.
+ */
+export function roundMoney(amount: number): number {
+  const value = Number(amount) || 0;
+  return Math.round((value + Number.EPSILON) * 100) / 100;
+}
+
+/**
+ * FIX (regresión "Cambio a Devolver" en el modal de Cobro de Venta):
+ * a partir de lo recibido en efectivo y lo que realmente hay que cobrar,
+ * deriva el ÚNICO estado posible del pago en efectivo -- o sobra dinero
+ * (cambio a devolver) o falta dinero (faltante por cobrar), nunca ambos a
+ * la vez. Antes el modal usaba `Math.max(0, recibido - total)`, que
+ * colapsaba "pagó de menos" y "pagó exacto" en el mismo RD$0.00 visible,
+ * sin forma de distinguir un pago insuficiente de uno saldado. Debe ser
+ * la única función que calcula este valor -- tanto la validación del
+ * botón "Completar Venta" como el recuadro que lo muestra en pantalla
+ * consumen este mismo resultado, para que nunca queden desincronizados.
+ */
+export function computeCashSettlement(
+  received: number,
+  totalDue: number
+): { change: number; due: number } {
+  const diff = roundMoney((Number(received) || 0) - (Number(totalDue) || 0));
+  if (diff > 0) return { change: diff, due: 0 };
+  if (diff < 0) return { change: 0, due: roundMoney(Math.abs(diff)) };
+  return { change: 0, due: 0 };
+}
+
+/**
+ * Suma los montos asignados a cada vía de cobro en un pago MIXTO y calcula
+ * cuánto falta (positivo) o sobra (negativo) frente a lo que realmente hay
+ * que cobrar -- mismo redondeo seguro que computeCashSettlement, para que
+ * "cuadrado exacto" no dependa de la precisión binaria de JavaScript.
+ */
+export function computeMixedPaymentTotals(
+  totalDue: number,
+  parts: { cash?: number; card?: number; transfer?: number; credit?: number }
+): { assigned: number; remaining: number } {
+  const assigned = roundMoney(
+    (Number(parts.cash) || 0) +
+      (Number(parts.card) || 0) +
+      (Number(parts.transfer) || 0) +
+      (Number(parts.credit) || 0)
+  );
+  const remaining = roundMoney((Number(totalDue) || 0) - assigned);
+  return { assigned, remaining };
+}
+
 export function formatDate(dateString: string | undefined | null): string {
   if (!dateString) return '-';
   try {

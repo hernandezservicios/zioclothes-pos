@@ -6,7 +6,7 @@ import { storageService } from '../../services/storageService';
 import { salesApi } from '../../services/salesApi';
 import { creditsApi } from '../../services/creditsApi';
 import { creditNotesApi } from '../../services/creditNotesApi';
-import { formatCurrency } from '../../utils/formatters';
+import { formatCurrency, computeCashSettlement, computeMixedPaymentTotals } from '../../utils/formatters';
 import { sounds } from '../../utils/soundEffects';
 import confetti from 'canvas-confetti';
 import {
@@ -232,8 +232,15 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   // Change Calculation for Cash -- FASE 7: sobre `totalRestante` (lo que
   // falta después de restar cualquier Crédito a Favor/Nota de Crédito ya
   // aplicado), no sobre el `total` original de la venta.
+  //
+  // FIX (regresión "Cambio a Devolver" mostraba RD$0.00 con pago
+  // insuficiente): computeCashSettlement() es ahora la única fuente de
+  // verdad del estado del efectivo -- deriva tanto el cambio a devolver
+  // como el faltante por cobrar de una sola resta, con redondeo seguro a
+  // centavos. La validación del botón "Completar Venta" (más abajo) y el
+  // recuadro que lo muestra en pantalla consumen este mismo resultado.
   const numEfectivoRecibido = typeof efectivoRecibido === 'number' ? efectivoRecibido : parseFloat(efectivoRecibido) || 0;
-  const cambio = Math.max(0, numEfectivoRecibido - totalRestante);
+  const { change: cambio, due: faltanteEfectivo } = computeCashSettlement(numEfectivoRecibido, totalRestante);
 
   // Split sum validation -- también sobre `totalRestante` (el grid Mixto
   // reparte lo que falta por cobrar con medios tradicionales; el crédito a
@@ -243,8 +250,12 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   const numSplitTransfer = typeof splitTransfer === 'number' ? splitTransfer : parseFloat(splitTransfer) || 0;
   const numSplitCredit = typeof splitCredit === 'number' ? splitCredit : parseFloat(splitCredit) || 0;
 
-  const splitTotal = numSplitCash + numSplitCard + numSplitTransfer + numSplitCredit;
-  const splitDifference = totalRestante - splitTotal;
+  const { assigned: splitTotal, remaining: splitDifference } = computeMixedPaymentTotals(totalRestante, {
+    cash: numSplitCash,
+    card: numSplitCard,
+    transfer: numSplitTransfer,
+    credit: numSplitCredit,
+  });
 
   const handleProcessSale = async () => {
     if (!currentUser) return;
@@ -271,10 +282,17 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
         // elegido es SIEMPRE `totalRestante` (total menos lo ya cubierto
         // con crédito a favor), nunca el total completo de la venta.
         if (paymentMethod === 'EFECTIVO') {
-          const cashAmount = typeof efectivoRecibido === 'number' ? efectivoRecibido : parseFloat(efectivoRecibido);
-          if (!Number.isFinite(cashAmount) || cashAmount < totalRestante) {
+          // Misma fuente de verdad que el recuadro "Cambio a Devolver" /
+          // "Falta por Cobrar" de abajo (computeCashSettlement) -- nunca
+          // una segunda comparación que pueda desincronizarse de lo que el
+          // cajero está viendo en pantalla.
+          if (faltanteEfectivo > 0) {
             sounds.playError();
-            showToast('Monto Insuficiente', `El efectivo recibido (RD$ ${(cashAmount || 0).toLocaleString()}) no puede ser menor al monto a cobrar (${formatCurrency(totalRestante, settings.simboloMoneda)}).`, 'error');
+            showToast(
+              'Monto Insuficiente',
+              `El efectivo recibido (${formatCurrency(numEfectivoRecibido, settings.simboloMoneda)}) no puede ser menor al monto a cobrar (${formatCurrency(totalRestante, settings.simboloMoneda)}). Falta ${formatCurrency(faltanteEfectivo, settings.simboloMoneda)}.`,
+              'error'
+            );
             setLoading(false);
             return;
           }
@@ -739,13 +757,28 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                 ))}
               </div>
 
-              {/* Cambio Result */}
-              <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-200 flex items-center justify-between">
-                <span className="text-xs font-bold text-emerald-900 uppercase">Cambio a Devolver:</span>
-                <span className="text-xl font-bold text-emerald-800">
-                  {formatCurrency(cambio, settings.simboloMoneda)}
-                </span>
-              </div>
+              {/* Cambio / Faltante Result -- FIX: antes este recuadro
+                  siempre decía "Cambio a Devolver" y mostraba RD$0.00
+                  también cuando el cliente pagó de menos (Math.max(0, ...)
+                  ocultaba el faltante). Ahora distingue explícitamente los
+                  dos estados posibles de computeCashSettlement: si falta
+                  dinero se muestra en rojo como "Falta por Cobrar", nunca
+                  como un cambio de RD$0.00. */}
+              {faltanteEfectivo > 0 ? (
+                <div className="p-3 bg-rose-50 rounded-xl border border-rose-200 flex items-center justify-between">
+                  <span className="text-xs font-bold text-rose-900 uppercase">Falta por Cobrar:</span>
+                  <span className="text-xl font-bold text-rose-700">
+                    {formatCurrency(faltanteEfectivo, settings.simboloMoneda)}
+                  </span>
+                </div>
+              ) : (
+                <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-200 flex items-center justify-between">
+                  <span className="text-xs font-bold text-emerald-900 uppercase">Cambio a Devolver:</span>
+                  <span className="text-xl font-bold text-emerald-800">
+                    {formatCurrency(cambio, settings.simboloMoneda)}
+                  </span>
+                </div>
+              )}
             </div>
           )}
 
