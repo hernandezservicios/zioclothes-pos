@@ -43,6 +43,12 @@ export interface CreateSalePayload {
   cambioEntregado?: number;
   esCredito: boolean;
   montoFinanciado?: number;
+  // FIX (regresión "el plazo del cliente siempre se imponía"): plazo de
+  // crédito elegido explícitamente para ESTA venta en el modal de Cobro
+  // (7/15/30/45/60 días) -- el backend lo prioriza sobre el plazo
+  // predeterminado del cliente (SalesController.handleCreateSale), que
+  // solo se usa como respaldo si aquí no se envía nada.
+  diasPlazo?: number;
   aplicarImpuesto: boolean;
   // FASE 7: si el POS aplicó un Crédito a Favor/Nota de Crédito a esta
   // venta, el backend exige que `monto` coincida EXACTAMENTE con la suma

@@ -398,6 +398,13 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
         cambioEntregado: paymentMethod === 'EFECTIVO' && !cubiertoCompletoConCredito ? cambio : undefined,
         esCredito,
         montoFinanciado: esCredito ? montoFinanciado : undefined,
+        // FIX (regresión "el plazo del cliente siempre se imponía"): antes
+        // `diasPlazo` (el estado que sí cambia con los botones 7/15/30/45/
+        // 60 días) nunca se enviaba al backend -- la venta se creaba sin
+        // ese campo y el backend, al no recibir nada, siempre recaía en el
+        // plazo predeterminado del cliente. Ahora se envía el plazo
+        // realmente seleccionado en el modal para ESTA venta.
+        diasPlazo: esCredito ? diasPlazo : undefined,
         aplicarImpuesto: applyTax,
         creditoFavorAplicado:
           creditoFavorMontoAplicado > 0 && selectedCreditNote

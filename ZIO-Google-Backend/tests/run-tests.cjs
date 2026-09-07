@@ -7107,6 +7107,136 @@ test('INSTALLER_REPAIR_REQUIRES_EXISTING_SPREADSHEET_ID', () => {
   assertEqual(restored, real);
 });
 
+/* ==================================================================
+   CORRECCIÓN CRÍTICA -- PLAZO DE CRÉDITO EN POS / VENTA RÁPIDA
+
+   Regresión: el plazo elegido explícitamente en el modal de Cobro de
+   Venta ("A Crédito", 7/15/30/45/60 días) nunca viajaba hasta el backend
+   -- SalesController.handleCreateSale calculaba fecha_vencimiento SIEMPRE
+   con customer.dias_credito_por_defecto, ignorando cualquier selección
+   real del cajero. Fixture dedicada (CLI-T03/PRD-T03/VAR-T03, stock y
+   límite amplios) para no interferir con el estado acumulado de crédito
+   de CLI-T01/CLI-T02 usado por las pruebas de arriba.
+   ================================================================== */
+
+runInContext(`
+  DbHelper.insertRow('Productos', {
+    id: 'PRD-T03', sku: 'SKU-T03', codigo_barras: '7460000000005', nombre: 'Producto Plazo Test',
+    descripcion: '', categoria_id: 'CAT-T01', categoria_nombre: 'Categoria Test', marca: 'ZIO',
+    proveedor_id: '', costo: 100, precio: 100, precio_especial: '', impuesto: 0,
+    descuento_maximo: 10, stock_minimo: 2, estado: 'ACTIVO', imagen_url: '', creado_en: getNowFormatted()
+  });
+  DbHelper.insertRow('Variantes', {
+    id: 'VAR-T03', producto_id: 'PRD-T03', sku: 'SKU-T03-U', codigo_barras: '7460000000006',
+    color: 'Gris', talla: 'U', costo: 100, precio: 100, stock: 100, estado: 'ACTIVO'
+  });
+  // dias_credito_por_defecto=30 -- exactamente el ejemplo obligatorio de
+  // la tarea. limite_credito amplio para que varias ventas a crédito
+  // consecutivas (TEST 1-9) nunca choquen con LIMITE_CREDITO_EXCEDIDO.
+  DbHelper.insertRow('Clientes', {
+    id: 'CLI-T03', nombre: 'Cliente', apellido: 'Plazo', documento: '000-0000000-2', telefono: '000',
+    correo: '', direccion: '', ciudad: '', limite_credito: 1000000, dias_credito_por_defecto: 30,
+    notas: '', estado: 'ACTIVO', creado_en: getNowFormatted()
+  });
+`);
+
+function buildPlazoSaleData_(diasPlazo, overrides) {
+  const base = {
+    clienteId: 'CLI-T03', clienteNombre: 'Cliente Plazo', cajaSesionId: '',
+    subtotal: 100, descuentoTotal: 0, impuestoTotal: 0, total: 100, costoTotal: 100,
+    metodoPago: 'CREDITO', pagos: [{ metodo: 'CREDITO', monto: 100 }],
+    esCredito: true, montoFinanciado: 100, aplicarImpuesto: false,
+    items: [{
+      productoId: 'PRD-T03', varianteId: 'VAR-T03', nombreProducto: 'Producto Plazo Test', sku: 'SKU-T03-U',
+      talla: 'U', color: 'Gris', cantidad: 1, costoUnitario: 100, precioUnitario: 100,
+      descuentoPorcentaje: 0, descuentoMonto: 0, subtotal: 100, impuestoMonto: 0, total: 100
+    }]
+  };
+  if (diasPlazo !== undefined) base.diasPlazo = diasPlazo;
+  return Object.assign({}, base, overrides);
+}
+
+// Fecha comercial (America/Santo_Domingo) esperada N días después de
+// "ahora" -- mismo mecanismo (toBusinessDateStr_) que ya usa el resto de
+// la suite (ver daysFromNowStr_ más arriba) y el propio backend
+// (CONFIG.TIMEZONE), solo comparando la parte de fecha (sin hora, para no
+// depender de los segundos exactos que tome ejecutar la prueba).
+function expectedDueDateStr_(days) {
+  return runInContext(`toBusinessDateStr_(new Date(Date.now() + ${days} * 24 * 3600 * 1000))`);
+}
+
+[7, 15, 30, 45, 60].forEach((dias) => {
+  // TEST 1-5
+  test(`SALE_CREDIT_DAYS_SELECTED_${dias}_IS_SAVED_EXACTLY_${dias}_REGARDLESS_OF_CUSTOMER_DEFAULT_30`, () => {
+    const res = doPostRaw('sales.create', buildPlazoSaleData_(dias), adminToken);
+    assert(res.success === true, `venta a crédito con diasPlazo=${dias} debe aceptarse: ` + JSON.stringify(res));
+    const credito = runInContext(`DbHelper.findById('Creditos', '${res.cuentaCobrarId}')`);
+    assertEqual(Number(credito.dias_plazo), dias, `dias_plazo guardado debe ser el seleccionado (${dias}), no el default del cliente (30)`);
+  });
+});
+
+[7, 60].forEach((dias) => {
+  // TEST 6-7
+  test(`SALE_CREDIT_DAYS_${dias}_COMPUTES_DUE_DATE_${dias}_DAYS_FROM_NOW_NOT_FROM_CUSTOMER_DEFAULT`, () => {
+    const res = doPostRaw('sales.create', buildPlazoSaleData_(dias), adminToken);
+    assert(res.success === true, JSON.stringify(res));
+    const credito = runInContext(`DbHelper.findById('Creditos', '${res.cuentaCobrarId}')`);
+    const dueDateOnly = String(credito.fecha_vencimiento).slice(0, 10);
+    assertEqual(dueDateOnly, expectedDueDateStr_(dias), `vencimiento debe ser a ${dias} días de hoy, no a 30 (default del cliente)`);
+  });
+});
+
+// TEST 8
+test('SALE_CREDIT_WITHOUT_EXPLICIT_DAYS_FALLS_BACK_TO_CUSTOMER_DEFAULT_30', () => {
+  const res = doPostRaw('sales.create', buildPlazoSaleData_(undefined), adminToken);
+  assert(res.success === true, JSON.stringify(res));
+  const credito = runInContext(`DbHelper.findById('Creditos', '${res.cuentaCobrarId}')`);
+  assertEqual(Number(credito.dias_plazo), 30, 'sin diasPlazo explícito, debe usar el default real del cliente (30) como respaldo');
+});
+
+// TEST 9
+test('SALE_CREDIT_DAYS_TWO_SALES_SAME_CUSTOMER_KEEP_INDEPENDENT_TERMS_AND_NEVER_CHANGE_CUSTOMER_DEFAULT', () => {
+  const before = runInContext(`DbHelper.findById('Clientes', 'CLI-T03')`);
+  assertEqual(Number(before.dias_credito_por_defecto), 30, 'precondición: el cliente sigue en 30 antes de esta prueba');
+
+  const res1 = doPostRaw('sales.create', buildPlazoSaleData_(7), adminToken);
+  assert(res1.success === true, JSON.stringify(res1));
+  const res2 = doPostRaw('sales.create', buildPlazoSaleData_(60), adminToken);
+  assert(res2.success === true, JSON.stringify(res2));
+
+  const credito1 = runInContext(`DbHelper.findById('Creditos', '${res1.cuentaCobrarId}')`);
+  const credito2 = runInContext(`DbHelper.findById('Creditos', '${res2.cuentaCobrarId}')`);
+  assertEqual(Number(credito1.dias_plazo), 7, 'la primera venta conserva su propio plazo (7)');
+  assertEqual(Number(credito2.dias_plazo), 60, 'la segunda venta conserva su propio plazo (60), sin arrastrar el de la primera');
+
+  const after = runInContext(`DbHelper.findById('Clientes', 'CLI-T03')`);
+  assertEqual(Number(after.dias_credito_por_defecto), 30, 'el plazo predeterminado del cliente NUNCA se modifica por una venta individual');
+});
+
+test('SALE_CREDIT_DAYS_INVALID_VALUE_FALLS_BACK_TO_CUSTOMER_DEFAULT', () => {
+  // Defensa contra un valor corrupto/manipulado (0, negativo, no numérico)
+  // -- nunca debe crear un crédito con un plazo sin sentido; cae al mismo
+  // respaldo que "sin selección" (el default real del cliente).
+  const res = doPostRaw('sales.create', buildPlazoSaleData_(-5), adminToken);
+  assert(res.success === true, JSON.stringify(res));
+  const credito = runInContext(`DbHelper.findById('Creditos', '${res.cuentaCobrarId}')`);
+  assertEqual(Number(credito.dias_plazo), 30, 'un diasPlazo inválido (-5) debe descartarse y usar el default del cliente (30)');
+});
+
+test('SALE_CREDIT_DAYS_NEVER_CHANGES_CREDIT_LIMIT_OR_AVAILABLE_CREDIT_CALCULATION', () => {
+  // El plazo (7-60 días) es un concepto totalmente distinto al límite de
+  // crédito -- cambiar el plazo de 30 a 7 días NO debe alterar en nada el
+  // límite/deuda/disponible del cliente.
+  const before = runInContext(`DbHelper.findById('Clientes', 'CLI-T03')`);
+  const limiteAntes = Number(before.limite_credito);
+
+  const res = doPostRaw('sales.create', buildPlazoSaleData_(7), adminToken);
+  assert(res.success === true, JSON.stringify(res));
+
+  const after = runInContext(`DbHelper.findById('Clientes', 'CLI-T03')`);
+  assertEqual(Number(after.limite_credito), limiteAntes, 'el límite de crédito del cliente no debe cambiar por el plazo elegido en una venta');
+});
+
 /* ------------------------------------------------------------
    REPORTE
    ------------------------------------------------------------ */

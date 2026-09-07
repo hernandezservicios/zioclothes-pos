@@ -472,7 +472,20 @@ const SalesController = {
         // Step 6: Create Credit if applicable
         if (esCredito && customer) {
           creditId = Sequences.getNext('CRED');
-          const diasPlazo = customer.dias_credito_por_defecto ? Number(customer.dias_credito_por_defecto) : 15;
+          // FIX (regresión: el plazo elegido en el POS para ESTA venta se
+          // ignoraba por completo -- el vencimiento siempre se calculaba
+          // con el plazo predeterminado del cliente). data.diasPlazo es el
+          // plazo elegido explícitamente en el modal de Cobro de Venta
+          // ("A Crédito", 7/15/30/45/60 días) y tiene prioridad; el
+          // default del cliente (customer.dias_credito_por_defecto) solo
+          // se usa como respaldo si no se envió un valor válido (venta
+          // creada sin pasar por ese selector, ej. seedAllTestData/tests
+          // antiguos). Nunca se sobrescribe uno por el otro cuando el
+          // frontend sí declaró una elección explícita.
+          const diasPlazoSolicitado = Number(data.diasPlazo);
+          const diasPlazo = Number.isFinite(diasPlazoSolicitado) && diasPlazoSolicitado > 0 && diasPlazoSolicitado <= 3650
+            ? diasPlazoSolicitado
+            : (customer.dias_credito_por_defecto ? Number(customer.dias_credito_por_defecto) : 15);
           const vencimientoDate = new Date(Date.now() + diasPlazo * 24 * 3600 * 1000);
           const vencimientoStr = Utilities.formatDate(vencimientoDate, CONFIG.TIMEZONE, 'yyyy-MM-dd HH:mm:ss');
           // nuevoMontoFinanciado ya fue calculado y acotado a computed.total

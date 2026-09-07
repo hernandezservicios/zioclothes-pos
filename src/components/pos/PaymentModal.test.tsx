@@ -280,3 +280,113 @@ describe('PaymentModal -- otras formas de pago no se rompieron', () => {
     expect(screen.getAllByText(formatCurrency(4400, 'RD$')).length).toBeGreaterThanOrEqual(1);
   });
 });
+
+/**
+ * FASE — CORRECCIÓN CRÍTICA / PLAZO DE CRÉDITO EN POS / VENTA RÁPIDA.
+ *
+ * Regresión: el plazo elegido en "A Crédito" (7/15/30/45/60 días) nunca
+ * viajaba al backend -- el botón sí actualizaba el estado visual
+ * (`diasPlazo`), pero `handleProcessSale` jamás lo incluía en el payload
+ * de `salesApi.createSale`, así que el backend siempre recaía en el plazo
+ * predeterminado del cliente (30 días en este fixture).
+ */
+describe('PaymentModal -- plazo de crédito (regresión corregida)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+  afterEach(() => {
+    cleanup();
+  });
+
+  const diaButton = (label: string) => screen.getByText(label).closest('button') as HTMLButtonElement;
+  const isSelected = (btn: HTMLButtonElement) => btn.className.includes('bg-[#2F2A25]');
+
+  it('A Crédito abre inicialmente con el plazo predeterminado del cliente (30 días) seleccionado', () => {
+    render(<PaymentModal {...baseProps} selectedCustomer={customer} />);
+    fireEvent.click(screen.getByText('A Crédito'));
+    expect(isSelected(diaButton('30 días'))).toBe(true);
+    expect(isSelected(diaButton('7 días'))).toBe(false);
+  });
+
+  it('seleccionar 7 días cambia la selección visual de 30 a 7', () => {
+    render(<PaymentModal {...baseProps} selectedCustomer={customer} />);
+    fireEvent.click(screen.getByText('A Crédito'));
+    fireEvent.click(diaButton('7 días'));
+    expect(isSelected(diaButton('7 días'))).toBe(true);
+    expect(isSelected(diaButton('30 días'))).toBe(false);
+  });
+
+  // TEST 10
+  it('cambiar entre 7 -> 15 -> 45 -> 60 en el mismo modal: el estado visual siempre coincide con la última selección', () => {
+    render(<PaymentModal {...baseProps} selectedCustomer={customer} />);
+    fireEvent.click(screen.getByText('A Crédito'));
+
+    for (const dias of ['7 días', '15 días', '45 días', '60 días']) {
+      fireEvent.click(diaButton(dias));
+      expect(isSelected(diaButton(dias))).toBe(true);
+      for (const otro of ['7 días', '15 días', '30 días', '45 días', '60 días']) {
+        if (otro !== dias) expect(isSelected(diaButton(otro))).toBe(false);
+      }
+    }
+  });
+
+  // TEST 11
+  it('cerrar y volver a abrir el modal: la nueva venta vuelve a tomar el plazo predeterminado del cliente como valor inicial', () => {
+    const { unmount } = render(<PaymentModal {...baseProps} selectedCustomer={customer} />);
+    fireEvent.click(screen.getByText('A Crédito'));
+    fireEvent.click(diaButton('7 días'));
+    expect(isSelected(diaButton('7 días'))).toBe(true);
+    unmount();
+
+    render(<PaymentModal {...baseProps} selectedCustomer={customer} />);
+    fireEvent.click(screen.getByText('A Crédito'));
+    expect(isSelected(diaButton('30 días'))).toBe(true);
+    expect(isSelected(diaButton('7 días'))).toBe(false);
+  });
+
+  it('el backend recibe el plazo realmente seleccionado (45), NO el predeterminado del cliente (30)', async () => {
+    createSale.mockResolvedValueOnce({ success: true, message: 'OK', data: { id: 'VEN-T03', numeroVenta: 'VEN-000003' } });
+    render(<PaymentModal {...baseProps} selectedCustomer={customer} />);
+    fireEvent.click(screen.getByText('A Crédito'));
+    fireEvent.click(diaButton('45 días'));
+    fireEvent.click(screen.getByText('Completar Venta & Emitir Factura'));
+
+    await waitFor(() => expect(createSale).toHaveBeenCalledTimes(1));
+    const payload = createSale.mock.calls[0][0];
+    expect(payload.diasPlazo).toBe(45);
+    expect(payload.esCredito).toBe(true);
+  });
+
+  it('sin cambiar la selección, se envía el plazo predeterminado que estaba preseleccionado (30) -- sigue siendo la elección explícita del modal, no un valor inventado', async () => {
+    createSale.mockResolvedValueOnce({ success: true, message: 'OK', data: { id: 'VEN-T04', numeroVenta: 'VEN-000004' } });
+    render(<PaymentModal {...baseProps} selectedCustomer={customer} />);
+    fireEvent.click(screen.getByText('A Crédito'));
+    fireEvent.click(screen.getByText('Completar Venta & Emitir Factura'));
+
+    await waitFor(() => expect(createSale).toHaveBeenCalledTimes(1));
+    expect(createSale.mock.calls[0][0].diasPlazo).toBe(30);
+  });
+
+  it('Efectivo/Tarjeta/Transferencia nunca envían un plazo de crédito', async () => {
+    createSale.mockResolvedValueOnce({ success: true, message: 'OK', data: { id: 'VEN-T05', numeroVenta: 'VEN-000005' } });
+    render(<PaymentModal {...baseProps} />);
+    fireEvent.change(efectivoInput(), { target: { value: '5400' } });
+    fireEvent.click(screen.getByText('Completar Venta & Emitir Factura'));
+
+    await waitFor(() => expect(createSale).toHaveBeenCalledTimes(1));
+    expect(createSale.mock.calls[0][0].diasPlazo).toBeUndefined();
+  });
+
+  it('cambiar el plazo NO modifica el límite/disponible de crédito mostrado del cliente', () => {
+    render(<PaymentModal {...baseProps} selectedCustomer={customer} />);
+    fireEvent.click(screen.getByText('A Crédito'));
+    // Límite (RD$20,000) y Disponible (RD$20,000, sin deuda) coinciden en
+    // este fixture -- se cuentan las apariciones en vez de pedir una sola,
+    // para no depender de cuál de las dos etiquetas las reutiliza.
+    const antes = screen.getAllByText(formatCurrency(customer.limiteCredito, 'RD$')).length;
+
+    fireEvent.click(diaButton('7 días'));
+    const despues = screen.getAllByText(formatCurrency(customer.limiteCredito, 'RD$')).length;
+    expect(despues).toBe(antes);
+  });
+});
