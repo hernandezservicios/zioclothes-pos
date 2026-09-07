@@ -267,6 +267,18 @@ export const DataStoreProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
     const newCustomers = res.data || [];
     setCustomers(newCustomers);
+    // FIX (regresión: cliente recién creado desde el POS no quedaba
+    // seleccionado): `customersRef.current` normalmente se sincroniza
+    // mediante el useEffect de arriba ([customers]), pero ese efecto solo
+    // corre en un render posterior -- nunca antes de que la promesa de
+    // esta misma función se resuelva. Un caller que hace
+    // `await refreshCustomers({force:true})` y de inmediato llama a
+    // `getCustomers()` (ver POSView.handleCreateQuickCustomer) podía leer
+    // el arreglo VIEJO del ref, sin el cliente recién creado, y la
+    // búsqueda por ID fallaba en silencio. Se sincroniza aquí también, de
+    // forma síncrona, para que getCustomers() sea confiable inmediatamente
+    // después de este await, sin depender del timing del efecto.
+    customersRef.current = newCustomers;
     storageService.saveCustomers(newCustomers);
     setCustomersError(null);
     setCustomersStale(false);

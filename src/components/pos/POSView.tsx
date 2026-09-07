@@ -871,6 +871,7 @@ export const POSView: React.FC = () => {
           </div>
 
           <select
+            aria-label="Cliente"
             value={selectedCustomer?.id || ''}
             onChange={(e) => {
               if (e.target.value === '') {
