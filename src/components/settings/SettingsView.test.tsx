@@ -2,6 +2,8 @@ import React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react';
 import { SettingsView } from './SettingsView';
+import { storageService } from '../../services/storageService';
+import { apiService } from '../../services/apiService';
 
 /**
  * FASE — COPIA DE SEGURIDAD: pruebas de la UI (Requerimientos 21.1, 21.2,
@@ -20,6 +22,7 @@ import { SettingsView } from './SettingsView';
  */
 
 let hasPermissionMock: (perm: string) => boolean;
+const logoutMock = vi.fn();
 
 vi.mock('../../context/AuthContext', () => ({
   useAuth: () => ({
@@ -28,8 +31,25 @@ vi.mock('../../context/AuthContext', () => ({
     currentUser: { id: 'USR-001', nombre: 'Admin' },
     hasPermission: (perm: string) => hasPermissionMock(perm),
     refreshCatalog: vi.fn(),
+    // FASE (configuración inicial del backend antes del login): "Cambiar
+    // Servidor" reutiliza logout() TAL CUAL -- se mockea aquí (no forma
+    // parte del alcance de esta pantalla) para verificar solo que SE
+    // LLAMA, sin ejercitar AuthContext real de nuevo.
+    logout: logoutMock,
   }),
 }));
+
+// FASE (configuración inicial del backend antes del login): "Probar
+// Conexión" usa apiService.checkBackendConnection (doGet real) --
+// mockeado aquí porque ya se prueba a fondo en apiService.test.ts; esta
+// suite solo verifica que SettingsView lo llame y refleje su resultado.
+vi.mock('../../services/apiService', async () => {
+  const actual = await vi.importActual<typeof import('../../services/apiService')>('../../services/apiService');
+  return {
+    ...actual,
+    apiService: { checkBackendConnection: vi.fn() },
+  };
+});
 
 const showToastMock = vi.fn();
 vi.mock('../../context/ToastContext', () => ({
@@ -353,5 +373,108 @@ describe('SettingsView -- Copia de Seguridad', () => {
 
     await waitFor(() => expect(showToastMock).toHaveBeenCalledWith('ERROR CRÍTICO — Requiere Intervención Manual', expect.stringContaining('intervención manual'), 'error'));
     expect(clearDataStoreMock).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * FASE — CONFIGURACIÓN INICIAL DEL BACKEND ANTES DEL LOGIN.
+ *
+ * "Conexión del Sistema" (pestaña "Google Sheets Sync"): la misma URL de
+ * `storageService` (real aquí, sin mockear -- mismo criterio ya
+ * establecido en este archivo), "Probar Conexión" (apiService mockeado
+ * arriba) y "Cambiar Servidor".
+ */
+const CONFIGURED_URL = 'https://script.google.com/macros/s/SETTINGS_TEST/exec';
+
+function renderOnSheetsTab() {
+  render(<SettingsView />);
+  fireEvent.click(screen.getByText('Google Sheets Sync'));
+}
+
+const reloadMock = vi.fn();
+Object.defineProperty(window, 'location', {
+  configurable: true,
+  value: { ...window.location, reload: reloadMock },
+});
+
+describe('SettingsView -- Conexión del Sistema', () => {
+  beforeEach(() => {
+    hasPermissionMock = () => true;
+    logoutMock.mockClear();
+    reloadMock.mockClear();
+    (apiService.checkBackendConnection as any).mockReset();
+    storageService.setGoogleAppsScriptUrl(CONFIGURED_URL);
+  });
+  afterEach(() => {
+    cleanup();
+    storageService.clearBusinessData();
+    storageService.clearGoogleAppsScriptUrl();
+    vi.restoreAllMocks();
+  });
+
+  it('muestra la URL actualmente configurada -- la misma que usa apiService/Login/DataStore', () => {
+    renderOnSheetsTab();
+    expect(screen.getByText(CONFIGURED_URL)).toBeInTheDocument();
+  });
+
+  it('"Probar Conexión" real: éxito muestra el estado conectado', async () => {
+    (apiService.checkBackendConnection as any).mockResolvedValue({
+      success: true,
+      message: 'Conexión establecida correctamente.',
+      data: { service: 'ZIO CLOTHES POS', version: '1.0', status: 'ONLINE', timezone: 'America/Santo_Domingo', spreadsheetConnected: true },
+    });
+    renderOnSheetsTab();
+    fireEvent.click(screen.getByRole('button', { name: /Probar Conexión/i }));
+
+    await waitFor(() => expect(screen.getByText('Conexión establecida correctamente.')).toBeInTheDocument());
+    expect(apiService.checkBackendConnection).toHaveBeenCalledWith(CONFIGURED_URL);
+  });
+
+  it('"Probar Conexión" real: fallo muestra el mensaje de error real, nunca "conectado"', async () => {
+    (apiService.checkBackendConnection as any).mockResolvedValue({
+      success: false,
+      message: 'El servidor está en línea, pero no tiene conexión con su hoja de cálculo (Spreadsheet).',
+      errorCode: 'SPREADSHEET_DISCONNECTED',
+    });
+    renderOnSheetsTab();
+    fireEvent.click(screen.getByRole('button', { name: /Probar Conexión/i }));
+
+    await waitFor(() => expect(screen.getByText(/no tiene conexión con su hoja de cálculo/i)).toBeInTheDocument());
+  });
+
+  it('"Cambiar Servidor" muestra la confirmación antes de hacer nada', () => {
+    renderOnSheetsTab();
+    fireEvent.click(screen.getByRole('button', { name: /Cambiar Servidor/i }));
+
+    expect(screen.getByText(/se cerrará la sesión y se cargará la información del nuevo negocio/i)).toBeInTheDocument();
+    expect(logoutMock).not.toHaveBeenCalled();
+  });
+
+  it('"Cancelar" en la confirmación no cierra sesión ni borra nada', () => {
+    renderOnSheetsTab();
+    fireEvent.click(screen.getByRole('button', { name: /Cambiar Servidor/i }));
+    fireEvent.click(screen.getByRole('button', { name: /Cancelar/i }));
+
+    expect(screen.queryByText(/se cerrará la sesión/i)).not.toBeInTheDocument();
+    expect(logoutMock).not.toHaveBeenCalled();
+    expect(storageService.getGoogleAppsScriptUrl()).toBe(CONFIGURED_URL);
+  });
+
+  it('"Continuar" en la confirmación: cierra sesión, purga datos de negocio, elimina la URL y recarga', () => {
+    storageService.saveProducts([{ id: 'P1' } as any]);
+    renderOnSheetsTab();
+    fireEvent.click(screen.getByRole('button', { name: /Cambiar Servidor/i }));
+    fireEvent.click(screen.getByRole('button', { name: /Continuar/i }));
+
+    expect(logoutMock).toHaveBeenCalledTimes(1);
+    expect(storageService.getProducts()).toEqual([]);
+    expect(storageService.getGoogleAppsScriptUrl()).toBe('');
+    expect(reloadMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('sin permiso admin.configuracion: no se ofrece "Cambiar Servidor" (misma pantalla ya protegida)', () => {
+    hasPermissionMock = (perm) => perm !== 'admin.configuracion';
+    renderOnSheetsTab();
+    expect(screen.queryByRole('button', { name: /Cambiar Servidor/i })).not.toBeInTheDocument();
   });
 });

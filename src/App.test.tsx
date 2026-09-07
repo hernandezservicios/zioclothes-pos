@@ -33,6 +33,23 @@ vi.mock('./services/storageService', () => ({
     // mockeados), que llama a estos dos métodos.
     getReadNotificationIds: vi.fn(() => []),
     saveReadNotificationIds: vi.fn(),
+    // FASE (configuración inicial del backend antes del login): por
+    // defecto YA hay una URL configurada -- así las pruebas de esta
+    // suite (login/logout/redirección), que no son sobre esta fase,
+    // siguen llegando directo a LoginView sin cambios. Los tests nuevos
+    // de "sin URL configurada" la sobrescriben explícitamente.
+    getGoogleAppsScriptUrl: vi.fn(() => 'https://script.google.com/macros/s/TEST/exec'),
+    setGoogleAppsScriptUrl: vi.fn(),
+  },
+}));
+
+// FASE (configuración inicial del backend antes del login): App.tsx ahora
+// también puede montar InitialSetupView (cuando no hay URL configurada),
+// que llama a esto para su "Probar conexión" real -- se mockea aquí para
+// no depender de una red real (ya probado a fondo en apiService.test.ts).
+vi.mock('./services/apiService', () => ({
+  apiService: {
+    checkBackendConnection: vi.fn(),
   },
 }));
 
@@ -128,7 +145,10 @@ const setInitialAuth = (authContextMock as any).__setInitialAuth as (authenticat
 const mockedStorageService = storageService as unknown as {
   getCurrentView: ReturnType<typeof vi.fn>;
   saveCurrentView: ReturnType<typeof vi.fn>;
+  getGoogleAppsScriptUrl: ReturnType<typeof vi.fn>;
+  setGoogleAppsScriptUrl: ReturnType<typeof vi.fn>;
 };
+const CONFIGURED_URL = 'https://script.google.com/macros/s/TEST/exec';
 
 async function loginAs(username: string, password: string) {
   fireEvent.change(screen.getByPlaceholderText('ej. admin'), { target: { value: username } });
@@ -146,6 +166,11 @@ const TEST_USER = { id: 'USR-T01', nombre: 'Test', apellido: 'User', rol: 'ADMIN
 beforeEach(() => {
   vi.clearAllMocks();
   mockedStorageService.getCurrentView.mockReturnValue(null);
+  // Por defecto, instalación YA configurada -- las pruebas de login/
+  // redirección de esta suite (no relacionadas con esta fase) siguen
+  // viendo exactamente el mismo comportamiento de antes. Los tests de
+  // "sin URL" la sobrescriben explícitamente a ''.
+  mockedStorageService.getGoogleAppsScriptUrl.mockReturnValue(CONFIGURED_URL);
   setInitialAuth(false, null);
 });
 afterEach(() => {
@@ -260,5 +285,51 @@ describe('App -- LOGIN exitoso siempre lleva al Dashboard, sin importar la últi
 
     expect(screen.getByText('MOCK_CUSTOMERS_VIEW')).toBeInTheDocument();
     expect(screen.queryByText('MOCK_DASHBOARD_VIEW')).not.toBeInTheDocument();
+  });
+});
+
+describe('App -- configuración inicial del backend antes del Login', () => {
+  it('sin URL configurada (instalación/navegador nuevo): muestra InitialSetupView, nunca LoginView', () => {
+    mockedStorageService.getGoogleAppsScriptUrl.mockReturnValue('');
+    setInitialAuth(false, null);
+    render(<App />);
+
+    expect(screen.getByText('Configuración Inicial')).toBeInTheDocument();
+    expect(screen.queryByText('Iniciar Sesión')).not.toBeInTheDocument();
+  });
+
+  it('con URL ya configurada (instalación existente): NO muestra InitialSetupView, muestra Login directo', () => {
+    mockedStorageService.getGoogleAppsScriptUrl.mockReturnValue(CONFIGURED_URL);
+    setInitialAuth(false, null);
+    render(<App />);
+
+    expect(screen.queryByText('Configuración Inicial')).not.toBeInTheDocument();
+    expect(screen.getByText('Iniciar Sesión')).toBeInTheDocument();
+  });
+
+  it('al completar la configuración inicial con éxito, pasa a mostrar el Login (no exige la URL de nuevo)', async () => {
+    const { apiService } = await import('./services/apiService');
+    (apiService.checkBackendConnection as any).mockResolvedValue({
+      success: true,
+      message: 'Conexión establecida correctamente.',
+      data: { status: 'ONLINE', spreadsheetConnected: true },
+    });
+
+    mockedStorageService.getGoogleAppsScriptUrl.mockReturnValue('');
+    setInitialAuth(false, null);
+    render(<App />);
+
+    expect(screen.getByText('Configuración Inicial')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByPlaceholderText(/https:\/\/script\.google\.com/i), {
+      target: { value: CONFIGURED_URL },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /Probar conexión/i }));
+    await screen.findByRole('button', { name: /Continuar/i });
+    fireEvent.click(screen.getByRole('button', { name: /Continuar/i }));
+
+    expect(mockedStorageService.setGoogleAppsScriptUrl).toHaveBeenCalledWith(CONFIGURED_URL);
+    expect(screen.getByText('Iniciar Sesión')).toBeInTheDocument();
+    expect(screen.queryByText('Configuración Inicial')).not.toBeInTheDocument();
   });
 });

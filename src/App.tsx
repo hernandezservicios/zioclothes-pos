@@ -4,6 +4,7 @@ import { DataStoreProvider } from './context/DataStoreContext';
 import { ToastProvider } from './context/ToastContext';
 import { NotificationProvider } from './context/NotificationContext';
 import { storageService } from './services/storageService';
+import { InitialSetupView } from './components/setup/InitialSetupView';
 import { LoginView } from './components/auth/LoginView';
 import { Navbar } from './components/layout/Navbar';
 import { Sidebar } from './components/layout/Sidebar';
@@ -104,6 +105,21 @@ const VALID_VIEWS: AppView[] = [
 
 const MainAppContent: React.FC = () => {
   const { isAuthenticated, currentUser, hasPermission } = useAuth();
+
+  // FASE -- CONFIGURACIÓN INICIAL DEL BACKEND ANTES DEL LOGIN:
+  // `storageService.getGoogleAppsScriptUrl()` sigue siendo la ÚNICA
+  // fuente de verdad de la URL (Requisito 1) -- este estado solo decide
+  // qué pantalla mostrar, nunca introduce un segundo lugar donde vive la
+  // configuración. Deliberadamente NO se vuelve a validar contra el
+  // backend en cada arranque (Requisito 10 de la fase: "por ahora no
+  // hagas un GET obligatorio cada vez que se abre la aplicación") -- solo
+  // se comprueba que exista localmente. La validación real ya ocurrió
+  // una vez en InitialSetupView antes de guardarla, y sigue disponible
+  // bajo demanda vía "Probar conexión" en Configuración.
+  const [backendConfigured, setBackendConfigured] = useState<boolean>(
+    () => !!storageService.getGoogleAppsScriptUrl()
+  );
+
   // FASE 3.6E (hallazgo de la prueba de F5 de esta fase): antes esta vista
   // siempre nacía en 'dashboard', así que recargar la página estando en
   // POS (u otra vista) a mitad de una operación regresaba al Dashboard --
@@ -221,6 +237,10 @@ const MainAppContent: React.FC = () => {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
+
+  if (!backendConfigured) {
+    return <InitialSetupView onConfigured={() => setBackendConfigured(true)} />;
+  }
 
   if (!isAuthenticated) {
     return <LoginView />;

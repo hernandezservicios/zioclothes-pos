@@ -236,6 +236,58 @@ class StorageService {
     this.saveInfrastructureConfig({ ...this.getInfrastructureConfig(), googleAppsScriptUrl: url });
   }
 
+  /**
+   * FASE (configuración inicial del backend / "Cambiar Servidor"): borra
+   * la URL configurada -- único punto de escritura de
+   * `zio_infrastructure_config` para "olvidar" el backend actual. Tras
+   * llamarla, `getGoogleAppsScriptUrl()` vuelve a devolver `''`, lo que
+   * hace que App.tsx muestre de nuevo la pantalla de configuración
+   * inicial. Se usa exclusivamente en el flujo de "Cambiar Servidor"
+   * (nunca automáticamente, nunca en un reset de fábrica -- ver
+   * comentario de `getInfrastructureConfig` arriba).
+   */
+  public clearGoogleAppsScriptUrl(): void {
+    this.saveInfrastructureConfig({ googleAppsScriptUrl: '' });
+  }
+
+  /**
+   * FASE (configuración inicial del backend -- Requisito Crítico de
+   * Aislamiento de Datos entre negocios): usado exclusivamente por
+   * "Cambiar Servidor" (SettingsView, pestaña de conexión). Purga TODAS
+   * las claves de datos de negocio/sesión de la instalación ANTERIOR
+   * antes de conectar un backend distinto.
+   *
+   * Hallazgo de auditoría que motiva este método: `DataStoreContext.
+   * clear()` (llamado por `AuthContext.logout()`) solo vacía el estado
+   * EN MEMORIA de React -- nunca borra `localStorage`. Sin este método,
+   * el primer render tras cambiar de servidor hidrataría brevemente
+   * (Hydration-First, mismo patrón que products/customers/etc. al
+   * montar) con el caché del negocio ANTERIOR antes de que el bootstrap
+   * del nuevo negocio lo sobrescriba -- exactamente lo que el
+   * aislamiento entre negocios prohíbe.
+   *
+   * Mismo patrón de iteración que ya usa `clearLocalUxAndBusinessCache`
+   * (resetToInitialDemo/resetToFactory) -- pero es un método SEPARADO,
+   * nunca fusionado con aquel: aquí `zio_pos_product_view` debe
+   * SOBREVIVIR (preferencia de interfaz puramente local, sin relación
+   * con ningún negocio -- Requisito 8 de la fase), mientras que un
+   * reset de fábrica sí la borra intencionalmente y ese comportamiento
+   * existente no debe cambiar.
+   *
+   * Deliberadamente NO toca `zio_infrastructure_config` -- eso lo decide
+   * el llamador por separado, vía `clearGoogleAppsScriptUrl()`, después
+   * de purgar los datos de negocio (para que, si algo fallara a mitad de
+   * camino, la URL vieja no quede reutilizándose con datos ya borrados).
+   */
+  public clearBusinessData(): void {
+    Object.values(STORAGE_KEYS).forEach((key) => {
+      if (key === STORAGE_KEYS.POS_PRODUCT_VIEW) return;
+      localStorage.removeItem(key);
+    });
+    sessionStorage.removeItem(STORAGE_KEYS.SESSION_TOKEN);
+    sessionStorage.removeItem(STORAGE_KEYS.SESSION_PERMISSIONS);
+  }
+
   // Users & Auth
   // FASE 3.6B: default vacío, no INITIAL_USERS -- ese seed de empleados
   // demo no debe usarse como fuente incluso en memoria, sin localStorage

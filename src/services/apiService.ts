@@ -35,6 +35,42 @@ export type TransportErrorCode =
   | 'API_ERROR'
   | 'ABORTED';
 
+/**
+ * FASE — CONFIGURACIÓN INICIAL DEL BACKEND ANTES DEL LOGIN.
+ *
+ * Códigos de error específicos de `checkBackendConnection` (Requisito
+ * 20: diferenciar exactamente por qué falló "Probar conexión" -- nunca
+ * un mensaje genérico). Deliberadamente separados de `TransportErrorCode`
+ * de arriba: esos son códigos de un transporte POST con sesión/reintentos
+ * ya establecido; este chequeo es una petición GET simple, pública, sin
+ * sesión, y con sus propias condiciones de negocio (`status`,
+ * `spreadsheetConnected`) que no tienen equivalente en el resto de la API.
+ */
+export type BackendConnectionErrorCode =
+  | 'NETWORK_ERROR'
+  | 'TIMEOUT_ERROR'
+  | 'DATA_FORMAT_ERROR'
+  | 'BACKEND_OFFLINE'
+  | 'SPREADSHEET_DISCONNECTED';
+
+export interface BackendConnectionInfo {
+  service?: string;
+  version?: string;
+  status?: string;
+  timezone?: string;
+  spreadsheetConnected?: boolean;
+  spreadsheetName?: string;
+}
+
+export interface BackendConnectionCheck {
+  success: boolean;
+  message: string;
+  errorCode?: BackendConnectionErrorCode;
+  data?: BackendConnectionInfo;
+}
+
+const CONNECTION_CHECK_TIMEOUT_MS = 12000;
+
 const REQUEST_TIMEOUT_MS = 20000;
 const RETRY_DELAY_MS = 700;
 
@@ -889,6 +925,119 @@ class ApiService {
     return {
       success: true,
       message: `Movimiento de ${tipoRaw.toLowerCase()} por RD$${monto.toLocaleString()} registrado con éxito.`,
+    };
+  }
+
+  /**
+   * FASE — CONFIGURACIÓN INICIAL DEL BACKEND ANTES DEL LOGIN.
+   *
+   * "Probar conexión" real, usado tanto por la pantalla de configuración
+   * inicial (antes del Login) como por Configuración → Conexión del
+   * sistema. Reutiliza el `doGet` YA EXISTENTE del Web App (Main.gs,
+   * sin modificar) -- NO se creó ningún endpoint nuevo. A diferencia de
+   * `executeRequest`/`syncWithGoogleAppsScript` (POST, con sesión, lee la
+   * URL desde storageService), esta función:
+   *   - recibe la URL como parámetro explícito (para poder probar una
+   *     URL todavía NO guardada, antes de que exista una fuente de
+   *     verdad que leer);
+   *   - hace una petición GET simple, pública, sin sessionToken;
+   *   - exige explícitamente `success === true`, `status === 'ONLINE'` y
+   *     `spreadsheetConnected === true` -- nunca basta con que el
+   *     servidor responda algo para considerar la conexión válida.
+   *
+   * Se asume que `url` ya fue validada/normalizada por el llamador
+   * (`normalizeAppsScriptUrl`, utils/backendUrl.ts) -- esta función no
+   * repite esa validación de formato, solo hace la prueba de red real.
+   */
+  public async checkBackendConnection(url: string): Promise<BackendConnectionCheck> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), CONNECTION_CHECK_TIMEOUT_MS);
+    let response: Response;
+
+    try {
+      response = await fetch(url, { method: 'GET', signal: controller.signal });
+    } catch (error: any) {
+      clearTimeout(timer);
+      if (error && error.name === 'AbortError') {
+        return {
+          success: false,
+          message: 'El servidor tardó demasiado en responder. Verifique la URL e intente nuevamente.',
+          errorCode: 'TIMEOUT_ERROR',
+        };
+      }
+      return {
+        success: false,
+        message: 'No se pudo conectar con el servidor. Verifique la URL y su conexión a internet.',
+        errorCode: 'NETWORK_ERROR',
+      };
+    }
+    clearTimeout(timer);
+
+    let bodyText: string;
+    try {
+      bodyText = await response.text();
+    } catch {
+      return {
+        success: false,
+        message: 'El servidor respondió, pero no se pudo leer su respuesta.',
+        errorCode: 'DATA_FORMAT_ERROR',
+      };
+    }
+
+    if (!bodyText || !bodyText.trim()) {
+      return {
+        success: false,
+        message: 'El servidor respondió vacío. Verifique que la URL corresponda a un Web App publicado.',
+        errorCode: 'DATA_FORMAT_ERROR',
+      };
+    }
+
+    let json: any;
+    try {
+      json = JSON.parse(bodyText);
+    } catch {
+      return {
+        success: false,
+        message: 'La respuesta del servidor no tiene un formato reconocible. Verifique que la URL sea la de un Web App de este sistema.',
+        errorCode: 'DATA_FORMAT_ERROR',
+      };
+    }
+
+    if (!json || json.success !== true || json.status !== 'ONLINE') {
+      return {
+        success: false,
+        message: 'El servidor respondió, pero no confirma estar en línea.',
+        errorCode: 'BACKEND_OFFLINE',
+      };
+    }
+
+    const info: BackendConnectionInfo = {
+      service: json.service,
+      version: json.version,
+      status: json.status,
+      timezone: json.timezone,
+      spreadsheetConnected: json.spreadsheetConnected === true,
+      spreadsheetName: json.spreadsheetName,
+    };
+
+    // Decisión final explícita del negocio (aprobación de esta fase):
+    // `spreadsheetConnected` debe ser estrictamente `true` -- nunca basta
+    // con que Apps Script responda, la Spreadsheet real debe estar
+    // conectada. El `doGet` real (Main.gs, sin modificar) siempre incluye
+    // este campo como booleano genuino (`sheetConnected`, nunca ausente).
+    if (json.spreadsheetConnected !== true) {
+      return {
+        success: false,
+        message: 'El servidor está en línea, pero no tiene conexión con su hoja de cálculo (Spreadsheet).',
+        errorCode: 'SPREADSHEET_DISCONNECTED',
+        data: info,
+      };
+    }
+
+    return {
+      success: true,
+      message: 'Conexión establecida correctamente.',
+      data: info,
     };
   }
 }

@@ -16,9 +16,10 @@ import { expensesApi } from '../../services/expensesApi';
 import { purchasesApi } from '../../services/purchasesApi';
 import { cashApi } from '../../services/cashApi';
 import { inventoryApi } from '../../services/inventoryApi';
-import { ApiResponse } from '../../services/apiService';
+import { apiService, ApiResponse, BackendConnectionInfo } from '../../services/apiService';
 import { SystemSettings, UserRole, User } from '../../types';
 import { formatDateTime, BUSINESS_TIMEZONE } from '../../utils/formatters';
+import { normalizeAppsScriptUrl } from '../../utils/backendUrl';
 import { exportToCSV } from '../../utils/exportUtils';
 import { toDisplayableImageUrl } from '../../utils/imageUrl';
 import {
@@ -42,6 +43,10 @@ import {
   FileWarning,
   ShieldAlert,
   X,
+  Server,
+  Loader2,
+  Wifi,
+  WifiOff,
 } from 'lucide-react';
 
 /**
@@ -588,7 +593,7 @@ export function validateBackupFile(rawText: string): BackupValidationResult {
 }
 
 export const SettingsView: React.FC = () => {
-  const { settings, updateSettings, currentUser, hasPermission, refreshCatalog } = useAuth();
+  const { settings, updateSettings, currentUser, hasPermission, refreshCatalog, logout } = useAuth();
   const { showToast } = useToast();
   // FASE B (RESTAURACIÓN REAL): tras una restauración exitosa, el
   // frontend NUNCA debe seguir mostrando datos viejos en memoria --
@@ -656,6 +661,64 @@ export const SettingsView: React.FC = () => {
   const [googleAppsScriptUrl, setGoogleAppsScriptUrlState] = useState<string>(() =>
     storageService.getGoogleAppsScriptUrl()
   );
+
+  // FASE — CONFIGURACIÓN INICIAL DEL BACKEND ANTES DEL LOGIN: "Probar
+  // conexión" real (mismo `apiService.checkBackendConnection` -- doGet
+  // real, sin endpoint nuevo -- que usa InitialSetupView) y "Cambiar
+  // Servidor", ambos operando sobre la MISMA `googleAppsScriptUrl` de
+  // arriba -- ninguna configuración paralela.
+  const [connectionStatus, setConnectionStatus] = useState<'idle' | 'checking' | 'success' | 'error'>('idle');
+  const [connectionMessage, setConnectionMessage] = useState('');
+  const [connectionInfo, setConnectionInfo] = useState<BackendConnectionInfo | null>(null);
+  const [changeServerModalOpen, setChangeServerModalOpen] = useState(false);
+  const [changingServer, setChangingServer] = useState(false);
+
+  const handleTestBackendConnection = useCallback(async () => {
+    const normalized = normalizeAppsScriptUrl(googleAppsScriptUrl);
+    if (!normalized) {
+      setConnectionStatus('error');
+      setConnectionInfo(null);
+      setConnectionMessage('La URL guardada no tiene el formato esperado de un Web App de Apps Script.');
+      return;
+    }
+    setConnectionStatus('checking');
+    setConnectionMessage('');
+    const res = await apiService.checkBackendConnection(normalized);
+    if (res.success) {
+      setConnectionStatus('success');
+      setConnectionInfo(res.data || null);
+      setConnectionMessage(res.message);
+    } else {
+      setConnectionStatus('error');
+      setConnectionInfo(res.data || null);
+      setConnectionMessage(res.message);
+    }
+  }, [googleAppsScriptUrl]);
+
+  // FASE — Requisito 8: "Cambiar Servidor". Reutiliza logout() TAL CUAL
+  // (sin tocar su comportamiento existente para el logout normal) y le
+  // agrega, por encima, la purga real de localStorage que logout() por sí
+  // solo nunca hacía (ver hallazgo crítico de la auditoría de esta fase:
+  // DataStoreContext.clear() solo vacía memoria) -- así ningún dato del
+  // negocio A puede sobrevivir hasta que se conecte el negocio B.
+  //
+  // Termina con un `window.location.reload()` deliberado: además de
+  // DataStoreContext, otros componentes (esta misma pantalla incluida --
+  // `googleAppsScriptUrl`/`formSettings`/`users`, todos hidratados una
+  // sola vez al montar) mantienen su PROPIO estado en memoria leído de
+  // storageService -- actualizar `backendConfigured` en App.tsx por sí
+  // solo no garantizaría limpiar cada uno de esos rincones. Un remontaje
+  // completo de la aplicación es la única forma de asegurar, sin
+  // excepción, que App.tsx vuelva a leer `getGoogleAppsScriptUrl()` (ya
+  // vacía) desde cero y muestre InitialSetupView con todo realmente en
+  // blanco -- exactamente lo que exige el aislamiento entre negocios.
+  const handleConfirmChangeServer = () => {
+    setChangingServer(true);
+    logout();
+    storageService.clearBusinessData();
+    storageService.clearGoogleAppsScriptUrl();
+    window.location.reload();
+  };
 
   // FASE 3.7G: usuarios administrativos reales vía auth.listUsers/
   // auth.saveUser (AuthController.gs). Antes storageService.getUsers()/
@@ -1754,57 +1817,188 @@ export const SettingsView: React.FC = () => {
 
       {/* TAB 3: GOOGLE SHEETS SYNC */}
       {activeTab === 'SHEETS' && (
-        <div className="bg-white p-6 rounded-3xl border border-[#E4DDD2] space-y-6 shadow-xs">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-2xl bg-emerald-50 border border-emerald-200 flex items-center justify-center text-emerald-700">
-              <FileSpreadsheet className="w-6 h-6" />
+        <div className="space-y-6">
+          {/* FASE — CONFIGURACIÓN INICIAL DEL BACKEND ANTES DEL LOGIN
+              (Requisito 4/7/8): "Conexión del sistema" -- misma
+              `googleAppsScriptUrl`/storageService de siempre, ahora con
+              estado real, "Probar conexión" (mismo doGet real que usa
+              InitialSetupView) y "Cambiar Servidor". */}
+          <div className="bg-white p-6 rounded-3xl border border-[#E4DDD2] space-y-5 shadow-xs">
+            <div className="flex items-center gap-3">
+              <div
+                className={`w-10 h-10 rounded-2xl border flex items-center justify-center ${
+                  connectionStatus === 'success'
+                    ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
+                    : connectionStatus === 'error'
+                    ? 'bg-rose-50 border-rose-200 text-rose-700'
+                    : 'bg-[#FAF8F4] border-[#E4DDD2] text-[#756E65]'
+                }`}
+              >
+                {connectionStatus === 'success' ? (
+                  <Wifi className="w-5 h-5" />
+                ) : connectionStatus === 'error' ? (
+                  <WifiOff className="w-5 h-5" />
+                ) : (
+                  <Server className="w-5 h-5" />
+                )}
+              </div>
+              <div>
+                <h3 className="font-serif font-bold text-base text-[#2F2A25]">Conexión del Sistema</h3>
+                <p className="text-xs text-[#756E65]">Servidor conectado a este sistema.</p>
+              </div>
             </div>
-            <div>
-              <h3 className="font-serif font-bold text-base text-[#2F2A25]">Integración con Google Sheets</h3>
-              <p className="text-xs text-[#756E65]">
-                Sincronización en tiempo real de ventas, inventario, clientes y abonos a tu hoja de cálculo.
-              </p>
+
+            <div className="p-3.5 rounded-2xl bg-[#FAF8F4] border border-[#E4DDD2]">
+              <span className="block text-[10px] font-bold uppercase tracking-wide text-[#756E65] mb-1">Servidor Actual</span>
+              <span className="font-mono text-[11px] text-[#2F2A25] break-all">
+                {googleAppsScriptUrl || 'Sin configurar'}
+              </span>
             </div>
+
+            {connectionStatus !== 'idle' && (
+              <div
+                className={`p-3 rounded-xl border text-xs font-semibold flex items-start gap-2 ${
+                  connectionStatus === 'success'
+                    ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                    : connectionStatus === 'error'
+                    ? 'bg-rose-50 border-rose-200 text-rose-800'
+                    : 'bg-[#FAF8F4] border-[#E4DDD2] text-[#756E65]'
+                }`}
+              >
+                {connectionStatus === 'checking' ? (
+                  <Loader2 className="w-4 h-4 shrink-0 mt-0.5 animate-spin" />
+                ) : connectionStatus === 'success' ? (
+                  <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
+                ) : (
+                  <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+                )}
+                <div className="space-y-0.5">
+                  <span>{connectionStatus === 'checking' ? 'Probando conexión...' : connectionMessage}</span>
+                  {connectionStatus === 'success' && connectionInfo && (
+                    <p className="text-[10px] font-normal text-emerald-700">
+                      {connectionInfo.service ? `${connectionInfo.service} · ` : ''}
+                      {connectionInfo.version ? `v${connectionInfo.version} · ` : ''}
+                      {connectionInfo.timezone || ''}
+                    </p>
+                  )}
+                </div>
+              </div>
+            )}
+
+            <div className="flex flex-col sm:flex-row gap-3">
+              <button
+                type="button"
+                onClick={handleTestBackendConnection}
+                disabled={connectionStatus === 'checking' || !googleAppsScriptUrl}
+                className="flex-1 flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl bg-[#2F2A25] text-white text-xs font-bold hover:bg-[#403932] transition shadow-xs disabled:bg-zinc-300 disabled:cursor-not-allowed"
+              >
+                <RefreshCw className={`w-4 h-4 ${connectionStatus === 'checking' ? 'animate-spin' : ''}`} />
+                <span>{connectionStatus === 'checking' ? 'Probando...' : 'Probar Conexión'}</span>
+              </button>
+              {hasPermission('admin.configuracion') && (
+                <button
+                  type="button"
+                  onClick={() => setChangeServerModalOpen(true)}
+                  className="flex-1 flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl bg-white border border-rose-200 text-rose-700 text-xs font-bold hover:bg-rose-50 transition shadow-xs"
+                >
+                  <Server className="w-4 h-4" />
+                  <span>Cambiar Servidor</span>
+                </button>
+              )}
+            </div>
+
+            {/* Edición manual avanzada -- se conserva tal cual existía
+                (Requisito 14: no romper el comportamiento actual). */}
+            <details className="text-xs">
+              <summary className="cursor-pointer font-bold text-[#756E65] hover:text-[#2F2A25] select-none">
+                Editar URL manualmente (avanzado)
+              </summary>
+              <div className="mt-2">
+                <input
+                  type="text"
+                  placeholder="https://script.google.com/macros/s/.../exec"
+                  value={googleAppsScriptUrl}
+                  onChange={(e) => {
+                    const url = e.target.value;
+                    setGoogleAppsScriptUrlState(url);
+                    storageService.setGoogleAppsScriptUrl(url);
+                    setConnectionStatus('idle');
+                  }}
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-[#E4DDD2] bg-white font-mono text-xs"
+                />
+              </div>
+            </details>
           </div>
 
-          <div className="p-4 bg-[#FAF8F4] rounded-2xl border border-[#E4DDD2] space-y-3 text-xs">
-            <p className="text-[#2F2A25] leading-relaxed">
-              El sistema ZIO CLOTHES está preparado para sincronizar automáticamente cada venta, entrada de inventario y abono a Google Sheets a través del Webhook de Google Apps Script.
+          <div className="bg-white p-6 rounded-3xl border border-[#E4DDD2] space-y-6 shadow-xs">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-2xl bg-emerald-50 border border-emerald-200 flex items-center justify-center text-emerald-700">
+                <FileSpreadsheet className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="font-serif font-bold text-base text-[#2F2A25]">Integración con Google Sheets</h3>
+                <p className="text-xs text-[#756E65]">
+                  Sincronización en tiempo real de ventas, inventario, clientes y abonos a tu hoja de cálculo.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4 p-4 bg-emerald-50 rounded-2xl border border-emerald-200">
+              <div>
+                <span className="text-[11px] font-bold uppercase text-emerald-900">Estado de la Sincronización</span>
+                <p className="text-xs text-emerald-800 mt-0.5">
+                  {googleAppsScriptUrl
+                    ? 'Webhook configurado listo para enviar transacciones.'
+                    : 'Listo para conectar con Google Sheets.'}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={handleTriggerSync}
+                disabled={syncing}
+                className="flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl bg-emerald-800 text-white text-xs font-bold hover:bg-emerald-900 transition shadow-xs"
+              >
+                <RefreshCw className={`w-4 h-4 ${syncing ? 'animate-spin' : ''}`} />
+                <span>{syncing ? 'Sincronizando...' : 'Sincronizar Ahora'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* FASE — Requisito 8: confirmación antes de cambiar de servidor. */}
+      {changeServerModalOpen && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-xs z-50 flex items-center justify-center p-4">
+          <div className="bg-white border border-[#E4DDD2] rounded-3xl max-w-sm w-full p-6 space-y-4 shadow-2xl">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-2xl bg-rose-50 border border-rose-200 flex items-center justify-center text-rose-700">
+                <AlertTriangle className="w-5 h-5" />
+              </div>
+              <h3 className="font-serif font-bold text-base text-[#2F2A25]">Cambiar Servidor</h3>
+            </div>
+            <p className="text-xs text-[#756E65] leading-relaxed">
+              Al cambiar el servidor se cerrará la sesión y se cargará la información del nuevo negocio. Los
+              datos guardados localmente de este negocio se eliminarán de este dispositivo.
             </p>
-            <div>
-              <label className="block font-bold text-[#2F2A25] mb-1">URL de Webhook (Google Apps Script):</label>
-              <input
-                type="text"
-                placeholder="https://script.google.com/macros/s/.../exec"
-                value={googleAppsScriptUrl}
-                onChange={(e) => {
-                  const url = e.target.value;
-                  setGoogleAppsScriptUrlState(url);
-                  storageService.setGoogleAppsScriptUrl(url);
-                }}
-                className="w-full px-3.5 py-2.5 rounded-xl border border-[#E4DDD2] bg-white font-mono text-xs"
-              />
+            <div className="flex gap-3 pt-1">
+              <button
+                type="button"
+                onClick={() => setChangeServerModalOpen(false)}
+                disabled={changingServer}
+                className="flex-1 py-2.5 rounded-xl border border-[#E4DDD2] text-xs font-bold text-[#756E65] hover:bg-[#FAF8F4] transition disabled:opacity-60"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmChangeServer}
+                disabled={changingServer}
+                className="flex-1 py-2.5 rounded-xl bg-rose-700 text-white text-xs font-bold hover:bg-rose-800 transition disabled:opacity-60 flex items-center justify-center gap-2"
+              >
+                {changingServer && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                <span>Continuar</span>
+              </button>
             </div>
-          </div>
-
-          <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4 p-4 bg-emerald-50 rounded-2xl border border-emerald-200">
-            <div>
-              <span className="text-[11px] font-bold uppercase text-emerald-900">Estado de la Sincronización</span>
-              <p className="text-xs text-emerald-800 mt-0.5">
-                {googleAppsScriptUrl
-                  ? 'Webhook configurado listo para enviar transacciones.'
-                  : 'Listo para conectar con Google Sheets.'}
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={handleTriggerSync}
-              disabled={syncing}
-              className="flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl bg-emerald-800 text-white text-xs font-bold hover:bg-emerald-900 transition shadow-xs"
-            >
-              <RefreshCw className={`w-4 h-4 ${syncing ? 'animate-spin' : ''}`} />
-              <span>{syncing ? 'Sincronizando...' : 'Sincronizar Ahora'}</span>
-            </button>
           </div>
         </div>
       )}
