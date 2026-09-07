@@ -11,6 +11,16 @@ import { ChevronUp, ChevronDown } from 'lucide-react';
  * así el indicador NO se desplaza junto con el contenido ni le resta
  * espacio (siempre `position: absolute`, nunca ocupa layout).
  *
+ * AJUSTE DE POSICIÓN (mismo componente/control, sin cambios de
+ * funcionalidad): ancladas a `right-1.5` -- el EXTREMO DERECHO de su
+ * contenedor, exactamente la franja donde antes se dibujaba el
+ * scrollbar nativo -- en vez de centradas horizontalmente
+ * (`left-1/2 -translate-x-1/2`, como estaban antes). `right-*` es un
+ * offset fijo desde el borde derecho, así que en cualquier ancho de
+ * pantalla (escritorio/laptop/tablet/móvil) el botón permanece pegado a
+ * ese borde y nunca se desplaza hacia el centro, dejando la zona central
+ * de lectura completamente libre.
+ *
  * Los botones permanecen siempre montados y solo cambian opacidad/
  * `pointer-events` (transición suave de aparición/desaparición sin
  * depender de una librería de animación) -- así nunca bloquean clics en
@@ -27,7 +37,7 @@ interface ScrollEdgeArrowsProps {
 }
 
 const baseButtonClass =
-  'absolute left-1/2 -translate-x-1/2 z-10 w-6 h-6 rounded-full bg-white/95 border border-[#E4DDD2] shadow-sm flex items-center justify-center text-[#756E65] transition-opacity duration-200 hover:text-[#2F2A25] hover:bg-white focus:outline-none focus-visible:ring-2 focus-visible:ring-[#2F2A25]/30';
+  'absolute right-1.5 z-10 w-6 h-6 rounded-full bg-white/95 border border-[#E4DDD2] shadow-sm flex items-center justify-center text-[#756E65] transition-opacity duration-200 hover:text-[#2F2A25] hover:bg-white focus:outline-none focus-visible:ring-2 focus-visible:ring-[#2F2A25]/30';
 
 export const ScrollEdgeArrows: React.FC<ScrollEdgeArrowsProps> = ({
   canScrollUp,
