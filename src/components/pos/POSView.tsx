@@ -189,12 +189,39 @@ export const POSView: React.FC = () => {
   };
 
   // New Customer Form State
+  // AUDITORÍA (FASE -- modales de cliente/producto/variantes): igual que
+  // CustomersView.tsx -- `newCustLimite` arrancaba en `25000` como VALOR
+  // real del input (`useState(25000)`), no como placeholder. El
+  // formulario "Registrar Nuevo Cliente Rápido" del POS aparecía con
+  // "Límite de Crédito" ya prellenado con RD$ 25,000.00 sin que la
+  // cajera escribiera nada.
   const [newCustNombre, setNewCustNombre] = useState('');
   const [newCustApellido, setNewCustApellido] = useState('');
   const [newCustDoc, setNewCustDoc] = useState('');
   const [newCustTel, setNewCustTel] = useState('');
-  const [newCustLimite, setNewCustLimite] = useState(25000);
+  const [newCustLimite, setNewCustLimite] = useState<number | string>('');
   const [creatingQuickCustomer, setCreatingQuickCustomer] = useState(false);
+
+  // AUDITORÍA (FASE -- modales de cliente/producto/variantes, Objetivo 1 /
+  // TEST 2): antes, cerrar este modal SIN guardar (botón "Cancelar" o la
+  // X, ambos llaman a `closeNewCustomerModal`) no reiniciaba ningún campo
+  // -- si la cajera escribía datos y cancelaba, la PRÓXIMA vez que abría
+  // "Nuevo Cliente" (incluso para un cliente totalmente distinto) seguía
+  // viendo lo que había tecleado antes. `handleCreateQuickCustomer` sí
+  // limpiaba nombre/apellido/documento/teléfono tras un guardado EXITOSO,
+  // pero no en el camino de cancelar, y tampoco limpiaba
+  // `newCustLimite`. Mismo patrón "reset al ABRIR" ya usado en
+  // ProductFormModal.tsx (nunca "reset al cerrar", para no interferir con
+  // la animación de salida) -- se ejecuta cada vez que el modal pasa a
+  // estar abierto, sin importar cómo se cerró la vez anterior.
+  useEffect(() => {
+    if (!newCustomerModalOpen) return;
+    setNewCustNombre('');
+    setNewCustApellido('');
+    setNewCustDoc('');
+    setNewCustTel('');
+    setNewCustLimite('');
+  }, [newCustomerModalOpen]);
 
   // PARTE 5 (Hydration-First / F5): persiste el estado de trabajo del POS
   // en cada cambio relevante, para que un F5 posterior lo recupere. Nunca
@@ -1546,8 +1573,19 @@ export const POSView: React.FC = () => {
                 <label className="block font-bold text-[#2F2A25] mb-1">Límite de Crédito (RD$):</label>
                 <input
                   type="number"
-                  value={newCustLimite}
-                  onChange={(e) => setNewCustLimite(Number(e.target.value))}
+                  min="0"
+                  step="any"
+                  inputMode="decimal"
+                  placeholder="0.00"
+                  value={newCustLimite === '' ? '' : newCustLimite}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    if (val === '') setNewCustLimite('');
+                    else {
+                      const num = parseFloat(val);
+                      setNewCustLimite(isNaN(num) ? '' : val);
+                    }
+                  }}
                   className="w-full px-3 py-2 rounded-xl border border-[#E4DDD2] bg-white"
                 />
               </div>

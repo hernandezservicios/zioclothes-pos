@@ -125,14 +125,27 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
   const { showToast } = useToast();
 
   // Basic Form States
+  // AUDITORÍA (FASE -- modales de cliente/producto/variantes, causa raíz
+  // del Objetivo 2): `marca`, `costo`, `precio` y `stockMinimo`
+  // arrancaban con un VALOR real ('ZIO', 1200, 2500, 5 -- literalmente
+  // los mismos ejemplos citados en la auditoría) en vez de vacío. Los
+  // inputs de costo/precio/stockMinimo YA estaban preparados para
+  // mostrar un placeholder de ejemplo cuando el valor es '' (ver
+  // `value={costo === '' ? '' : costo}` más abajo en el JSX, con
+  // placeholder="0.00"/"5") -- el bug era exclusivamente el valor
+  // inicial/de reseteo, nunca el propio input. `codigoBarras`/
+  // `categoriaId` ya arrancaban correctamente vacíos aquí -- el bug de
+  // esos dos vivía solo en la rama "producto nuevo" del useEffect de
+  // abajo (auto-generaba un código y auto-seleccionaba la primera
+  // categoría al abrir).
   const [nombre, setNombre] = useState('');
   const [codigoBarras, setCodigoBarras] = useState('');
   const [descripcion, setDescripcion] = useState('');
   const [categoriaId, setCategoriaId] = useState('');
-  const [marca, setMarca] = useState('ZIO');
-  const [costo, setCosto] = useState<number | string>(1200); // Costo FIRST
-  const [precio, setPrecio] = useState<number | string>(2500); // Precio SECOND
-  const [stockMinimo, setStockMinimo] = useState<number | string>(5);
+  const [marca, setMarca] = useState('');
+  const [costo, setCosto] = useState<number | string>(''); // Costo FIRST
+  const [precio, setPrecio] = useState<number | string>(''); // Precio SECOND
+  const [stockMinimo, setStockMinimo] = useState<number | string>('');
   const [imagenUrl, setImagenUrl] = useState('');
   const [variantes, setVariantes] = useState<ProductVariant[]>([]);
   // FASE (corrección definitiva de variantes -- guardado individual,
@@ -247,14 +260,29 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
     setNewVariantStock(0);
 
     if (editingProduct) {
+      // AUDITORÍA (FASE -- modales de cliente/producto/variantes,
+      // Objetivo 5 -- "Editar Producto debe cargar ÚNICAMENTE los datos
+      // persistidos de ESE producto"): `marca || 'ZIO'` y
+      // `stockMinimo || 5` usaban `||`, que trata CUALQUIER valor falsy
+      // -- incluido un `stockMinimo` real guardado como `0`, o una
+      // `marca` real guardada como cadena vacía -- como "no hay dato" y
+      // lo reemplazaba por el mismo valor de ejemplo hardcodeado del
+      // Objetivo 2. Un producto editado que de verdad tenía
+      // `stockMinimo: 0` (alerta desactivada a propósito) aparecía en
+      // este formulario mostrando "5", y si se guardaba sin tocar ese
+      // campo, el `0` real se perdía silenciosamente. `stockMinimo`
+      // usa `??` (nullish coalescing) en vez de `||` -- solo cae al
+      // valor de respaldo si el dato es real `null`/`undefined`, nunca
+      // si es un `0` legítimo. `marca` cae a `''` (vacío, con su propio
+      // placeholder) en vez de a un nombre de marca inventado.
       setNombre(editingProduct.nombre || '');
       setCodigoBarras(editingProduct.codigoBarras || '');
       setDescripcion(editingProduct.descripcion || '');
       setCategoriaId(editingProduct.categoriaId || categories[0]?.id || '');
-      setMarca(editingProduct.marca || 'ZIO');
+      setMarca(editingProduct.marca || '');
       setCosto(editingProduct.costo || 0);
       setPrecio(editingProduct.precio || 0);
-      setStockMinimo(editingProduct.stockMinimo || 5);
+      setStockMinimo(editingProduct.stockMinimo ?? 5);
       setImagenUrl(editingProduct.imagenUrl || '');
 
       const prodVariants = editingProduct.variantes || [];
@@ -291,15 +319,32 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
       setSelectedColors(existingColors);
     } else {
       // New product: Start clean without forced predefined variants
+      //
+      // AUDITORÍA (FASE -- modales de cliente/producto/variantes, causa
+      // raíz del Objetivo 2): esta rama ("producto nuevo") era la que de
+      // verdad rellenaba el formulario con valores falsos cada vez que
+      // se abría "Nuevo Producto" -- generaba un código de barras real
+      // (`codigoBarras`, aunque el botón "Generar Código" del formulario
+      // ya deja hacer esto manualmente, y `handleSubmit` YA genera uno
+      // automáticamente al guardar si queda vacío -- línea
+      // `finalMainBarcode = codigoBarras.trim() || ...` -- así que
+      // prellenarlo aquí era puramente redundante y ocultaba el
+      // placeholder), auto-seleccionaba la PRIMERA categoría del
+      // catálogo (el `<select>` de Categoría no tenía ninguna opción
+      // vacía que representara "sin seleccionar"), y fijaba
+      // marca/costo/precio/stockMinimo a los mismos valores de ejemplo
+      // citados en la auditoría (ZIO/1200/2500/5). Ninguno de estos 6
+      // campos necesita un valor real para abrir el formulario -- todos
+      // ya tienen su propio placeholder de ejemplo.
       setNombre('');
-      setCodigoBarras(`746${Math.floor(100000000 + Math.random() * 900000000)}`);
+      setCodigoBarras('');
       setEnableVariantBarcodes(false);
       setDescripcion('');
-      setCategoriaId(categories[0]?.id || '');
-      setMarca('ZIO');
-      setCosto(1200);
-      setPrecio(2500);
-      setStockMinimo(5);
+      setCategoriaId('');
+      setMarca('');
+      setCosto('');
+      setPrecio('');
+      setStockMinimo('');
       setImagenUrl('');
 
       // FASE (normalización comercial -- Parte 6): por defecto,
@@ -1135,6 +1180,21 @@ export const ProductFormModal: React.FC<ProductFormModalProps> = ({
                   onChange={(e) => setCategoriaId(e.target.value)}
                   className="w-full px-3.5 py-2.5 rounded-xl border border-[#E4DDD2] bg-white font-semibold text-[#2F2A25] focus:border-[#2F2A25] focus:outline-none shadow-2xs text-xs"
                 >
+                  {/* AUDITORÍA (FASE -- modales de cliente/producto/
+                      variantes): antes no existía ninguna opción vacía --
+                      un <select> nativo sin ninguna opción con
+                      value="" que calce el estado inicial ('') termina
+                      mostrando la PRIMERA categoría real como
+                      seleccionada visualmente, aunque `categoriaId` en
+                      React siga en '' -- el usuario nunca se entera de
+                      que en realidad no ha elegido nada. Esta opción
+                      vacía y deshabilitada es el placeholder real de un
+                      <select>, y hace que "Nuevo Producto" se vea
+                      genuinamente sin categoría hasta que el usuario
+                      elija una. */}
+                  <option value="" disabled>
+                    Seleccionar categoría...
+                  </option>
                   {(categories || []).map((c) => (
                     <option key={c.id} value={c.id}>
                       {c.nombre}

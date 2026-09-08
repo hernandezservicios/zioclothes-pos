@@ -439,3 +439,47 @@ describe('POSView -- cliente nuevo queda seleccionado automáticamente', () => {
     expect(payload.clienteNombre).toContain('Diez');
   });
 });
+
+/**
+ * AUDITORÍA -- MODALES DE CLIENTE, PRODUCTO Y VARIANTES, Objetivo 1.
+ *
+ * "Registrar Nuevo Cliente Rápido" (el modal de alta rápida del propio
+ * POS -- distinto de CustomersView.tsx, pero mismo defecto: "Límite de
+ * Crédito" arrancaba en `useState(25000)`, un VALOR real, no un
+ * placeholder) también debe iniciar vacío.
+ */
+describe('POSView -- "Registrar Nuevo Cliente Rápido" inicia completamente vacío (Objetivo 1)', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    vi.clearAllMocks();
+    productsApiList.mockResolvedValue({ success: true, data: [] });
+    productsApiListAuxiliaries.mockResolvedValue({
+      success: true,
+      data: { categories: [], sizes: [], colors: [], suppliers: [] },
+    });
+    customersApiList.mockResolvedValue({ success: true, data: [] });
+  });
+  afterEach(() => cleanup());
+
+  it('"Límite de Crédito" inicia vacío -- nunca con 25000 ya relleno', async () => {
+    renderPOS();
+    await openNewCustomerModal();
+
+    expect((screen.getByPlaceholderText('Ej. Ana') as HTMLInputElement).value).toBe('');
+    expect((screen.getByPlaceholderText('Ej. Marte') as HTMLInputElement).value).toBe('');
+    expect((screen.getByPlaceholderText('0.00') as HTMLInputElement).value).toBe('');
+  });
+
+  it('escribir datos y cancelar sin guardar: reabrir el modal debe estar vacío otra vez', async () => {
+    renderPOS();
+    await openNewCustomerModal();
+
+    fireEvent.change(screen.getByPlaceholderText('Ej. Ana'), { target: { value: 'Sin Guardar' } });
+    fireEvent.change(screen.getByPlaceholderText('0.00'), { target: { value: '77777' } });
+    fireEvent.click(screen.getByText('Cancelar'));
+
+    await openNewCustomerModal();
+    expect((screen.getByPlaceholderText('Ej. Ana') as HTMLInputElement).value).toBe('');
+    expect((screen.getByPlaceholderText('0.00') as HTMLInputElement).value).toBe('');
+  });
+});

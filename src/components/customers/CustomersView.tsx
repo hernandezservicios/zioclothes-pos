@@ -66,9 +66,34 @@ export const CustomersView: React.FC = () => {
   const [telefono, setTelefono] = useState('');
   const [correo, setCorreo] = useState('');
   const [direccion, setDireccion] = useState('');
+  // NOTA (misma auditoría, hallazgo relacionado pero DELIBERADAMENTE NO
+  // corregido aquí): `ciudad` también arranca con un valor fijo
+  // ("Santo Domingo") en vez de vacío, pero a diferencia de los 8 campos
+  // de abajo, este NUNCA se muestra en NINGÚN input de este modal -- no
+  // hay ningún campo "Ciudad" en el formulario (confirmado revisando
+  // todo el JSX), así que el usuario jamás ve un valor "preseleccionado"
+  // aquí para corregir. Sí se envía tal cual a `customersApi.save` y se
+  // muestra luego en el perfil del cliente (`{direccion}, {ciudad}`) --
+  // cambiar esto sería alterar qué dato se guarda/exhibe para un campo
+  // que esta tarea no pidió tocar (no aparece en la lista de campos del
+  // Objetivo 1) y sin una entrada de formulario visible que "vaciar" no
+  // aplica el mismo patrón de bug. Se deja intacto para no romper
+  // funcionalidad fuera del alcance pedido -- reportado como hallazgo
+  // aparte.
   const [ciudad, setCiudad] = useState('Santo Domingo');
-  const [limiteCredito, setLimiteCredito] = useState<number | string>(30000);
-  const [diasCreditoPorDefecto, setDiasCreditoPorDefecto] = useState<number | string>(30);
+  // AUDITORÍA (FASE -- modales de cliente/producto/variantes, causa raíz
+  // del Objetivo 1): estos dos campos arrancaban con `30000`/`30` como
+  // VALOR real del input (`useState(30000)`/`useState(30)`, usado
+  // directamente en `value=`), no como placeholder -- "Registrar Nuevo
+  // Cliente" aparecía con "Límite de Crédito" y "Plazo de Pago" ya
+  // rellenos con esos números sin que el usuario escribiera nada. Ambos
+  // campos YA tenían su propio `placeholder` ("0.00" / "30") listo para
+  // mostrar exactamente ese mismo ejemplo sin que fuera un valor real --
+  // el bug era que el estado inicial nunca dejaba que el placeholder se
+  // viera. `handleOpenCreate` (más abajo) tenía el mismo problema al
+  // reabrir el modal para un cliente nuevo.
+  const [limiteCredito, setLimiteCredito] = useState<number | string>('');
+  const [diasCreditoPorDefecto, setDiasCreditoPorDefecto] = useState<number | string>('');
 
   const filteredCustomers = useMemo(() => {
     return (customers || []).filter((c) => {
@@ -94,8 +119,8 @@ export const CustomersView: React.FC = () => {
     setCorreo('');
     setDireccion('');
     setCiudad('Santo Domingo');
-    setLimiteCredito(30000);
-    setDiasCreditoPorDefecto(30);
+    setLimiteCredito('');
+    setDiasCreditoPorDefecto('');
     setModalOpen(true);
   };
 
