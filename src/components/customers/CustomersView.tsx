@@ -371,10 +371,15 @@ export const CustomersView: React.FC = () => {
         </div>
       </div>
 
-      {/* CREATE / EDIT CUSTOMER MODAL */}
+      {/* CREATE / EDIT CUSTOMER MODAL.
+          AUDITORÍA (FASE -- responsive completo): formulario con varios
+          campos y sin tope de altura ni scroll propio. Mismo patrón que
+          el resto de esta auditoría: overlay desplazable
+          (`overflow-y-auto` + `my-8`), sin tocar ningún campo ni la
+          lógica de creación/edición de clientes. */}
       {modalOpen && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-xs z-50 flex items-center justify-center p-4">
-          <div className="bg-[#FAF8F4] border border-[#E4DDD2] rounded-3xl max-w-lg w-full p-5 space-y-4 shadow-2xl">
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-xs z-50 flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-[#FAF8F4] border border-[#E4DDD2] rounded-3xl max-w-lg w-full p-5 space-y-4 shadow-2xl my-8">
             <div className="flex justify-between items-center border-b border-[#E4DDD2] pb-3">
               <h3 className="text-sm font-bold text-[#2F2A25]">
                 {editingCustomer ? 'Editar Cliente' : 'Registrar Nuevo Cliente'}

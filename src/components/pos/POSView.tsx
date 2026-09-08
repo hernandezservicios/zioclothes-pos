@@ -79,6 +79,18 @@ export const POSView: React.FC = () => {
     refreshCustomers();
   }, [refreshProducts, refreshCustomers]);
 
+  // AUDITORÍA (FASE -- regresión de imágenes/logo): `productoId`s cuya
+  // foto real falló al cargar (Drive, red, permiso -- cualquier causa
+  // real, nunca decidido por este código) -- se les muestra el MISMO
+  // ícono de fallback que ya existía para "sin foto", en vez del ícono
+  // de imagen rota del navegador. Nunca oculta una falla GLOBAL: si
+  // TODAS las fotos fallan, este Set simplemente termina con TODOS los
+  // IDs -- eso es una señal a investigar (ver reporte), no algo que este
+  // fallback deba disimular quitando el requisito de imagen real.
+  const [imageLoadFailedIds, setImageLoadFailedIds] = useState<Set<string>>(new Set());
+  const markImageFailed = (id: string) =>
+    setImageLoadFailedIds((prev) => (prev.has(id) ? prev : new Set(prev).add(id)));
+
   // Unified Search & Barcode Scanner State
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('TODOS');
@@ -555,8 +567,408 @@ export const POSView: React.FC = () => {
     showToast('Cliente Creado', `Se registró y seleccionó a ${newCustNombre.trim()} en Google Sheets.`, 'exito');
   };
 
+  // AUDITORÍA (FASE -- responsive roto tras la corrección de scroll):
+  // este contenedor usaba `h-[calc(100vh-4.5rem)]` -- una altura
+  // adivinada de forma INDEPENDIENTE del layout real (viewport completo
+  // menos un Navbar que se ASUME de 4.5rem), completamente desconectada
+  // de la altura real que su padre (<main>, en src/App.tsx) le entrega.
+  // Antes de la corrección de scroll esto no se notaba: el root no tenía
+  // `overflow-hidden`, así que cualquier desajuste (Navbar con una altura
+  // real distinta a 4.5rem, o -- en móvil -- `100vh` calculado sobre el
+  // viewport GRANDE mientras la barra de direcciones seguía visible)
+  // simplemente hacía que la PÁGINA completa scrolleara un poco de más,
+  // sin que se notara. Ahora que <main> (y toda la cadena hasta la raíz)
+  // tiene una altura real, acotada y con `overflow-hidden`, ese mismo
+  // desajuste ya no se "absorbe" con scroll de página -- se recorta sin
+  // forma de alcanzarlo, cortando exactamente lo que queda más abajo:
+  // la barra flotante de carrito/cobro en móvil.
+  //
+  // `h-full` reemplaza esa altura adivinada por la altura REAL que ya
+  // provee `<main>` (100% de un ancestro con altura definida gracias a
+  // `h-dvh` en la raíz -- ver App.tsx), sin ningún número mágico. Ningún
+  // otro aspecto de POS (grid, cards, carrito, lógica) se tocó -- es
+  // exclusivamente este contenedor heredando su altura real en vez de
+  // recalcularla de forma aislada e imprecisa.
+
+  // AUDITORÍA (FASE -- responsive completo): `mobileCartOpen` (declarado
+  // arriba) existía como estado pero nunca se usaba en ningún lado -- en
+  // móvil el carrito (columna derecha completa: cliente, líneas con
+  // cantidad/descuento por producto, descuento global, ITBIS, botón
+  // "COBRAR ORDEN") era literalmente inalcanzable, porque esa columna
+  // tiene `hidden lg:flex` y lo único visible en `lg:hidden` era la barra
+  // flotante de Total + Cobrar -- sin forma de ver ni editar qué había
+  // dentro. `renderCartPanel()` extrae ese contenido (idéntico, mismo
+  // JSX, mismos handlers -- ninguna lógica nueva ni duplicada) para
+  // reutilizarlo tal cual en dos lugares: la columna derecha de
+  // escritorio (como ya estaba) y un nuevo drawer inferior móvil que se
+  // abre al tocar el área de "Total" de la barra flotante, cierra con la
+  // X o el fondo, y dentro del cual el mismo botón "COBRAR ORDEN" de
+  // siempre sigue abriendo el mismo PaymentModal de siempre.
+  const renderCartPanel = () => (
+    <>
+      {/* Cart Top Header: Customer Selector */}
+      <div className="p-4 bg-[#F6F1E8] border-b border-[#E4DDD2] space-y-2.5">
+        <div className="flex items-center justify-between">
+          <span className="text-xs font-bold text-[#2F2A25] uppercase tracking-wider">Cliente:</span>
+          <button
+            type="button"
+            onClick={() => setNewCustomerModalOpen(true)}
+            className="text-[11px] text-[#C2410C] hover:underline font-bold flex items-center gap-1"
+          >
+            <UserPlus className="w-3 h-3" />
+            <span>+ Nuevo Cliente</span>
+          </button>
+        </div>
+
+        <select
+          aria-label="Cliente"
+          value={selectedCustomer?.id || ''}
+          onChange={(e) => {
+            if (e.target.value === '') {
+              setSelectedCustomer(null);
+              return;
+            }
+            const cust = (customers || []).find((c) => c.id === e.target.value);
+            if (cust) setSelectedCustomer(cust);
+          }}
+          className="w-full px-3 py-2 rounded-xl bg-white border border-[#E4DDD2] text-xs font-semibold text-[#2F2A25] focus:outline-none focus:border-[#2F2A25]"
+        >
+          <option value="">Consumidor Final (sin cliente)</option>
+          {(customers || []).map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.nombre} {c.apellido} ({c.documento})
+            </option>
+          ))}
+        </select>
+
+        {/* Customer Credit Brief Pill -- solo si hay un cliente real
+            seleccionado (ya no se compara contra el id fijo 'CLI-005',
+            residuo del seed de demostración). */}
+        {selectedCustomer && (
+          <div className="p-2 bg-[#FAF8F4] rounded-xl border border-[#E4DDD2] flex items-center justify-between text-[11px]">
+            <span className="text-[#756E65]">Crédito Disponible:</span>
+            <span className="font-bold text-[#2F2A25]">
+              {formatCurrency(selectedCustomer.limiteCredito, settings.simboloMoneda)}
+            </span>
+          </div>
+        )}
+      </div>
+
+      {/* Cart Items List */}
+      <div className="flex-1 overflow-y-auto p-4 space-y-2.5">
+        <div className="flex items-center justify-between pb-1 border-b border-[#E4DDD2]">
+          <span className="text-xs font-bold text-[#2F2A25]">
+            Productos en Orden ({(cartItems || []).reduce((acc, i) => acc + i.cantidad, 0)})
+          </span>
+          {(cartItems || []).length > 0 && (
+            <button
+              type="button"
+              onClick={handleClearCart}
+              className="text-[11px] text-rose-600 hover:text-rose-800 font-medium flex items-center gap-1"
+            >
+              <Trash2 className="w-3 h-3" />
+              <span>Vaciar</span>
+            </button>
+          )}
+        </div>
+
+        {(cartItems || []).length === 0 ? (
+          <div className="text-center py-16 space-y-2">
+            <ShoppingBag className="w-10 h-10 text-[#756E65]/30 mx-auto" />
+            <p className="text-xs text-[#756E65] font-medium">El carrito está vacío</p>
+            <p className="text-[11px] text-[#756E65]/70">Seleccione prendas del catálogo para cobrar</p>
+          </div>
+        ) : (
+          (cartItems || []).map((item) => (
+            <div
+              key={item.varianteId}
+              className="p-3 bg-[#FAF8F4] border border-[#E4DDD2] rounded-2xl space-y-2"
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div>
+                  <h5 className="text-xs font-bold text-[#2F2A25] leading-tight">{item.nombreProducto}</h5>
+                  <div className="flex items-center gap-1.5 text-[11px] text-[#756E65] mt-0.5">
+                    <span className="font-semibold px-1.5 py-0.2 rounded bg-[#E8DCC8]/60 text-[#2F2A25]">
+                      Talla {item.talla}
+                    </span>
+                    <span>•</span>
+                    <span>{item.color}</span>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => handleRemoveItem(item.varianteId)}
+                  aria-label={`Eliminar ${item.nombreProducto} del carrito`}
+                  className="text-[#756E65] hover:text-rose-600 p-1 rounded-lg transition cursor-pointer"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              </div>
+
+              {/* Item Line Discount Controls */}
+              <div className="bg-white/70 p-1.5 rounded-xl border border-[#E4DDD2]/80 flex items-center justify-between gap-2 text-[10px]">
+                <span className="text-[#756E65] font-semibold flex items-center gap-1">
+                  <Percent className="w-3 h-3 text-[#C2410C]" />
+                  <span>Desc. Producto:</span>
+                </span>
+
+                <div className="flex items-center gap-1.5">
+                  {/* Amount vs % quick entry for this item */}
+                  <div className="flex items-center gap-1 bg-[#FAF8F4] px-1.5 py-0.5 rounded-lg border border-[#E4DDD2]">
+                    <span className="font-bold text-[#756E65]">RD$</span>
+                    <input
+                      type="number"
+                      min="0"
+                      max={item.subtotal}
+                      step="1"
+                      placeholder="0"
+                      value={item.descuentoMonto === 0 ? '' : Math.round(item.descuentoMonto)}
+                      onChange={(e) => {
+                        const val = e.target.value === '' ? 0 : Number(e.target.value);
+                        handleUpdateItemDiscount(item.varianteId, 'MONTO', val);
+                      }}
+                      className="w-12 text-right bg-transparent font-bold text-[#2F2A25] focus:outline-none"
+                    />
+                  </div>
+
+                  <div className="flex items-center gap-0.5">
+                    {[0, 10, 20].map((p) => (
+                      <button
+                        key={p}
+                        type="button"
+                        onClick={() => handleUpdateItemDiscount(item.varianteId, 'PORCENTAJE', p)}
+                        className={`px-1 py-0.5 rounded text-[9px] font-bold transition cursor-pointer ${
+                          item.descuentoPorcentaje === p && item.descuentoMonto > 0
+                            ? 'bg-[#C2410C] text-white'
+                            : 'bg-white text-[#756E65] border border-[#E4DDD2] hover:bg-[#F6F1E8]'
+                        }`}
+                      >
+                        {p}%
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between pt-1">
+                {/* Quantity Counter */}
+                <div className="flex items-center border border-[#E4DDD2] bg-white rounded-lg overflow-hidden">
+                  <button
+                    type="button"
+                    onClick={() => handleUpdateQuantity(item.varianteId, -1)}
+                    aria-label={`Disminuir cantidad de ${item.nombreProducto}`}
+                    className="p-1 hover:bg-[#F6F1E8] text-[#2F2A25] cursor-pointer"
+                  >
+                    <Minus className="w-3 h-3" />
+                  </button>
+                  <span className="px-2 text-xs font-bold text-[#2F2A25]">{item.cantidad}</span>
+                  <button
+                    type="button"
+                    onClick={() => handleUpdateQuantity(item.varianteId, 1)}
+                    aria-label={`Aumentar cantidad de ${item.nombreProducto}`}
+                    className="p-1 hover:bg-[#F6F1E8] text-[#2F2A25] cursor-pointer"
+                  >
+                    <Plus className="w-3 h-3" />
+                  </button>
+                </div>
+
+                {/* Price */}
+                <div className="text-right">
+                  <div className="flex items-center gap-1.5 justify-end">
+                    {item.descuentoMonto > 0 && (
+                      <span className="text-[10px] text-[#756E65] line-through">
+                        {formatCurrency(item.subtotal, settings.simboloMoneda)}
+                      </span>
+                    )}
+                    <span className="text-xs font-bold text-[#2F2A25]">
+                      {formatCurrency(item.total, settings.simboloMoneda)}
+                    </span>
+                  </div>
+                  <div className="text-[10px] text-[#756E65]">
+                    @{formatCurrency(item.precioUnitario, settings.simboloMoneda)} c/u
+                  </div>
+                </div>
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+
+      {/* Cart Bottom Summary & Checkout */}
+      <div className="p-4 bg-[#F6F1E8] border-t border-[#E4DDD2] space-y-3">
+        {/* Discount & Tax Toggles */}
+        <div className="space-y-2 pt-1">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-1 text-[11px] font-bold text-[#756E65]">
+              <Tag className="w-3.5 h-3.5 text-[#C2410C]" />
+              <span>Descuento Global:</span>
+            </div>
+
+            {/* Discount Mode Switcher (% o RD$) */}
+            <div className="inline-flex rounded-lg border border-[#E4DDD2] bg-white p-0.5 text-[10px] font-bold">
+              <button
+                type="button"
+                onClick={() => {
+                  setDiscountType('PORCENTAJE');
+                  setOverallDiscountValue(0);
+                }}
+                className={`px-2 py-0.5 rounded-md transition cursor-pointer ${
+                  discountType === 'PORCENTAJE'
+                    ? 'bg-[#2F2A25] text-white shadow-xs'
+                    : 'text-[#756E65] hover:text-[#2F2A25]'
+                }`}
+              >
+                % Porc.
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setDiscountType('MONTO');
+                  setOverallDiscountValue(0);
+                }}
+                className={`px-2 py-0.5 rounded-md transition cursor-pointer ${
+                  discountType === 'MONTO'
+                    ? 'bg-[#C2410C] text-white shadow-xs'
+                    : 'text-[#756E65] hover:text-[#2F2A25]'
+                }`}
+              >
+                RD$ Monto
+              </button>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {discountType === 'PORCENTAJE' ? (
+              <div className="flex-1 flex items-center gap-1.5">
+                <select
+                  value={overallDiscountValue}
+                  onChange={(e) => setOverallDiscountValue(Number(e.target.value))}
+                  className="flex-1 px-2 py-1.5 rounded-xl bg-white border border-[#E4DDD2] text-xs font-bold text-[#2F2A25] focus:outline-none focus:border-[#2F2A25]"
+                >
+                  <option value={0}>Sin Descuento (0%)</option>
+                  <option value={5}>5% de Descuento</option>
+                  <option value={10}>10% de Descuento</option>
+                  <option value={15}>15% de Descuento</option>
+                  <option value={20}>20% de Descuento</option>
+                  <option value={25}>25% de Descuento</option>
+                  <option value={30}>30% de Descuento</option>
+                  <option value={50}>50% de Descuento</option>
+                </select>
+              </div>
+            ) : (
+              <div className="flex-1 relative flex items-center">
+                <span className="absolute left-2.5 text-xs font-bold text-[#756E65] pointer-events-none">
+                  RD$
+                </span>
+                <input
+                  type="number"
+                  min="0"
+                  max={subtotalAfterLineDiscounts}
+                  step="1"
+                  placeholder="Ej. 100"
+                  value={overallDiscountValue === 0 ? '' : overallDiscountValue}
+                  onChange={(e) => {
+                    const val = e.target.value === '' ? 0 : Number(e.target.value);
+                    setOverallDiscountValue(Math.max(0, val));
+                  }}
+                  className="w-full pl-10 pr-16 py-1.5 rounded-xl bg-white border border-[#E4DDD2] text-xs font-bold text-[#2F2A25] focus:outline-none focus:border-[#C2410C]"
+                />
+                {numOverallDiscountVal > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setOverallDiscountValue(0)}
+                    className="absolute right-2 text-[10px] font-bold text-[#756E65] hover:text-rose-600 px-1.5 py-0.5 rounded bg-[#FAF8F4]"
+                  >
+                    Limpiar
+                  </button>
+                )}
+              </div>
+            )}
+
+            <label className="flex items-center gap-1.5 cursor-pointer text-xs font-semibold text-[#756E65] select-none shrink-0 bg-white px-2.5 py-1.5 rounded-xl border border-[#E4DDD2]">
+              <input
+                type="checkbox"
+                checked={applyTax}
+                onChange={(e) => setApplyTax(e.target.checked)}
+                className="rounded text-[#2F2A25] focus:ring-[#2F2A25]"
+              />
+              <span>ITBIS ({settings.impuestoPorcentaje}%)</span>
+            </label>
+          </div>
+
+          {/* Quick Amount Suggestion Badges if in MONTO mode */}
+          {discountType === 'MONTO' && (
+            <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+              <span className="text-[10px] text-[#756E65] font-semibold">Rápido:</span>
+              {[50, 100, 200, 300, 500].map((quickAmt) => (
+                <button
+                  key={quickAmt}
+                  type="button"
+                  onClick={() => setOverallDiscountValue(quickAmt)}
+                  className={`px-2 py-0.5 rounded-lg text-[10px] font-bold border transition cursor-pointer ${
+                    numOverallDiscountVal === quickAmt
+                      ? 'bg-[#C2410C] text-white border-[#C2410C]'
+                      : 'bg-white text-[#2F2A25] border-[#E4DDD2] hover:bg-[#F6F1E8]'
+                  }`}
+                >
+                  -RD$ {quickAmt}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Subtotals breakdown */}
+        <div className="space-y-1 text-xs text-[#756E65]">
+          <div className="flex justify-between">
+            <span>Subtotal:</span>
+            <span>{formatCurrency(rawSubtotal, settings.simboloMoneda)}</span>
+          </div>
+          {totalDiscount > 0 && (
+            <div className="flex justify-between text-emerald-800 font-medium">
+              <span>Descuento Aplicado:</span>
+              <span>-{formatCurrency(totalDiscount, settings.simboloMoneda)}</span>
+            </div>
+          )}
+          {applyTax && (
+            <div className="flex justify-between">
+              <span>ITBIS ({settings.impuestoPorcentaje}%):</span>
+              <span>{formatCurrency(totalTax, settings.simboloMoneda)}</span>
+            </div>
+          )}
+        </div>
+
+        {/* Large Total */}
+        <div className="pt-2 border-t border-[#E4DDD2] flex items-baseline justify-between">
+          <span className="text-sm font-bold text-[#2F2A25]">TOTAL A PAGAR:</span>
+          <span className="text-2xl font-serif font-bold text-[#2F2A25]">
+            {formatCurrency(grandTotal, settings.simboloMoneda)}
+          </span>
+        </div>
+
+        {/* Checkout Button */}
+        <button
+          type="button"
+          disabled={(cartItems || []).length === 0}
+          onClick={() => {
+            // AUDITORÍA (responsive): cierra el drawer móvil (si estaba
+            // abierto) al pasar a PaymentModal -- que ya usa su propio
+            // z-50 por encima -- para no dejar dos overlays apilados
+            // innecesariamente detrás de un pago ya completado/cancelado.
+            setMobileCartOpen(false);
+            setPaymentModalOpen(true);
+          }}
+          className="w-full py-3 px-4 rounded-2xl font-bold text-sm text-[#FAF8F4] bg-[#2F2A25] hover:bg-[#403932] disabled:bg-zinc-300 disabled:cursor-not-allowed transition shadow-md flex items-center justify-center gap-2"
+        >
+          <span>COBRAR ORDEN</span>
+          <ArrowRight className="w-4 h-4 text-[#E8DCC8]" />
+        </button>
+      </div>
+    </>
+  );
+
   return (
-    <div id="pos-module-container" className="flex flex-col lg:flex-row h-[calc(100vh-4.5rem)] bg-[#FAF8F4] overflow-hidden">
+    <div id="pos-module-container" className="flex flex-col lg:flex-row h-full bg-[#FAF8F4] overflow-hidden">
       {/* LEFT COLUMN: Product Catalog & Fast Search */}
       <div className="flex-1 flex flex-col min-w-0 border-r border-[#E4DDD2] overflow-hidden">
         {/* Top Unified Search Bar & Barcode Scanner */}
@@ -568,13 +980,24 @@ export const POSView: React.FC = () => {
               <Barcode className="w-4 h-4 text-[#C2410C]" />
             </div>
 
+            {/* AUDITORÍA (FASE -- responsive real, confirmada visualmente en
+                Chrome real a 375px): `<input>` es un ítem flex de este
+                `<form className="flex">` -- los controles de formulario
+                (input/select/textarea) tienen, además del "mínimo de
+                contenido" normal, un tamaño mínimo automático propio del
+                navegador (basado en su ancho intrínseco por defecto, ~20
+                caracteres) que NO desaparece solo con `w-full`. Sin
+                `min-w-0`, ese mínimo empujaba TODO el formulario (y con
+                él, esta columna) más ancho que el viewport en móvil --
+                exactamente el overflow horizontal global que se veía en
+                la captura real. */}
             <input
               ref={searchInputRef}
               type="text"
               placeholder="Buscar por nombre, color, SKU o escanear código de barras / Serial / IMEI (Enter para agregar)..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full pl-16 pr-24 sm:pr-28 py-2.5 rounded-2xl bg-white border border-[#E4DDD2] text-xs font-medium text-[#2F2A25] placeholder-[#756E65]/75 focus:outline-none focus:border-[#2F2A25] focus:ring-1 focus:ring-[#2F2A25] shadow-2xs transition"
+              className="w-full min-w-0 pl-16 pr-24 sm:pr-28 py-2.5 rounded-2xl bg-white border border-[#E4DDD2] text-xs font-medium text-[#2F2A25] placeholder-[#756E65]/75 focus:outline-none focus:border-[#2F2A25] focus:ring-1 focus:ring-[#2F2A25] shadow-2xs transition"
             />
 
             <div className="absolute right-2.5 flex items-center gap-1.5">
@@ -667,7 +1090,37 @@ export const POSView: React.FC = () => {
             modos, solo cambia la presentación) */}
         <div className="flex-1 overflow-y-auto p-4">
           {viewMode === 'grid' ? (
-            <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-3.5">
+            // AUDITORÍA (FASE -- responsive completo, causa raíz #1 del
+            // POS de escritorio): `sm:`/`xl:` son media queries sobre el
+            // VIEWPORT COMPLETO, no sobre el ancho real de ESTA columna.
+            // En escritorio (`lg:`+, ver #pos-module-container arriba)
+            // esta columna comparte fila con el Sidebar (w-72=288px) y el
+            // carrito (w-96/xl:w-105=384/420px) -- ambos de ancho FIJO,
+            // sin colapsar por debajo de `lg:` -- así que su ancho real
+            // disponible es "viewport - ~672/708px", nunca el viewport
+            // completo. La regla anterior (`sm:grid-cols-3
+            // xl:grid-cols-4`) exigía 3-4 columnas en cuanto el VIEWPORT
+            // llegaba a 640/1280px sin importar que, en escritorio, ya
+            // había ~700px consumidos por Sidebar+carrito -- por eso al
+            // reducir la ventana con DevTools (ej. 1366x768 con el panel
+            // abierto) las cards se apretaban sin reducir columnas: el
+            // viewport seguía "pareciendo" ancho aunque esta columna ya
+            // no lo fuera.
+            //
+            // Con la cascada mobile-first de Tailwind (`sm` < `lg` < `xl`
+            // < `2xl` en ese orden en el CSS generado, cada una pisa a la
+            // anterior), `lg:grid-cols-2` vuelve a bajar a 2 columnas
+            // justo cuando Sidebar+carrito aparecen (1024px), y
+            // `xl:`/`2xl:` vuelven a subir a 3/4 solo cuando el viewport
+            // ya es lo bastante ancho para compensar esos ~700px fijos:
+            //   <1024 (mobile/tablet, carrito oculto -- esta columna SÍ
+            //     usa el viewport completo): 2 -> sm(640): 3.
+            //   >=1024 (desktop, Sidebar+carrito visibles): 2 de nuevo
+            //     -> xl(1280, columna real ~572px): 3
+            //     -> 2xl(1536, columna real ~828px): 4.
+            // Nunca se tocó el contenido/diseño de cada card -- solo
+            // cuántas caben por fila según el espacio real disponible.
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-3.5">
               {(filteredProducts || []).map((prod) => {
                 // Parte 11 (corrección definitiva de variantes): una
                 // variante eliminada (INACTIVO) ya no debe contarse como
@@ -687,10 +1140,11 @@ export const POSView: React.FC = () => {
                     <div className="space-y-2">
                       {/* Image with status badge */}
                       <div className="relative aspect-4/3 rounded-xl overflow-hidden bg-[#F6F1E8] border border-[#E4DDD2]/60">
-                        {prod.imagenUrl ? (
+                        {prod.imagenUrl && !imageLoadFailedIds.has(prod.id) ? (
                           <img
                             src={toDisplayableImageUrl(prod.imagenUrl)}
                             alt={prod.nombre}
+                            onError={() => markImageFailed(prod.id)}
                             className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
                           />
                         ) : (
@@ -760,10 +1214,11 @@ export const POSView: React.FC = () => {
                   >
                     {/* Imagen pequeña */}
                     <div className="relative w-12 h-12 shrink-0 rounded-lg overflow-hidden bg-[#F6F1E8] border border-[#E4DDD2]/60">
-                      {prod.imagenUrl ? (
+                      {prod.imagenUrl && !imageLoadFailedIds.has(prod.id) ? (
                         <img
                           src={toDisplayableImageUrl(prod.imagenUrl)}
                           alt={prod.nombre}
+                          onError={() => markImageFailed(prod.id)}
                           className="w-full h-full object-cover"
                         />
                       ) : (
@@ -854,376 +1309,90 @@ export const POSView: React.FC = () => {
         </div>
       </div>
 
-      {/* RIGHT COLUMN: POS Cart & Checkout Dashboard (Desktop) */}
-      <div className="hidden lg:flex w-96 xl:w-105 bg-white flex-col justify-between h-full border-l border-[#E4DDD2]">
-        {/* Cart Top Header: Customer Selector */}
-        <div className="p-4 bg-[#F6F1E8] border-b border-[#E4DDD2] space-y-2.5">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-bold text-[#2F2A25] uppercase tracking-wider">Cliente:</span>
-            <button
-              type="button"
-              onClick={() => setNewCustomerModalOpen(true)}
-              className="text-[11px] text-[#C2410C] hover:underline font-bold flex items-center gap-1"
-            >
-              <UserPlus className="w-3 h-3" />
-              <span>+ Nuevo Cliente</span>
-            </button>
-          </div>
-
-          <select
-            aria-label="Cliente"
-            value={selectedCustomer?.id || ''}
-            onChange={(e) => {
-              if (e.target.value === '') {
-                setSelectedCustomer(null);
-                return;
-              }
-              const cust = (customers || []).find((c) => c.id === e.target.value);
-              if (cust) setSelectedCustomer(cust);
-            }}
-            className="w-full px-3 py-2 rounded-xl bg-white border border-[#E4DDD2] text-xs font-semibold text-[#2F2A25] focus:outline-none focus:border-[#2F2A25]"
-          >
-            <option value="">Consumidor Final (sin cliente)</option>
-            {(customers || []).map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.nombre} {c.apellido} ({c.documento})
-              </option>
-            ))}
-          </select>
-
-          {/* Customer Credit Brief Pill -- solo si hay un cliente real
-              seleccionado (ya no se compara contra el id fijo 'CLI-005',
-              residuo del seed de demostración). */}
-          {selectedCustomer && (
-            <div className="p-2 bg-[#FAF8F4] rounded-xl border border-[#E4DDD2] flex items-center justify-between text-[11px]">
-              <span className="text-[#756E65]">Crédito Disponible:</span>
-              <span className="font-bold text-[#2F2A25]">
-                {formatCurrency(selectedCustomer.limiteCredito, settings.simboloMoneda)}
-              </span>
-            </div>
-          )}
-        </div>
-
-        {/* Cart Items List */}
-        <div className="flex-1 overflow-y-auto p-4 space-y-2.5">
-          <div className="flex items-center justify-between pb-1 border-b border-[#E4DDD2]">
-            <span className="text-xs font-bold text-[#2F2A25]">
-              Productos en Orden ({(cartItems || []).reduce((acc, i) => acc + i.cantidad, 0)})
-            </span>
-            {(cartItems || []).length > 0 && (
-              <button
-                type="button"
-                onClick={handleClearCart}
-                className="text-[11px] text-rose-600 hover:text-rose-800 font-medium flex items-center gap-1"
-              >
-                <Trash2 className="w-3 h-3" />
-                <span>Vaciar</span>
-              </button>
-            )}
-          </div>
-
-          {(cartItems || []).length === 0 ? (
-            <div className="text-center py-16 space-y-2">
-              <ShoppingBag className="w-10 h-10 text-[#756E65]/30 mx-auto" />
-              <p className="text-xs text-[#756E65] font-medium">El carrito está vacío</p>
-              <p className="text-[11px] text-[#756E65]/70">Seleccione prendas del catálogo para cobrar</p>
-            </div>
-          ) : (
-            (cartItems || []).map((item) => (
-              <div
-                key={item.varianteId}
-                className="p-3 bg-[#FAF8F4] border border-[#E4DDD2] rounded-2xl space-y-2"
-              >
-                <div className="flex items-start justify-between gap-2">
-                  <div>
-                    <h5 className="text-xs font-bold text-[#2F2A25] leading-tight">{item.nombreProducto}</h5>
-                    <div className="flex items-center gap-1.5 text-[11px] text-[#756E65] mt-0.5">
-                      <span className="font-semibold px-1.5 py-0.2 rounded bg-[#E8DCC8]/60 text-[#2F2A25]">
-                        Talla {item.talla}
-                      </span>
-                      <span>•</span>
-                      <span>{item.color}</span>
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => handleRemoveItem(item.varianteId)}
-                    className="text-[#756E65] hover:text-rose-600 p-1 rounded-lg transition cursor-pointer"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-
-                {/* Item Line Discount Controls */}
-                <div className="bg-white/70 p-1.5 rounded-xl border border-[#E4DDD2]/80 flex items-center justify-between gap-2 text-[10px]">
-                  <span className="text-[#756E65] font-semibold flex items-center gap-1">
-                    <Percent className="w-3 h-3 text-[#C2410C]" />
-                    <span>Desc. Producto:</span>
-                  </span>
-
-                  <div className="flex items-center gap-1.5">
-                    {/* Amount vs % quick entry for this item */}
-                    <div className="flex items-center gap-1 bg-[#FAF8F4] px-1.5 py-0.5 rounded-lg border border-[#E4DDD2]">
-                      <span className="font-bold text-[#756E65]">RD$</span>
-                      <input
-                        type="number"
-                        min="0"
-                        max={item.subtotal}
-                        step="1"
-                        placeholder="0"
-                        value={item.descuentoMonto === 0 ? '' : Math.round(item.descuentoMonto)}
-                        onChange={(e) => {
-                          const val = e.target.value === '' ? 0 : Number(e.target.value);
-                          handleUpdateItemDiscount(item.varianteId, 'MONTO', val);
-                        }}
-                        className="w-12 text-right bg-transparent font-bold text-[#2F2A25] focus:outline-none"
-                      />
-                    </div>
-
-                    <div className="flex items-center gap-0.5">
-                      {[0, 10, 20].map((p) => (
-                        <button
-                          key={p}
-                          type="button"
-                          onClick={() => handleUpdateItemDiscount(item.varianteId, 'PORCENTAJE', p)}
-                          className={`px-1 py-0.5 rounded text-[9px] font-bold transition cursor-pointer ${
-                            item.descuentoPorcentaje === p && item.descuentoMonto > 0
-                              ? 'bg-[#C2410C] text-white'
-                              : 'bg-white text-[#756E65] border border-[#E4DDD2] hover:bg-[#F6F1E8]'
-                          }`}
-                        >
-                          {p}%
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-
-                <div className="flex items-center justify-between pt-1">
-                  {/* Quantity Counter */}
-                  <div className="flex items-center border border-[#E4DDD2] bg-white rounded-lg overflow-hidden">
-                    <button
-                      type="button"
-                      onClick={() => handleUpdateQuantity(item.varianteId, -1)}
-                      className="p-1 hover:bg-[#F6F1E8] text-[#2F2A25] cursor-pointer"
-                    >
-                      <Minus className="w-3 h-3" />
-                    </button>
-                    <span className="px-2 text-xs font-bold text-[#2F2A25]">{item.cantidad}</span>
-                    <button
-                      type="button"
-                      onClick={() => handleUpdateQuantity(item.varianteId, 1)}
-                      className="p-1 hover:bg-[#F6F1E8] text-[#2F2A25] cursor-pointer"
-                    >
-                      <Plus className="w-3 h-3" />
-                    </button>
-                  </div>
-
-                  {/* Price */}
-                  <div className="text-right">
-                    <div className="flex items-center gap-1.5 justify-end">
-                      {item.descuentoMonto > 0 && (
-                        <span className="text-[10px] text-[#756E65] line-through">
-                          {formatCurrency(item.subtotal, settings.simboloMoneda)}
-                        </span>
-                      )}
-                      <span className="text-xs font-bold text-[#2F2A25]">
-                        {formatCurrency(item.total, settings.simboloMoneda)}
-                      </span>
-                    </div>
-                    <div className="text-[10px] text-[#756E65]">
-                      @{formatCurrency(item.precioUnitario, settings.simboloMoneda)} c/u
-                    </div>
-                  </div>
-                </div>
-              </div>
-            ))
-          )}
-        </div>
-
-        {/* Cart Bottom Summary & Checkout */}
-        <div className="p-4 bg-[#F6F1E8] border-t border-[#E4DDD2] space-y-3">
-          {/* Discount & Tax Toggles */}
-          <div className="space-y-2 pt-1">
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-1 text-[11px] font-bold text-[#756E65]">
-                <Tag className="w-3.5 h-3.5 text-[#C2410C]" />
-                <span>Descuento Global:</span>
-              </div>
-
-              {/* Discount Mode Switcher (% or RD$) */}
-              <div className="inline-flex rounded-lg border border-[#E4DDD2] bg-white p-0.5 text-[10px] font-bold">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setDiscountType('PORCENTAJE');
-                    setOverallDiscountValue(0);
-                  }}
-                  className={`px-2 py-0.5 rounded-md transition cursor-pointer ${
-                    discountType === 'PORCENTAJE'
-                      ? 'bg-[#2F2A25] text-white shadow-xs'
-                      : 'text-[#756E65] hover:text-[#2F2A25]'
-                  }`}
-                >
-                  % Porc.
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setDiscountType('MONTO');
-                    setOverallDiscountValue(0);
-                  }}
-                  className={`px-2 py-0.5 rounded-md transition cursor-pointer ${
-                    discountType === 'MONTO'
-                      ? 'bg-[#C2410C] text-white shadow-xs'
-                      : 'text-[#756E65] hover:text-[#2F2A25]'
-                  }`}
-                >
-                  RD$ Monto
-                </button>
-              </div>
-            </div>
-
-            <div className="flex items-center gap-2">
-              {discountType === 'PORCENTAJE' ? (
-                <div className="flex-1 flex items-center gap-1.5">
-                  <select
-                    value={overallDiscountValue}
-                    onChange={(e) => setOverallDiscountValue(Number(e.target.value))}
-                    className="flex-1 px-2 py-1.5 rounded-xl bg-white border border-[#E4DDD2] text-xs font-bold text-[#2F2A25] focus:outline-none focus:border-[#2F2A25]"
-                  >
-                    <option value={0}>Sin Descuento (0%)</option>
-                    <option value={5}>5% de Descuento</option>
-                    <option value={10}>10% de Descuento</option>
-                    <option value={15}>15% de Descuento</option>
-                    <option value={20}>20% de Descuento</option>
-                    <option value={25}>25% de Descuento</option>
-                    <option value={30}>30% de Descuento</option>
-                    <option value={50}>50% de Descuento</option>
-                  </select>
-                </div>
-              ) : (
-                <div className="flex-1 relative flex items-center">
-                  <span className="absolute left-2.5 text-xs font-bold text-[#756E65] pointer-events-none">
-                    RD$
-                  </span>
-                  <input
-                    type="number"
-                    min="0"
-                    max={subtotalAfterLineDiscounts}
-                    step="1"
-                    placeholder="Ej. 100"
-                    value={overallDiscountValue === 0 ? '' : overallDiscountValue}
-                    onChange={(e) => {
-                      const val = e.target.value === '' ? 0 : Number(e.target.value);
-                      setOverallDiscountValue(Math.max(0, val));
-                    }}
-                    className="w-full pl-10 pr-16 py-1.5 rounded-xl bg-white border border-[#E4DDD2] text-xs font-bold text-[#2F2A25] focus:outline-none focus:border-[#C2410C]"
-                  />
-                  {numOverallDiscountVal > 0 && (
-                    <button
-                      type="button"
-                      onClick={() => setOverallDiscountValue(0)}
-                      className="absolute right-2 text-[10px] font-bold text-[#756E65] hover:text-rose-600 px-1.5 py-0.5 rounded bg-[#FAF8F4]"
-                    >
-                      Limpiar
-                    </button>
-                  )}
-                </div>
-              )}
-
-              <label className="flex items-center gap-1.5 cursor-pointer text-xs font-semibold text-[#756E65] select-none shrink-0 bg-white px-2.5 py-1.5 rounded-xl border border-[#E4DDD2]">
-                <input
-                  type="checkbox"
-                  checked={applyTax}
-                  onChange={(e) => setApplyTax(e.target.checked)}
-                  className="rounded text-[#2F2A25] focus:ring-[#2F2A25]"
-                />
-                <span>ITBIS ({settings.impuestoPorcentaje}%)</span>
-              </label>
-            </div>
-
-            {/* Quick Amount Suggestion Badges if in MONTO mode */}
-            {discountType === 'MONTO' && (
-              <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
-                <span className="text-[10px] text-[#756E65] font-semibold">Rápido:</span>
-                {[50, 100, 200, 300, 500].map((quickAmt) => (
-                  <button
-                    key={quickAmt}
-                    type="button"
-                    onClick={() => setOverallDiscountValue(quickAmt)}
-                    className={`px-2 py-0.5 rounded-lg text-[10px] font-bold border transition cursor-pointer ${
-                      numOverallDiscountVal === quickAmt
-                        ? 'bg-[#C2410C] text-white border-[#C2410C]'
-                        : 'bg-white text-[#2F2A25] border-[#E4DDD2] hover:bg-[#F6F1E8]'
-                    }`}
-                  >
-                    -RD$ {quickAmt}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {/* Subtotals breakdown */}
-          <div className="space-y-1 text-xs text-[#756E65]">
-            <div className="flex justify-between">
-              <span>Subtotal:</span>
-              <span>{formatCurrency(rawSubtotal, settings.simboloMoneda)}</span>
-            </div>
-            {totalDiscount > 0 && (
-              <div className="flex justify-between text-emerald-800 font-medium">
-                <span>Descuento Aplicado:</span>
-                <span>-{formatCurrency(totalDiscount, settings.simboloMoneda)}</span>
-              </div>
-            )}
-            {applyTax && (
-              <div className="flex justify-between">
-                <span>ITBIS ({settings.impuestoPorcentaje}%):</span>
-                <span>{formatCurrency(totalTax, settings.simboloMoneda)}</span>
-              </div>
-            )}
-          </div>
-
-          {/* Large Total */}
-          <div className="pt-2 border-t border-[#E4DDD2] flex items-baseline justify-between">
-            <span className="text-sm font-bold text-[#2F2A25]">TOTAL A PAGAR:</span>
-            <span className="text-2xl font-serif font-bold text-[#2F2A25]">
-              {formatCurrency(grandTotal, settings.simboloMoneda)}
-            </span>
-          </div>
-
-          {/* Checkout Button */}
-          <button
-            type="button"
-            disabled={(cartItems || []).length === 0}
-            onClick={() => setPaymentModalOpen(true)}
-            className="w-full py-3 px-4 rounded-2xl font-bold text-sm text-[#FAF8F4] bg-[#2F2A25] hover:bg-[#403932] disabled:bg-zinc-300 disabled:cursor-not-allowed transition shadow-md flex items-center justify-center gap-2"
-          >
-            <span>COBRAR ORDEN</span>
-            <ArrowRight className="w-4 h-4 text-[#E8DCC8]" />
-          </button>
-        </div>
+      {/* RIGHT COLUMN: POS Cart & Checkout Dashboard (Desktop).
+          AUDITORÍA (FASE -- causa raíz real, ver también App.tsx): esta
+          columna no tenía `shrink-0` -- sin él, su ancho fijo (w-96/
+          xl:w-105) era solo un `flex-basis` de partida; al no haber
+          suficiente espacio en la fila (`#pos-module-container`), el
+          `flex-shrink` por defecto del navegador (1) la comprimía por
+          debajo de esos 384/420px, apretando sus propios botones/textos
+          en vez de dejar que fuera la columna de PRODUCTOS (que sí tiene
+          `min-w-0`, ver arriba) la que absorbiera todo el encogimiento.
+          `shrink-0` la fija exactamente a su ancho -- el mismo patrón ya
+          usado en el Sidebar real de la app. */}
+      <div className="hidden lg:flex w-96 xl:w-105 shrink-0 bg-white flex-col justify-between h-full border-l border-[#E4DDD2]">
+        {renderCartPanel()}
       </div>
 
       {/* MOBILE FLOATING CART BAR */}
       <div className="lg:hidden p-3 bg-white border-t border-[#E4DDD2] flex items-center justify-between shadow-lg">
-        <div>
+        {/* AUDITORÍA (FASE -- corregir carrito móvil): esta barra y sus
+            dos botones YA EXISTÍAN y ya funcionaban -- lo único que
+            cambió aquí es a dónde apunta "Cobrar". Antes llamaba
+            directo a `setPaymentModalOpen(true)`, saltándose el drawer
+            del carrito por completo -- un usuario que tocaba "Cobrar"
+            nunca veía la lista de productos/cantidades/eliminar, solo el
+            botón "Total" (menos obvio) abría ese panel. Ahora "Cobrar"
+            abre el MISMO drawer que "Total" (mismo `renderCartPanel()`,
+            mismo estado `mobileCartOpen`, ninguna lógica nueva ni
+            duplicada) -- el cobro real sigue ocurriendo exactamente
+            igual que siempre, solo que ahora pasa por el botón "COBRAR
+            ORDEN" DENTRO del panel (línea ~943, ya existente, ya cierra
+            el drawer y abre PaymentModal) en vez de saltárselo. */}
+        <button
+          type="button"
+          onClick={() => setMobileCartOpen(true)}
+          aria-label="Ver carrito de compra"
+          className="text-left"
+        >
           <span className="text-[10px] text-[#756E65] uppercase font-bold">Total:</span>
           <p className="text-lg font-bold text-[#2F2A25] leading-none">
             {formatCurrency(grandTotal, settings.simboloMoneda)}
           </p>
-        </div>
+        </button>
         <button
           type="button"
           disabled={(cartItems || []).length === 0}
-          onClick={() => setPaymentModalOpen(true)}
+          onClick={() => setMobileCartOpen(true)}
+          aria-label="Ver carrito de compra y continuar al cobro"
           className="py-2.5 px-6 rounded-xl font-bold text-xs text-[#FAF8F4] bg-[#2F2A25] disabled:bg-zinc-300 flex items-center gap-2"
         >
           <ShoppingBag className="w-4 h-4" />
           <span>Cobrar ({(cartItems || []).reduce((acc, i) => acc + i.cantidad, 0)})</span>
         </button>
       </div>
+
+      {/* MOBILE CART DRAWER -- reutiliza exactamente renderCartPanel(),
+          nunca una segunda implementación del carrito. Bottom-sheet
+          acotado a `max-h-[85vh]` con su propio `flex flex-col`, así que
+          el `flex-1 overflow-y-auto` de la lista de productos (dentro de
+          renderCartPanel) scrollea de forma independiente entre el
+          header (cliente) y el footer (totales/COBRAR), igual que en la
+          columna de escritorio -- mismo patrón ya usado en los modales
+          de Detalle de Venta/Confirmación de esta misma app. */}
+      {mobileCartOpen && (
+        <div className="lg:hidden fixed inset-0 z-50 flex items-end justify-center">
+          <div
+            onClick={() => setMobileCartOpen(false)}
+            data-testid="mobile-cart-backdrop"
+            className="absolute inset-0 bg-black/40 backdrop-blur-xs"
+          />
+          <div className="relative w-full max-h-[85vh] bg-white rounded-t-3xl shadow-2xl flex flex-col">
+            <div className="p-4 border-b border-[#E4DDD2] flex items-center justify-between shrink-0">
+              <span className="text-sm font-bold text-[#2F2A25]">Carrito de Compra</span>
+              <button
+                type="button"
+                onClick={() => setMobileCartOpen(false)}
+                aria-label="Cerrar carrito"
+                className="p-1.5 rounded-xl text-[#756E65] hover:text-[#2F2A25] hover:bg-[#F6F1E8]"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            {renderCartPanel()}
+          </div>
+        </div>
+      )}
 
       {/* Modals */}
       {selectedProductForVariant && (
@@ -1305,10 +1474,20 @@ export const POSView: React.FC = () => {
         />
       )}
 
-      {/* New Customer Modal */}
+      {/* New Customer Modal.
+          AUDITORÍA (FASE -- responsive completo): 5 campos + header +
+          botones, sin ningún tope de altura ni scroll -- en una pantalla
+          baja (móvil en horizontal, o con el teclado táctil abierto,
+          escenario real y frecuente al llenar un formulario) el botón
+          final "Guardar & Seleccionar" podía quedar fuera de la zona
+          visible sin forma de alcanzarlo. Mismo patrón ya usado en
+          PaymentModal/ReceiptModal/ProductFormModal de este mismo módulo:
+          el propio overlay (`overflow-y-auto`) se vuelve desplazable en
+          vez de reestructurar la tarjeta -- ningún campo, validación ni
+          lógica de creación de cliente se tocó. */}
       {newCustomerModalOpen && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-xs z-50 flex items-center justify-center p-4">
-          <div className="bg-[#FAF8F4] border border-[#E4DDD2] rounded-3xl max-w-md w-full p-5 space-y-4 shadow-2xl">
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-xs z-50 flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-[#FAF8F4] border border-[#E4DDD2] rounded-3xl max-w-md w-full p-5 space-y-4 shadow-2xl my-8">
             <div className="flex justify-between items-center border-b border-[#E4DDD2] pb-3">
               <h3 className="text-sm font-bold text-[#2F2A25]">Registrar Nuevo Cliente Rápido</h3>
               <button

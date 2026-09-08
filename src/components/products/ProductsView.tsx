@@ -63,6 +63,14 @@ export const ProductsView: React.FC = () => {
   const [selectedCategory, setSelectedCategory] = useState<string>('TODOS');
   const [onlyLowStock, setOnlyLowStock] = useState(false);
 
+  // AUDITORÍA (FASE -- regresión de imágenes/logo): mismo patrón que
+  // POSView.tsx -- `onError` cae al fallback ya existente en vez del
+  // ícono de imagen rota, sin ocultar una falla global si TODAS las
+  // fotos fallan (ver comentario completo en POSView.tsx).
+  const [imageLoadFailedIds, setImageLoadFailedIds] = useState<Set<string>>(new Set());
+  const markImageFailed = (id: string) =>
+    setImageLoadFailedIds((prev) => (prev.has(id) ? prev : new Set(prev).add(id)));
+
   // Edit / Create Modal State
   const [modalOpen, setModalOpen] = useState(false);
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
@@ -365,10 +373,11 @@ export const ProductsView: React.FC = () => {
                   <tr key={prod.id} className="hover:bg-[#FAF8F4]/80 transition">
                     <td className="py-3 px-4">
                       <div className="flex items-center gap-3">
-                        {prod.imagenUrl ? (
+                        {prod.imagenUrl && !imageLoadFailedIds.has(prod.id) ? (
                           <img
                             src={toDisplayableImageUrl(prod.imagenUrl)}
                             alt={prod.nombre}
+                            onError={() => markImageFailed(prod.id)}
                             className="w-10 h-10 rounded-xl object-cover border border-[#E4DDD2]"
                           />
                         ) : (

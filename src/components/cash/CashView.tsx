@@ -495,10 +495,17 @@ export const CashView: React.FC = () => {
         </div>
       </div>
 
-      {/* OPEN CASH MODAL */}
+      {/* OPEN CASH MODAL.
+          AUDITORÍA (FASE -- responsive completo): formulario sin tope de
+          altura ni scroll propio -- en pantallas bajas (móvil en
+          horizontal, teclado táctil abierto) el botón final podía quedar
+          fuera de la zona visible. Mismo patrón ya usado en
+          PaymentModal/ReceiptModal de esta misma app: el overlay se
+          vuelve desplazable (`overflow-y-auto` + `my-8` en la tarjeta),
+          sin tocar ningún campo ni la lógica de apertura de caja. */}
       {openModalOpen && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-xs z-50 flex items-center justify-center p-4">
-          <div className="bg-[#FAF8F4] border border-[#E4DDD2] rounded-3xl max-w-md w-full p-5 space-y-4 shadow-2xl">
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-xs z-50 flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-[#FAF8F4] border border-[#E4DDD2] rounded-3xl max-w-md w-full p-5 space-y-4 shadow-2xl my-8">
             <div className="flex justify-between items-center border-b border-[#E4DDD2] pb-3">
               <h3 className="text-sm font-bold text-[#2F2A25]">Apertura de Caja Registradora</h3>
               <button type="button" onClick={() => setOpenModalOpen(false)} className="text-[#756E65] p-1">
@@ -551,10 +558,16 @@ export const CashView: React.FC = () => {
         </div>
       )}
 
-      {/* CLOSE CASH / CUADRE MODAL */}
+      {/* CLOSE CASH / CUADRE MODAL.
+          AUDITORÍA (FASE -- responsive completo): formulario de arqueo
+          (potencialmente el más largo de todo POS -- conteo de
+          efectivo/otros métodos) sin tope de altura ni scroll propio.
+          Mismo patrón que el resto de esta auditoría: overlay
+          desplazable (`overflow-y-auto` + `my-8`), sin tocar ningún
+          campo ni el cálculo del cuadre. */}
       {closeModalOpen && activeSession && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-xs z-50 flex items-center justify-center p-4">
-          <div className="bg-[#FAF8F4] border border-[#E4DDD2] rounded-3xl max-w-md w-full p-5 space-y-4 shadow-2xl">
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-xs z-50 flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-[#FAF8F4] border border-[#E4DDD2] rounded-3xl max-w-md w-full p-5 space-y-4 shadow-2xl my-8">
             <div className="flex justify-between items-center border-b border-[#E4DDD2] pb-3">
               <h3 className="text-sm font-bold text-[#2F2A25]">Cierre y Cuadre de Caja (Arqueo)</h3>
               <button type="button" onClick={() => setCloseModalOpen(false)} className="text-[#756E65] p-1">
@@ -659,10 +672,13 @@ export const CashView: React.FC = () => {
         </div>
       )}
 
-      {/* CASH MOVEMENT MODAL */}
+      {/* CASH MOVEMENT MODAL.
+          AUDITORÍA (FASE -- responsive completo): mismo patrón --
+          overlay desplazable (`overflow-y-auto` + `my-8`), sin tocar
+          ningún campo ni la lógica de movimientos de caja. */}
       {movementModalOpen && activeSession && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-xs z-50 flex items-center justify-center p-4">
-          <div className="bg-[#FAF8F4] border border-[#E4DDD2] rounded-3xl max-w-md w-full p-5 space-y-4 shadow-2xl">
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-xs z-50 flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-[#FAF8F4] border border-[#E4DDD2] rounded-3xl max-w-md w-full p-5 space-y-4 shadow-2xl my-8">
             <div className="flex justify-between items-center border-b border-[#E4DDD2] pb-3">
               <h3 className="text-sm font-bold text-[#2F2A25]">Registrar Movimiento de Efectivo</h3>
               <button type="button" onClick={() => setMovementModalOpen(false)} className="text-[#756E65] p-1">

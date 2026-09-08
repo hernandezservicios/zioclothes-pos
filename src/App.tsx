@@ -412,11 +412,10 @@ const MainAppContent: React.FC = () => {
   // <main> crecía (cientos de filas/tarjetas), el propio documento crecía
   // más allá del viewport y era la PÁGINA (body) la que terminaba
   // scrolleando -- arrastrando al Sidebar con ella, aunque visualmente
-  // pareciera "fijo" en pantallas cortas. `h-screen overflow-hidden` fija
-  // la altura del documento EXACTAMENTE a 100vh y prohíbe que el propio
-  // root scrollee. `min-h-0` en la fila Sidebar+main deshace el otro
-  // problema clásico de Flexbox (el tamaño mínimo automático basado en
-  // contenido de un ítem flex en el eje principal de su contenedor,
+  // pareciera "fijo" en pantallas cortas. `overflow-hidden` prohíbe que el
+  // propio root scrollee. `min-h-0` en la fila Sidebar+main deshace el
+  // otro problema clásico de Flexbox (el tamaño mínimo automático basado
+  // en contenido de un ítem flex en el eje principal de su contenedor,
   // aquí el eje vertical de la columna raíz), que de otro modo seguiría
   // dejando que esa fila creciera para caber todo el contenido en vez de
   // respetar el espacio restante bajo el Navbar. Con esto, <main> es el
@@ -425,8 +424,28 @@ const MainAppContent: React.FC = () => {
   // que tampoco se comprima en ancho si el contenido de la derecha se
   // desborda horizontalmente) permanece anclado, ocupando siempre la
   // altura completa disponible bajo el Navbar.
+  //
+  // AUDITORÍA (FASE -- responsive roto tras la corrección de scroll):
+  // la altura del root se fijó originalmente con `h-screen` (`height:
+  // 100vh`). En navegadores MÓVILES, `100vh` se calcula sobre el
+  // "large viewport" (la altura visible cuando la barra de
+  // direcciones/toolbar del navegador está OCULTA) -- pero al cargar la
+  // página esa barra normalmente sigue VISIBLE, así que el área
+  // realmente visible en pantalla es más baja que esos 100vh. Combinado
+  // con `overflow-hidden` (que bloquea el scroll de página que antes
+  // habría "compensado" ese sobrante), el resultado es que una franja
+  // inferior del layout (del alto de esa barra, ~50-100px) queda
+  // renderizada mas NO visible ni alcanzable -- exactamente el síntoma
+  // reportado ("contenido cortado"/"elementos fuera del viewport" en
+  // mobile/tablet). `h-dvh` (`height: 100dvh`, "dynamic viewport
+  // height") resuelve esto: es la altura REAL visible en cada momento,
+  // se recalcula sola cuando el navegador muestra/oculta su barra, y en
+  // escritorio equivale exactamente a `100vh` (sin toolbar dinámica) --
+  // por eso este es el único cambio necesario para el problema 1: no
+  // se toca ninguna otra clase de la cadena flex/overflow, que ya era
+  // estructuralmente correcta.
   return (
-    <div className="h-screen overflow-hidden bg-[#FAF8F4] text-[#2F2A25] flex flex-col font-sans selection:bg-[#2F2A25] selection:text-white">
+    <div className="h-dvh overflow-hidden bg-[#FAF8F4] text-[#2F2A25] flex flex-col font-sans selection:bg-[#2F2A25] selection:text-white">
       <Navbar
         onToggleSidebar={() => setSidebarOpen(!sidebarOpen)}
         activeView={currentView}
@@ -448,8 +467,31 @@ const MainAppContent: React.FC = () => {
             el contenido ni restan espacio), sin alterar el tamaño real
             del área de contenido. `.no-native-scrollbar` solo oculta la
             representación visual nativa del scrollbar -- el scroll real
-            sigue intacto. */}
-        <div className="relative flex-1 min-h-0">
+            sigue intacto.
+
+            AUDITORÍA (FASE -- causa raíz real del "contenido no se
+            adapta al reducir DevTools"): a este div, ÍTEM FLEX de la
+            fila de arriba (Sidebar + este wrapper, en un contenedor
+            `flex` horizontal), le faltaba `min-w-0`. Por especificación
+            de Flexbox, el tamaño mínimo AUTOMÁTICO de un ítem flex en su
+            eje principal es el tamaño de su CONTENIDO MÍNIMO -- salvo
+            que el propio ítem tenga `overflow` distinto de `visible`, que
+            NO es el caso aquí (el `overflow-y-auto` vive en <main>, un
+            hijo de este div, no en el div mismo). Sin `min-w-0`, si
+            cualquier descendiente profundo (ej. el carrito de ancho fijo
+            del POS, w-96/xl:w-105) empujaba el contenido mínimo por
+            encima del ancho realmente disponible, este wrapper (y con
+            él, la fila completa) se negaba a encogerse por debajo de esa
+            medida -- la fila, que además tiene `overflow-hidden`, no
+            crecía visualmente la página pero SÍ recortaba en seco el
+            contenido por el borde derecho (el carrito "desaparecía",
+            cards a la mitad) en vez de dejar que `main` recalculara su
+            ancho real como corresponde. `min-w-0` deshace exactamente
+            ese mínimo automático -- el mismo patrón que ya se usaba
+            correctamente en el Sidebar (`shrink-0`, para el lado que
+            NUNCA debe encogerse) y en la columna de productos del POS
+            (`min-w-0`, para el lado que SÍ debe encogerse). */}
+        <div className="relative flex-1 min-w-0 min-h-0">
           <main ref={mainRef} className="h-full overflow-y-auto no-native-scrollbar">
             {renderCurrentView()}
           </main>

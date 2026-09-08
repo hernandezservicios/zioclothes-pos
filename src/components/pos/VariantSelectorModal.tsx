@@ -32,6 +32,14 @@ export const VariantSelectorModal: React.FC<VariantSelectorModalProps> = ({
   const [selectedColor, setSelectedColor] = useState<string>(availableColors[0] || '');
   const [selectedSize, setSelectedSize] = useState<string>(availableSizes[0] || '');
   const [quantity, setQuantity] = useState<number>(1);
+  // AUDITORÍA (FASE -- regresión de imágenes/logo): igual que en
+  // POSView.tsx -- si `product.imagenUrl` existe pero falla al cargar,
+  // se oculta el <img> (vuelve al mismo estado "sin foto" que ya existía
+  // para productos sin URL) en vez de mostrar el ícono de imagen rota.
+  const [imageLoadFailed, setImageLoadFailed] = useState(false);
+  useEffect(() => {
+    setImageLoadFailed(false);
+  }, [product.id, product.imagenUrl]);
 
   // Find corresponding variant
   const currentVariant = variantsList.find(
@@ -54,9 +62,23 @@ export const VariantSelectorModal: React.FC<VariantSelectorModalProps> = ({
 
   return (
     <div className="fixed inset-0 bg-black/50 backdrop-blur-xs z-50 flex items-center justify-center p-4">
-      <div className="bg-[#FAF8F4] border border-[#E4DDD2] rounded-3xl max-w-md w-full overflow-hidden shadow-2xl animate-in fade-in zoom-in-95">
+      {/* AUDITORÍA (FASE -- responsive completo): este modal se abre en
+          CADA toque de producto en el POS (ruta crítica) y no tenía
+          ningún tope de altura ni scroll propio -- un producto con
+          varios colores/tallas (los botones de color/talla usan
+          `flex-wrap`, así que crecen en altura según cuántos haya) podía
+          hacer que la tarjeta completa excediera el alto de pantallas
+          bajas (móvil en horizontal, notebooks de poca altura), dejando
+          el header y sobre todo el botón "Agregar al Carrito" del footer
+          fuera de la zona visible, sin scroll para alcanzarlo. Mismo
+          patrón ya usado en otros modales de la app (ver
+          ProductFormModal.tsx): tarjeta acotada a `max-h-[85vh]` +
+          `flex flex-col`, header y footer `shrink-0` (fijos), y SOLO el
+          cuerpo central con `overflow-y-auto` -- nada del contenido,
+          colores, tallas ni lógica de variantes se tocó. */}
+      <div className="bg-[#FAF8F4] border border-[#E4DDD2] rounded-3xl max-w-md w-full max-h-[85vh] overflow-hidden shadow-2xl animate-in fade-in zoom-in-95 flex flex-col">
         {/* Header */}
-        <div className="p-4 border-b border-[#E4DDD2] flex items-center justify-between bg-[#F6F1E8]">
+        <div className="p-4 border-b border-[#E4DDD2] flex items-center justify-between bg-[#F6F1E8] shrink-0">
           <div className="flex items-center gap-2.5">
             <div className="w-8 h-8 rounded-xl bg-[#2F2A25] text-[#E8DCC8] flex items-center justify-center">
               <ShoppingBag className="w-4 h-4" />
@@ -75,14 +97,15 @@ export const VariantSelectorModal: React.FC<VariantSelectorModalProps> = ({
           </button>
         </div>
 
-        {/* Body */}
-        <div className="p-5 space-y-4">
+        {/* Body -- única región con scroll propio del modal. */}
+        <div className="p-5 space-y-4 overflow-y-auto">
           {/* Price & Image Preview */}
           <div className="flex gap-4 items-center bg-white p-3 rounded-2xl border border-[#E4DDD2]">
-            {product.imagenUrl && (
+            {product.imagenUrl && !imageLoadFailed && (
               <img
                 src={toDisplayableImageUrl(product.imagenUrl)}
                 alt={product.nombre}
+                onError={() => setImageLoadFailed(true)}
                 className="w-16 h-16 rounded-xl object-cover border border-[#E4DDD2]"
               />
             )}
@@ -214,7 +237,7 @@ export const VariantSelectorModal: React.FC<VariantSelectorModalProps> = ({
         </div>
 
         {/* Footer */}
-        <div className="p-4 border-t border-[#E4DDD2] bg-[#F6F1E8] flex gap-3">
+        <div className="p-4 border-t border-[#E4DDD2] bg-[#F6F1E8] flex gap-3 shrink-0">
           <button
             type="button"
             onClick={onClose}

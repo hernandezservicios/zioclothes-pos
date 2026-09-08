@@ -351,10 +351,13 @@ export const InstallmentsView: React.FC = () => {
         )}
       </div>
 
-      {/* Direct Abono Modal with Account Selector */}
+      {/* Direct Abono Modal with Account Selector.
+          AUDITORÍA (FASE -- responsive completo): overlay desplazable
+          (`overflow-y-auto` + `my-8`), mismo patrón que el resto de esta
+          auditoría -- sin tocar ningún campo ni la lógica de abonos. */}
       {directAbonoModalOpen && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-xs z-50 flex items-center justify-center p-4">
-          <div className="bg-[#FAF8F4] border border-[#E4DDD2] rounded-3xl max-w-md w-full p-5 space-y-4 shadow-2xl">
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-xs z-50 flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-[#FAF8F4] border border-[#E4DDD2] rounded-3xl max-w-md w-full p-5 space-y-4 shadow-2xl my-8">
             <h3 className="text-sm font-bold text-[#2F2A25] border-b border-[#E4DDD2] pb-2">
               Seleccionar Cuenta por Cobrar a Abonar
             </h3>

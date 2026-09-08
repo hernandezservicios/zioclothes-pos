@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { formatCurrency } from '../../utils/formatters';
 import { toDisplayableImageUrl } from '../../utils/imageUrl';
@@ -32,6 +32,25 @@ export const Navbar: React.FC<NavbarProps> = ({
   const { currentUser, logout, settings, canView, activeCashSession } = useAuth();
   const activeCash = activeCashSession;
 
+  // AUDITORÍA (FASE -- regresión de imágenes/logo): antes, si
+  // `settings.logoUrl` tenía un valor pero la imagen fallaba al cargar
+  // (Drive, red, permiso revocado -- cualquier causa real, no de este
+  // código), el `<img>` se quedaba ahí mostrando el ícono roto del
+  // navegador para siempre, porque la condición `settings.logoUrl ?
+  // <img> : <fallback>` nunca vuelve a evaluarse tras un fallo de red --
+  // solo reacciona a que el VALOR de la URL exista o no. `onError`
+  // (requisito 6 de la tarea: fallback visual para una imagen individual
+  // que realmente no cargue, sin inventar ni ocultar nada) cambia a el
+  // MISMO emblema "Z" que ya existía como fallback -- nunca se toca la
+  // URL real ni `settings.logoUrl` en sí.
+  const [logoLoadFailed, setLogoLoadFailed] = useState(false);
+  // Si el admin sube un logo nuevo (o corrige el existente) en la misma
+  // sesión, se vuelve a intentar cargarlo en vez de quedar atascado en
+  // el fallback de una URL vieja que ya falló.
+  useEffect(() => {
+    setLogoLoadFailed(false);
+  }, [settings.logoUrl]);
+
   return (
     <header id="navbar" className="no-print sticky top-0 z-30 bg-[#FAF8F4]/90 backdrop-blur-md border-b border-[#E4DDD2] px-4 sm:px-6 py-3 flex items-center justify-between">
       {/* Left: Hamburger & Brand */}
@@ -45,18 +64,29 @@ export const Navbar: React.FC<NavbarProps> = ({
           <Menu className="w-5 h-5" />
         </button>
 
+        {/* AUDITORÍA (FASE -- responsive completo): `min-w-0` en este
+            ítem flex + `truncate` en los dos textos de abajo -- sin
+            esto, un nombre de negocio largo configurado en Configuración
+            (ahora dinámico, ver Sidebar.tsx) no tenía forma de encogerse
+            y podía empujar el resto del header (POS/notificaciones/
+            usuario) fuera de su lugar en pantallas angostas. Con el
+            nombre real y corto de la instalación actual esto no se
+            notaba, pero es la misma clase de bug (ítem flex sin
+            min-w-0) que el resto de esta auditoría -- se corrige aquí
+            de forma preventiva, sin tocar tamaño, posición ni logo. */}
         <div
           onClick={() => onNavigate('dashboard')}
-          className="cursor-pointer flex items-center gap-2.5"
+          className="cursor-pointer flex items-center gap-2.5 min-w-0"
         >
           {/* FASE 3 (logo de empresa): si hay logo personalizado configurado
               (settings.logoUrl, hoja Configuracion vía system.getSettings),
               se muestra en vez del emblema "Z" del sistema -- fallback
               automático al emblema si no hay logo. */}
-          {settings.logoUrl ? (
+          {settings.logoUrl && !logoLoadFailed ? (
             <img
               src={toDisplayableImageUrl(settings.logoUrl)}
               alt={settings.nombreNegocio}
+              onError={() => setLogoLoadFailed(true)}
               className="w-9 h-9 rounded-2xl object-cover shadow-xs"
             />
           ) : (
@@ -64,11 +94,11 @@ export const Navbar: React.FC<NavbarProps> = ({
               <span className="font-serif font-bold text-lg text-[#E8DCC8] tracking-tighter">Z</span>
             </div>
           )}
-          <div>
-            <span className="font-serif font-bold text-base tracking-tight text-[#2F2A25] block leading-none">
+          <div className="min-w-0">
+            <span className="font-serif font-bold text-base tracking-tight text-[#2F2A25] block leading-none truncate">
               {settings.nombreNegocio}
             </span>
-            <span className="text-[10px] uppercase tracking-wider text-[#756E65] font-semibold">
+            <span className="text-[10px] uppercase tracking-wider text-[#756E65] font-semibold truncate block">
               Boutique POS
             </span>
           </div>

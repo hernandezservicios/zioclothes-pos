@@ -380,10 +380,16 @@ describe('POSView -- cliente nuevo queda seleccionado automáticamente', () => {
       expect((screen.getByRole('combobox', { name: 'Cliente' }) as HTMLSelectElement).value).toBe('CLI-NEW-009');
     });
 
-    // Continuar al cobro: el botón "Cobrar" abre PaymentModal con el
-    // selectedCustomer real ya establecido (mismo prop que usa el resto
-    // del checkout -- ver PaymentModal.test.tsx para el flujo de pago).
-    fireEvent.click(screen.getByText(/Cobrar/));
+    // Continuar al cobro: el botón "COBRAR ORDEN" de la columna de
+    // escritorio (dentro de renderCartPanel(), siempre presente en el
+    // DOM aquí -- el drawer móvil nunca se abre en esta prueba) abre
+    // PaymentModal con el selectedCustomer real ya establecido (mismo
+    // prop que usa el resto del checkout -- ver PaymentModal.test.tsx
+    // para el flujo de pago). AUDITORÍA (FASE -- corregir carrito móvil):
+    // ya NO se usa el botón "Cobrar (N)" de la barra flotante móvil --
+    // ese ahora abre el drawer del carrito en vez de ir directo a
+    // PaymentModal (ver POSView.responsive.test.tsx).
+    fireEvent.click(screen.getByText('COBRAR ORDEN'));
     await waitFor(() => expect(screen.getByText('Cobro de Venta')).toBeInTheDocument());
     // "Cliente Rápido" también aparece en el texto del <option> del select
     // ("Cliente Rápido (...)") -- se acota al <span> del encabezado del
@@ -418,7 +424,9 @@ describe('POSView -- cliente nuevo queda seleccionado automáticamente', () => {
       expect((screen.getByRole('combobox', { name: 'Cliente' }) as HTMLSelectElement).value).toBe('CLI-NEW-010');
     });
 
-    fireEvent.click(screen.getByText(/Cobrar/));
+    // AUDITORÍA (FASE -- corregir carrito móvil): botón de la columna de
+    // escritorio (ver comentario equivalente arriba en este archivo).
+    fireEvent.click(screen.getByText('COBRAR ORDEN'));
     await waitFor(() => expect(screen.getByText('Cobro de Venta')).toBeInTheDocument());
 
     // Pago exacto en efectivo (RD$800, el total del carrito sembrado).

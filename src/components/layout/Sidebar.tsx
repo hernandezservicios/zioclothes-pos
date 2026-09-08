@@ -1,4 +1,4 @@
-import React, { useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { toDisplayableImageUrl } from '../../utils/imageUrl';
 import { useScrollEdgeIndicators } from '../../hooks/useScrollEdgeIndicators';
@@ -52,6 +52,16 @@ export const Sidebar: React.FC<SidebarProps> = ({
   // falta guardar un campo `permission` aparte por ítem: una sola llamada
   // centralizada decide, sin ninguna regla por rol hardcodeada aquí.
   const { canView, settings } = useAuth();
+
+  // AUDITORÍA (FASE -- regresión de imágenes/logo): mismo patrón que
+  // Navbar.tsx -- `onError` cae al MISMO emblema "Z" ya existente en
+  // vez de dejar el ícono roto del navegador si `settings.logoUrl` falla
+  // al cargar por cualquier causa real (Drive, red, permiso). Se
+  // reintenta automáticamente si el logo configurado cambia.
+  const [logoLoadFailed, setLogoLoadFailed] = useState(false);
+  useEffect(() => {
+    setLogoLoadFailed(false);
+  }, [settings.logoUrl]);
 
   // AJUSTE VISUAL -- scrollbar nativo oculto + flechas discretas ↑/↓ (ver
   // useScrollEdgeIndicators.ts / ScrollEdgeArrows.tsx / .no-native-scrollbar
@@ -151,13 +161,22 @@ export const Sidebar: React.FC<SidebarProps> = ({
         <div className="p-4 border-b border-[#E4DDD2] flex items-center justify-between">
           <div className="flex items-center gap-2.5">
             {/* FASE 3 (logo de empresa): fallback automático al emblema "Z"
-                del sistema si la empresa no configuró un logo propio. El
-                texto "ZIO CLOTHES" de abajo permanece igual -- no se tocó
-                (no forma parte del alcance de esta fase). */}
-            {settings.logoUrl ? (
+                del sistema si la empresa no configuró un logo propio.
+                AUDITORÍA (FASE -- branding dinámico): el logo (`settings.
+                logoUrl`) YA venía de la configuración real desde la Fase 3
+                -- el único hardcodeo era el texto de abajo, un literal
+                "ZIO CLOTHES" que nunca leía `settings.nombreNegocio` pese
+                a que ese mismo `settings` (misma fuente que usa Navbar.tsx
+                -- ambos vienen de `useAuth()`) ya estaba disponible en este
+                componente. El subtítulo ("Moda & Confección") no es un
+                campo configurable hoy (Navbar tiene el suyo propio,
+                "Boutique POS", igual de fijo) -- por instrucción explícita
+                de la tarea, se deja exactamente igual. */}
+            {settings.logoUrl && !logoLoadFailed ? (
               <img
                 src={toDisplayableImageUrl(settings.logoUrl)}
                 alt={settings.nombreNegocio}
+                onError={() => setLogoLoadFailed(true)}
                 className="w-8 h-8 rounded-xl object-cover"
               />
             ) : (
@@ -166,7 +185,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               </div>
             )}
             <div>
-              <p className="font-serif font-bold text-sm text-[#2F2A25]">ZIO CLOTHES</p>
+              <p className="font-serif font-bold text-sm text-[#2F2A25]">{settings.nombreNegocio}</p>
               <p className="text-[10px] text-[#756E65] font-semibold">Moda & Confección</p>
             </div>
           </div>

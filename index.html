@@ -10,7 +10,23 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="ZIO CLOTHES" />
     <meta name="application-name" content="ZIO CLOTHES POS" />
-    <link rel="manifest" href="/shop/manifest.webmanifest" />
+    <!-- AUDITORÍA (FASE -- responsive completo, "Manifest: Syntax error"
+         en consola): este <link> manual duplicaba el que
+         `vite-plugin-pwa` YA inyecta automáticamente (confirmado en el
+         build real: dist/index.html trae ambos, apuntando al mismo
+         /shop/manifest.webmanifest). En `npm run dev`, el propio
+         middleware de Vite reescribe cualquier href absoluto ("/...")
+         para anteponerle `base` -- pero como este ya traía "/shop/"
+         escrito a mano, terminaba pidiendo "/shop/shop/manifest.
+         webmanifest" (confirmado con curl contra el dev server real),
+         que no existe y cae al fallback HTML de la SPA -- de ahí el
+         error de sintaxis al intentar parsearlo como JSON. En
+         producción (`npm run build` + `npm run preview`, verificado con
+         curl: content-type application/manifest+json, JSON válido) el
+         manifest real sigue funcionando exactamente igual porque lo
+         sirve el <link> que ya inyecta el plugin -- quitar este
+         duplicado manual no cambia nada en producción, solo evita el
+         intento de request roto en desarrollo. -->
     <link rel="icon" type="image/svg+xml" href="/shop/icons/favicon.svg" />
     <link rel="apple-touch-icon" href="/shop/icons/icon-192.svg" />
     <meta property="og:title" content="ZIO CLOTHES - Punto de Venta" />
