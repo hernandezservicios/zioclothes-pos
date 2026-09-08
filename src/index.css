@@ -1,7 +1,38 @@
 @import "tailwindcss";
 
 @page {
-  size: 80mm auto;
+  /* FIX (CORRECCIÓN QUIRÚRGICA -- formato de impresión de recibos):
+     "80mm auto" es un valor INVÁLIDO para el descriptor `size` de
+     `@page`. La especificación CSS Paged Media solo permite `size:
+     <length>{1,2}` (una longitud -- página cuadrada -- o dos, ancho y
+     alto) O la palabra clave `auto` SOLA O un nombre de tamaño de
+     página (`A4`, `letter`, etc.) -- nunca una longitud MEZCLADA con
+     `auto`. Confirmado en vivo inspeccionando `document.styleSheets` en
+     Chrome real: la regla aplicada llega como `@page { margin: 0mm; }`
+     -- el navegador descarta SILENCIOSAMENTE todo el descriptor `size`
+     por ser inválido, y punto (nada en consola lo avisa). Sin ningún
+     `size` aplicado, el motor de impresión cae al tamaño de página por
+     DEFECTO del navegador -- confirmado con una captura PDF real
+     (`Page.printToPDF` de Chrome DevTools Protocol): el `/MediaBox` del
+     PDF resultante es `[0 0 612 792]` = 8.5in x 11in = Carta (Letter),
+     EXACTAMENTE el síntoma reportado ("imprime como una página vertical
+     completa tipo A4/Carta"). Esta línea NO cambió en ningún momento
+     durante las fases de auditoría responsive/imágenes de este mismo
+     trabajo (`git diff` contra el commit donde se agregó originalmente
+     el CSS de impresión -- 0 diferencias) -- es un bug preexistente,
+     nunca antes detectado, no introducido por esas fases.
+
+     Corrección: dos longitudes válidas (ancho fijo de 80mm + un alto
+     FIJO generosamente grande) -- el patrón estándar para impresoras
+     térmicas de rollo continuo en CSS para web (la spec de Paged Media
+     no tiene una forma válida de decir "ancho fijo, alto auténticamente
+     automático"). El driver de la mayoría de impresoras térmicas de
+     80mm corta el rollo en el punto donde termina el contenido real
+     -- el espacio sobrante de estos 297mm declarados nunca se imprime
+     físicamente de más, es solo el límite superior que le da margen a
+     cualquier recibo, por largo que sea, sin generar una segunda
+     página. */
+  size: 80mm 297mm;
   margin: 0mm;
 }
 
@@ -50,6 +81,49 @@
   */
   body * {
     visibility: hidden !important;
+  }
+
+  /* FIX (CORRECCIÓN QUIRÚRGICA -- formato de impresión de recibos,
+     causa raíz #2): las fases de auditoría responsive de App.tsx
+     introdujeron -- solo para la vista en PANTALLA -- una altura FIJA
+     de raíz (`h-dvh`, antes `min-h-screen`, que sí dejaba crecer
+     libremente) y un wrapper NUEVO `position: relative` alrededor de
+     `<main>` (necesario para posicionar ScrollEdgeArrows, que no
+     existía antes de esas fases -- confirmado con `git show
+     2d915b5:src/App.tsx`: en esa base, antes de cualquier cambio de
+     este trabajo, `<main>` no tenía ningún wrapper). Nada de esto se
+     tocó a propósito para impresión -- simplemente heredaba sin querer
+     a la vista de impresión, con dos efectos reales medidos con Chrome
+     real (`Emulation.setEmulatedMedia('print')` + `getBoundingClientRect`):
+
+     1. Ese wrapper `relative` pasa a ser el "containing block" del
+        ticket (`position: absolute; top:0; left:0`, más abajo) en
+        cuanto el `.fixed.inset-0` del modal del recibo -- su
+        containing block normal -- se resetea a `position: static` para
+        imprimir (ver regla más abajo). Antes de que este wrapper
+        existiera, esa búsqueda de containing block llegaba hasta la
+        página misma; ahora se detiene antes, en una caja con forma de
+        PANTALLA, no de recibo.
+     2. Esa misma caja mide, en la práctica, tan alto como toda la
+        pantalla (heredado de `h-dvh` en cascada vía `flex-1`) --
+        confirmado midiendo 900px con el viewport emulado a 900px de
+        alto -- en vez de encogerse al contenido real del recibo.
+
+     Se neutraliza aquí ÚNICAMENTE en impresión (root, fila
+     Sidebar+main, y el wrapper de ScrollEdgeArrows -- los 3 niveles de
+     esa cadena) para que vuelvan a comportarse exactamente como antes
+     de que existieran `h-dvh`/el wrapper: alto según contenido,
+     containing block real = la página. Ninguna clase de App.tsx se
+     toca -- nada de esto afecta la pantalla, todo vive dentro de
+     `@media print`. */
+  div:has(> #navbar),
+  #navbar + div,
+  div:has(> main.no-native-scrollbar) {
+    position: static !important;
+    height: auto !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    overflow: visible !important;
   }
 
   .receipt-ticket,
