@@ -36,6 +36,19 @@
   margin: 0mm;
 }
 
+/* FIX (CORRECCIÓN QUIRÚRGICA -- margen superior por defecto de
+   impresión): algunos motores de impresión (notablemente el cuadro de
+   diálogo de impresión NATIVO de Chrome/Edge -- distinto del PDF que
+   genera `Page.printToPDF` de Chrome DevTools Protocol, que sí honra
+   `@page { margin: 0mm }` de arriba tal cual) aplican su propio margen
+   "Predeterminado" a la PRIMERA página salvo que se declare
+   explícitamente `@page :first`. `size`/`margin` ya están correctos en
+   el `@page` de arriba -- esto solo refuerza el mismo `margin: 0` para
+   ese caso especial de la primera página, sin cambiar nada más. */
+@page :first {
+  margin: 0mm;
+}
+
 /* AJUSTE VISUAL -- ocultar el scrollbar nativo, ÚNICAMENTE en los dos
    paneles con scroll real y visible de la app: el <nav
    className="... overflow-y-auto"> del Sidebar
@@ -124,6 +137,46 @@
     min-height: 0 !important;
     max-height: none !important;
     overflow: visible !important;
+  }
+
+  /* FIX (CORRECCIÓN QUIRÚRGICA -- margen superior por defecto de
+     impresión, causa raíz encontrada): cada modal de recibo/voucher
+     (ReceiptModal.tsx, CreditNoteReceiptModal.tsx,
+     InstallmentReceiptModal.tsx, InstallmentModal.tsx, CashView.tsx)
+     envuelve su ticket en 1-3 divs intermedios de "chrome" del modal EN
+     PANTALLA (tarjeta con `my-8`/`my-auto`, área con `p-6`/`p-4`,
+     envoltorio blanco con `p-2`) que la regla `.fixed.inset-0` de más
+     abajo -- pensada para el overlay MÁS EXTERNO -- nunca reseteaba,
+     porque son un nivel (o dos) más adentro, no ese mismo elemento.
+     Aunque el ticket ya se posiciona con `position:absolute; top:0;
+     left:0` (más abajo) -- lo que en Chromium ya lo desprende del
+     padding/margin de esos ancestros -- Firefox y Safari tienen
+     diferencias documentadas en cómo manejan `position:absolute` dentro
+     de un árbol oculto-y-reexhibido vía `visibility` para impresión, así
+     que depender solo de eso no es robusto entre navegadores (requisito
+     explícito de esta corrección: "adaptable a Chrome, Edge, Firefox y
+     Safari"). Se resetea aquí, de forma genérica, CUALQUIER ancestro real
+     del ticket (a cualquier profundidad, sin necesidad de listar cada
+     div de cada componente) -- `:has()` sin `>` alcanza los 5
+     componentes por igual con una sola regla. Nunca toca al ticket
+     mismo ni a nada DENTRO de él (`:has()` solo selecciona ANCESTROS del
+     selector que recibe, nunca al elemento que lo cumple) -- el padding
+     interno del recibo (3mm/2.5mm, definido más abajo) y todo su
+     contenido/tipografía permanecen intactos. */
+  body *:has(#thermal-receipt-content),
+  body *:has(.receipt-ticket),
+  body *:has(#installment-thermal-receipt-modal),
+  body *:has(#abono-thermal-voucher),
+  body *:has(#thermal-shift-closure-voucher) {
+    margin: 0 !important;
+    padding: 0 !important;
+    /* Defensivo (checklist explícito de esta corrección: "transform"):
+       las tarjetas de estos modales usan `animate-in fade-in
+       zoom-in-95` (animación de entrada en pantalla, `transform:
+       scale(...)`) -- normalmente ya termina mucho antes de que alguien
+       alcance a pulsar "Imprimir", pero se neutraliza aquí explícitamente
+       para impresión por si algún motor conserva un valor residual. */
+    transform: none !important;
   }
 
   .receipt-ticket,

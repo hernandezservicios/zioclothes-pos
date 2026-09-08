@@ -59,8 +59,23 @@ export function printThermalElement(elementId: string = 'thermal-receipt-content
               <meta charset="utf-8">
               <title>${title}</title>
               <style>
+                /* FIX (CORRECCIÓN QUIRÚRGICA -- margen superior de impresión):
+                   este es un documento COMPLETAMENTE APARTE de la app principal
+                   (la ventana emergente que se usa cuando la app corre dentro de
+                   un iframe -- ver isIframe más arriba) -- src/index.css nunca
+                   se carga aquí. Tenía el MISMO bug que index.css tenía antes de
+                   esta corrección: "80mm auto" es un valor inválido para el
+                   descriptor size de @page (la spec de CSS Paged Media solo
+                   permite una o dos longitudes, o auto sola, nunca mezcladas) --
+                   el navegador lo descarta en silencio y cae al tamaño de página
+                   por defecto (Carta/A4). Misma corrección aplicada aquí: dos
+                   longitudes válidas. @page :first refuerza el margen 0 en la
+                   primera página para los motores que le dan trato especial. */
                 @page {
-                  size: 80mm auto;
+                  size: 80mm 297mm;
+                  margin: 0mm;
+                }
+                @page :first {
                   margin: 0mm;
                 }
                 *, *::before, *::after {
@@ -75,8 +90,8 @@ export function printThermalElement(elementId: string = 'thermal-receipt-content
                 html, body {
                   width: 80mm;
                   max-width: 80mm;
-                  margin: 0 auto;
-                  padding: 2mm 1mm;
+                  margin: 0 !important;
+                  padding: 0 !important;
                   background-color: #ffffff !important;
                   color: #000000 !important;
                   font-family: Arial, Helvetica, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -86,6 +101,15 @@ export function printThermalElement(elementId: string = 'thermal-receipt-content
                   font-size: 11.5px;
                   line-height: 1.35;
                 }
+                /* FIX: html,body traía padding: 2mm 1mm -- ese 2mm DE
+                   ARRIBA era espacio superior externo real, distinto del padding
+                   interno del propio ticket (que ya trae su propio padding en
+                   los estilos inline de ReceiptTicket.tsx/el resto de tickets --
+                   elem.outerHTML se inyecta tal cual, con esos estilos
+                   inline intactos). Se quita de aquí (arriba) para que el único
+                   espacio antes del contenido sea el padding interno del propio
+                   recibo, nunca uno adicional del documento contenedor -- el
+                   mismo criterio que ya se aplicó en index.css. */
                 .no-print { display: none !important; }
                 table {
                   width: 100%;
@@ -96,9 +120,10 @@ export function printThermalElement(elementId: string = 'thermal-receipt-content
                   color: #000000 !important;
                 }
                 @media print {
-                  body {
+                  html, body {
                     width: 80mm !important;
-                    margin: 0 auto !important;
+                    margin: 0 !important;
+                    padding: 0 !important;
                   }
                   .no-print { display: none !important; }
                 }
